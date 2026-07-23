@@ -1,4 +1,6 @@
 import type { Handle } from '@sveltejs/kit';
+import { sequence } from '@sveltejs/kit/hooks';
+import { withClerkHandler } from 'svelte-clerk/server';
 import { getTextDirection } from '$lib/paraglide/runtime';
 import { paraglideMiddleware } from '$lib/paraglide/server';
 
@@ -10,4 +12,4 @@ const handleParaglide: Handle = ({ event, resolve }) => paraglideMiddleware(even
 	});
 });
 
-export const handle: Handle = handleParaglide;
+export const handle: Handle = sequence(withClerkHandler(), handleParaglide);

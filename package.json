@@ -66,6 +66,8 @@
 	"dependencies": {
 		"@clerk/clerk-js": "^6.25.6",
 		"@clerk/ui": "^1.25.7",
+		"convex": "^1.42.3",
+		"convex-svelte": "^0.14.0",
 		"svelte-clerk": "^1.1.11"
 	}
 }

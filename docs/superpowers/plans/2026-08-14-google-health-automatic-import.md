@@ -451,7 +451,7 @@ expect(() => decryptRefreshToken(encrypted, "user-b", TEST_KEY)).toThrow();
 
 - [ ] **Step 2: Write failing model tests**
 
-With convex-test, verify OAuth state is found by digest, expires after 10 minutes, is consumed exactly once, connection upsert increments `generation`, cursor initialization creates one cursor for every scope-covered registry entry, and public status never contains ciphertext/nonce/tag.
+With convex-test, verify OAuth state is found by digest, expires after 10 minutes, is consumed exactly once, connection upsert increments `generation`, cursor initialization creates one cursor for every scope-covered registry entry, reconnect requeues stale-generation cursors without duplicating them, and public status never contains ciphertext/nonce/tag. Cover fail-closed partial token envelopes, generation-guarded error writes, a same-key-version reconnect race, and a complete old-key read → re-encrypt → guarded persistence flow.
 
 - [ ] **Step 3: Run focused tests and verify failure**
 
@@ -469,7 +469,7 @@ Use AES-256-GCM with a fresh 12-byte nonce and AAD `${userId}:${keyVersion}`. St
 
 - [ ] **Step 5: Implement indexed connection/state/cursor mutations**
 
-Every function has explicit validators. `consumeOAuthState` queries `by_stateDigest` and patches `consumedAt` in the same mutation; it throws for missing, expired, or consumed records. `saveConnection` indexes by user, preserves existing Google records on reconnect, updates the encrypted envelope and `healthUserId`, clears redacted errors, and increments `generation`. `initializeCursors` creates only missing `backfill` cursors for granted scopes.
+Every function has explicit validators. `consumeOAuthState` queries `by_stateDigest` and patches `consumedAt` in the same mutation; it throws for missing, expired, or consumed records. `saveConnection` indexes by user, preserves existing Google records on reconnect, updates the encrypted envelope and `healthUserId`, clears redacted errors, and increments `generation`. `getConnectionForSync` returns a complete token envelope or `null` and rejects partial storage. `initializeCursors` creates missing `backfill` cursors for granted scopes and requeues scope-covered cursors from a stale generation with cleared continuation/window state. Error writes require the expected active generation. Token-envelope replacement compares the expected generation and complete prior envelope before persisting a rotated envelope.
 
 - [ ] **Step 6: Run tests and type checking**
 
@@ -619,7 +619,7 @@ For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRol
 
 - [ ] **Step 6: Implement the cursor worker**
 
-The Node action loads the connection/cursor internally, rejects stale generation or inactive status, decrypts and refreshes the token, fetches one page/window, normalizes up to the page cap, applies the page, updates the run record, and schedules the next page with `ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, ...)`. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
+The action loads the connection/cursor internally, rejects stale generation or inactive status, decrypts the token through `rotateRefreshTokenEnvelope`, and persists any old-key replacement through the generation-and-envelope-guarded `replaceTokenEnvelope` before refreshing the access token. It then fetches one page/window, normalizes up to the page cap, applies the page, updates the run record, and schedules the next page with `ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, ...)`. Every connection error write carries the expected generation. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
 
 - [ ] **Step 7: Run import tests and type checking**
 

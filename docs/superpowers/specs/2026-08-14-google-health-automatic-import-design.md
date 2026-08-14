@@ -113,19 +113,24 @@ Google credentials use explicit deployment environment variables rather than the
 
 - `GOOGLE_HEALTH_CLIENT_ID`
 - `GOOGLE_HEALTH_CLIENT_SECRET`
-- `GOOGLE_HEALTH_PROJECT_NUMBER`
-- `GOOGLE_HEALTH_SUBSCRIBER_ID`
+- `GOOGLE_HEALTH_REDIRECT_URI`
+- `HOMEFIT_APP_URL`
 - `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION`
 - `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS` (optional JSON map of old version to key)
 - any webhook audience or verification values required by the Google subscription configuration
 
-Refresh tokens are encrypted with AES-GCM in a Node action before being passed to a persistence mutation. The stored envelope contains ciphertext, nonce, authentication tag, and key version. Decryption only occurs in the Node action immediately before a token refresh. Tokens and secrets are redacted from logs and user-visible errors.
+`GOOGLE_HEALTH_PROJECT_NUMBER` and `GOOGLE_HEALTH_SUBSCRIBER_ID` are setup-only values used by the documented subscriber-management commands; application runtime code does not require them in the Convex deployment environment.
+
+Refresh tokens are encrypted with AES-GCM in a Convex action before being passed to a persistence mutation. The stored envelope contains ciphertext, nonce, authentication tag, and key version. Decryption only occurs in an action immediately before a token refresh. Tokens and secrets are redacted from logs and user-visible errors.
 
 Key rotation is supported by the versioned envelope: new writes use the current
 version, old envelopes can be decrypted from the optional previous-key map, and
 successful old-key reads schedule re-encryption with the current key.
+The replacement mutation compares the connection generation and complete
+previous envelope so a stale worker cannot overwrite credentials from a newer
+reconnect.
 
 ## Data Model
 

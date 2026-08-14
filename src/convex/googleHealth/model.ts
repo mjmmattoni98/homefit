@@ -1,8 +1,9 @@
 import { v } from 'convex/values';
 import { internalMutation, internalQuery, query } from '../_generated/server';
 import { requireUserId } from '../helpers';
+import type { EncryptedTokenEnvelope } from './crypto';
 import { METRIC_DEFINITIONS } from './registry';
-import { connectionStatusValidator } from './validators';
+import { type ConnectionStatus, connectionStatusValidator } from './validators';
 
 const OAUTH_STATE_LIFETIME_MS = 10 * 60 * 1000;
 
@@ -33,11 +34,53 @@ const connectionForSyncValidator = v.object({
 	status: connectionStatusValidator,
 	grantedScopes: v.array(v.string()),
 	generation: v.number(),
-	encryptedRefreshToken: v.optional(v.string()),
-	tokenNonce: v.optional(v.string()),
-	tokenTag: v.optional(v.string()),
-	tokenKeyVersion: v.optional(v.string())
+	tokenEnvelope: v.union(tokenEnvelopeValidator, v.null())
 });
+
+type StoredTokenFields = {
+	encryptedRefreshToken?: string;
+	tokenNonce?: string;
+	tokenTag?: string;
+	tokenKeyVersion?: string;
+};
+
+function readStoredTokenEnvelope(connection: StoredTokenFields): EncryptedTokenEnvelope | null {
+	const encryptedRefreshToken = connection.encryptedRefreshToken;
+	const tokenNonce = connection.tokenNonce;
+	const tokenTag = connection.tokenTag;
+	const tokenKeyVersion = connection.tokenKeyVersion;
+	if (
+		encryptedRefreshToken === undefined &&
+		tokenNonce === undefined &&
+		tokenTag === undefined &&
+		tokenKeyVersion === undefined
+	) {
+		return null;
+	}
+	if (
+		encryptedRefreshToken === undefined ||
+		tokenNonce === undefined ||
+		tokenTag === undefined ||
+		tokenKeyVersion === undefined
+	) {
+		throw new Error('Incomplete Google Health token envelope');
+	}
+
+	return { encryptedRefreshToken, tokenNonce, tokenTag, tokenKeyVersion };
+}
+
+function isSyncableStatus(status: ConnectionStatus): boolean {
+	return status === 'backfilling' || status === 'active' || status === 'delayed';
+}
+
+function tokenEnvelopesEqual(left: EncryptedTokenEnvelope, right: EncryptedTokenEnvelope): boolean {
+	return (
+		left.encryptedRefreshToken === right.encryptedRefreshToken &&
+		left.tokenNonce === right.tokenNonce &&
+		left.tokenTag === right.tokenTag &&
+		left.tokenKeyVersion === right.tokenKeyVersion
+	);
+}
 
 export const createOAuthState = internalMutation({
 	args: {
@@ -152,14 +195,7 @@ export const getConnectionForSync = internalQuery({
 			status: connection.status,
 			grantedScopes: connection.grantedScopes,
 			generation: connection.generation,
-			...(connection.encryptedRefreshToken === undefined
-				? {}
-				: { encryptedRefreshToken: connection.encryptedRefreshToken }),
-			...(connection.tokenNonce === undefined ? {} : { tokenNonce: connection.tokenNonce }),
-			...(connection.tokenTag === undefined ? {} : { tokenTag: connection.tokenTag }),
-			...(connection.tokenKeyVersion === undefined
-				? {}
-				: { tokenKeyVersion: connection.tokenKeyVersion })
+			tokenEnvelope: readStoredTokenEnvelope(connection)
 		};
 	}
 });
@@ -190,6 +226,19 @@ export const initializeCursors = internalMutation({
 				)
 				.unique();
 			if (existing) {
+				if (existing.generation !== connection.generation) {
+					await ctx.db.patch('googleHealthSyncCursors', existing._id, {
+						status: 'queued',
+						pageToken: undefined,
+						windowStart: undefined,
+						windowEnd: undefined,
+						watermark: undefined,
+						syncId: `backfill:${connection.generation}:${definition.dataType}`,
+						attempt: 0,
+						generation: connection.generation,
+						updatedAt
+					});
+				}
 				continue;
 			}
 
@@ -214,15 +263,20 @@ export const initializeCursors = internalMutation({
 export const setConnectionError = internalMutation({
 	args: {
 		connectionId: v.id('googleHealthConnections'),
+		expectedGeneration: v.number(),
 		status: v.union(v.literal('delayed'), v.literal('action_required')),
 		lastErrorCode: v.string(),
 		nextRetryAt: v.optional(v.number())
 	},
-	returns: v.null(),
+	returns: v.boolean(),
 	handler: async (ctx, args) => {
 		const connection = await ctx.db.get('googleHealthConnections', args.connectionId);
-		if (!connection) {
-			throw new Error('Google Health connection not found');
+		if (
+			!connection ||
+			connection.generation !== args.expectedGeneration ||
+			!isSyncableStatus(connection.status)
+		) {
+			return false;
 		}
 
 		const safeErrorCode = /^[a-z0-9_.-]{1,80}$/.test(args.lastErrorCode)
@@ -238,28 +292,33 @@ export const setConnectionError = internalMutation({
 					: 'Google Health is temporarily unavailable',
 			nextRetryAt: args.nextRetryAt
 		});
-		return null;
+		return true;
 	}
 });
 
 export const replaceTokenEnvelope = internalMutation({
 	args: {
 		connectionId: v.id('googleHealthConnections'),
-		expectedKeyVersion: v.string(),
-		envelope: tokenEnvelopeValidator
+		expectedGeneration: v.number(),
+		expectedEnvelope: tokenEnvelopeValidator,
+		replacementEnvelope: tokenEnvelopeValidator
 	},
 	returns: v.boolean(),
 	handler: async (ctx, args) => {
 		const connection = await ctx.db.get('googleHealthConnections', args.connectionId);
-		if (
-			!connection ||
-			connection.encryptedRefreshToken === undefined ||
-			connection.tokenKeyVersion !== args.expectedKeyVersion
-		) {
+		if (!connection || connection.generation !== args.expectedGeneration) {
+			return false;
+		}
+		if (!isSyncableStatus(connection.status)) {
 			return false;
 		}
 
-		await ctx.db.patch('googleHealthConnections', connection._id, args.envelope);
+		const storedEnvelope = readStoredTokenEnvelope(connection);
+		if (storedEnvelope === null || !tokenEnvelopesEqual(storedEnvelope, args.expectedEnvelope)) {
+			return false;
+		}
+
+		await ctx.db.patch('googleHealthConnections', connection._id, args.replacementEnvelope);
 		return true;
 	}
 });

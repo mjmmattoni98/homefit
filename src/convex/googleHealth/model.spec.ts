@@ -67,7 +67,7 @@ const saveConnection = internalMutation<
 >('googleHealth/model:saveConnection');
 const initializeCursors = internalMutation<
 	{ connectionId: Id<'googleHealthConnections'> },
-	{ created: number; total: number }
+	{ created: number; total: number; firstCursorId: Id<'googleHealthSyncCursors'> | null }
 >('googleHealth/model:initializeCursors');
 const setConnectionError = internalMutation<
 	{
@@ -246,13 +246,16 @@ describe('Google Health connection model', () => {
 		const t = convexTest(schema, modules);
 		const { connectionId } = await t.mutation(saveConnection, connectionArgs());
 
-		await expect(t.mutation(initializeCursors, { connectionId })).resolves.toEqual({
+		const firstInitialization = await t.mutation(initializeCursors, { connectionId });
+		expect(firstInitialization).toEqual({
 			created: 40,
-			total: 40
+			total: 40,
+			firstCursorId: expect.any(String)
 		});
 		await expect(t.mutation(initializeCursors, { connectionId })).resolves.toEqual({
 			created: 0,
-			total: 40
+			total: 40,
+			firstCursorId: firstInitialization.firstCursorId
 		});
 		await t.run(async (ctx) => {
 			for (const dataType of ['sleep', 'steps']) {
@@ -280,11 +283,11 @@ describe('Google Health connection model', () => {
 		vi.setSystemTime(NOW + 1_000);
 		await expect(
 			t.mutation(initializeCursors, { connectionId: reconnected.connectionId })
-		).resolves.toEqual({ created: 0, total: 1 });
+		).resolves.toMatchObject({ created: 0, total: 1, firstCursorId: expect.any(String) });
 		vi.setSystemTime(NOW + 2_000);
 		await expect(
 			t.mutation(initializeCursors, { connectionId: reconnected.connectionId })
-		).resolves.toEqual({ created: 0, total: 1 });
+		).resolves.toMatchObject({ created: 0, total: 1, firstCursorId: expect.any(String) });
 		const cursors = await t.run(async (ctx) =>
 			ctx.db
 				.query('googleHealthSyncCursors')

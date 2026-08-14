@@ -202,7 +202,11 @@ export const getConnectionForSync = internalQuery({
 
 export const initializeCursors = internalMutation({
 	args: { connectionId: v.id('googleHealthConnections') },
-	returns: v.object({ created: v.number(), total: v.number() }),
+	returns: v.object({
+		created: v.number(),
+		total: v.number(),
+		firstCursorId: v.union(v.id('googleHealthSyncCursors'), v.null())
+	}),
 	handler: async (ctx, args) => {
 		const connection = await ctx.db.get('googleHealthConnections', args.connectionId);
 		if (!connection) {
@@ -214,6 +218,7 @@ export const initializeCursors = internalMutation({
 			grantedScopes.has(definition.scope)
 		);
 		let created = 0;
+		let firstCursorId = null;
 		const updatedAt = Date.now();
 		for (const definition of definitions) {
 			const existing = await ctx.db
@@ -226,6 +231,7 @@ export const initializeCursors = internalMutation({
 				)
 				.unique();
 			if (existing) {
+				firstCursorId ??= existing._id;
 				if (existing.generation !== connection.generation) {
 					await ctx.db.patch('googleHealthSyncCursors', existing._id, {
 						status: 'queued',
@@ -242,7 +248,7 @@ export const initializeCursors = internalMutation({
 				continue;
 			}
 
-			await ctx.db.insert('googleHealthSyncCursors', {
+			const cursorId = await ctx.db.insert('googleHealthSyncCursors', {
 				connectionId: connection._id,
 				userId: connection.userId,
 				dataType: definition.dataType,
@@ -253,10 +259,11 @@ export const initializeCursors = internalMutation({
 				generation: connection.generation,
 				updatedAt
 			});
+			firstCursorId ??= cursorId;
 			created += 1;
 		}
 
-		return { created, total: definitions.length };
+		return { created, total: definitions.length, firstCursorId };
 	}
 });
 

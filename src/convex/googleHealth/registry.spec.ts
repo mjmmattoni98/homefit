@@ -20,7 +20,7 @@ const EXPECTED_DEFINITION_ROWS = [
 	'daily-vo2-max|dailyVo2Max|daily|activity|activity_and_fitness|reconcile|false|latest|mL/kg/min',
 	'distance|distance|interval|activity|activity_and_fitness|reconcile|true|sum|m',
 	'electrocardiogram|electrocardiogram|session|vitals|ecg|list|false|latest|',
-	'exercise|exercise|session|activity|activity_and_fitness|reconcile|true|duration|',
+	'exercise|exercise|session|activity|activity_and_fitness|reconcile|true|duration|min',
 	'floors|floors|interval|activity|activity_and_fitness|reconcile|true|sum|floors',
 	'food|food|reference|nutrition|nutrition|list|false|latest|',
 	'food-measurement-unit|foodMeasurementUnit|reference|nutrition|nutrition|list|false|latest|',
@@ -29,14 +29,14 @@ const EXPECTED_DEFINITION_ROWS = [
 	'height|height|sample|body|health_metrics_and_measurements|reconcile|true|latest|m',
 	'hydration-log|hydrationLog|session|nutrition|nutrition|reconcile|true|sum|mL',
 	'irregular-rhythm-notification|irregularRhythmNotification|session|vitals|irn|list|false|latest|',
-	'nutrition-log|nutritionLog|sample|nutrition|nutrition|reconcile|true|sum|kcal',
+	'nutrition-log|nutritionLog|session|nutrition|nutrition|reconcile|true|sum|kcal',
 	'oxygen-saturation|oxygenSaturation|sample|vitals|health_metrics_and_measurements|reconcile|false|average|%',
 	'respiratory-rate-sleep-summary|respiratoryRateSleepSummary|sample|vitals|health_metrics_and_measurements|reconcile|true|average|breaths/min',
 	'run-vo2-max|runVo2Max|sample|activity|activity_and_fitness|reconcile|true|latest|mL/kg/min',
 	'sedentary-period|sedentaryPeriod|interval|activity|activity_and_fitness|reconcile|true|duration|',
-	'sleep|sleep|session|sleep|sleep|reconcile|true|duration|',
+	'sleep|sleep|session|sleep|sleep|reconcile|true|duration|min',
 	'steps|steps|interval|activity|activity_and_fitness|reconcile|true|sum|steps',
-	'swim-lengths-data|swimLengthsData|interval|activity|activity_and_fitness|reconcile|false|sum|lengths',
+	'swim-lengths-data|swimLengthsData|interval|activity|activity_and_fitness|reconcile|false|sum|strokes',
 	'time-in-heart-rate-zone|timeInHeartRateZone|interval|activity|activity_and_fitness|reconcile|true|duration|',
 	'total-calories|totalCalories|daily|activity|activity_and_fitness|dailyRollUp|false|sum|kcal',
 	'vo2-max|vo2Max|sample|activity|activity_and_fitness|reconcile|false|latest|mL/kg/min',
@@ -116,6 +116,61 @@ describe('Google Health metric registry', () => {
 
 	it('preserves every endpoint, payload, display, aggregation, and unit classification', () => {
 		expect(METRIC_DEFINITIONS.map(serializeDefinition)).toEqual(EXPECTED_DEFINITION_ROWS);
+	});
+
+	it('owns exact source-unit conversion and semantic identity metadata', () => {
+		expect(getMetricDefinition('weight')).toMatchObject({
+			primaryValueStrategy: { path: ['weightGrams'], multiplier: 0.001 },
+			identityPaths: []
+		});
+		expect(getMetricDefinition('height')).toMatchObject({
+			primaryValueStrategy: { path: ['heightMillimeters'], multiplier: 0.001 }
+		});
+		expect(getMetricDefinition('distance')).toMatchObject({
+			primaryValueStrategy: { path: ['millimeters'], multiplier: 0.001 }
+		});
+		expect(getMetricDefinition('altitude')).toMatchObject({
+			primaryValueStrategy: { path: ['gainMillimeters'], multiplier: 0.001 }
+		});
+		expect(getMetricDefinition('blood-glucose')).toMatchObject({
+			primaryValueStrategy: {
+				path: ['bloodGlucoseMilligramsPerDeciliter'],
+				multiplier: 1 / 18.0182
+			}
+		});
+		expect(getMetricDefinition('activity-level')?.identityPaths).toEqual([['activityLevelType']]);
+		expect(getMetricDefinition('active-zone-minutes')?.identityPaths).toEqual([['heartRateZone']]);
+		expect(getMetricDefinition('sleep')?.identityPaths).toEqual([['type']]);
+		expect(getMetricDefinition('exercise')?.identityPaths).toEqual([['exerciseType']]);
+		expect(getMetricDefinition('vo2-max')?.identityPaths).toEqual([['measurementMethod']]);
+		expect(getMetricDefinition('nutrition-log')?.identityPaths).toEqual([
+			['food'],
+			['foodDisplayName'],
+			['mealType']
+		]);
+		expect(getMetricDefinition('time-in-heart-rate-zone')?.identityPaths).toEqual([
+			['heartRateZoneType']
+		]);
+		expect(getMetricDefinition('core-body-temperature')?.identityPaths).toEqual([
+			['id'],
+			['measurementLocation']
+		]);
+		expect(getMetricDefinition('sleep')?.payloadLifecycleTimestamps).toBe(true);
+		expect(getMetricDefinition('exercise')?.payloadLifecycleTimestamps).toBe(true);
+		expect(getMetricDefinition('heart-rate')?.payloadLifecycleTimestamps).toBe(false);
+	});
+
+	it('does not configure arbitrary scalar extraction for complex metric payloads', () => {
+		expect(getMetricDefinition('daily-heart-rate-zones')?.primaryValueStrategy).toBeUndefined();
+		expect(getMetricDefinition('time-in-heart-rate-zone')?.primaryValueStrategy).toBeUndefined();
+		expect(getMetricDefinition('electrocardiogram')?.primaryValueStrategy).toBeUndefined();
+		expect(getMetricDefinition('food')?.primaryValueStrategy).toBeUndefined();
+		expect(
+			METRIC_DEFINITIONS.every(
+				(definition) =>
+					definition.primaryUnit.length > 0 === (definition.primaryValueStrategy !== undefined)
+			)
+		).toBe(true);
 	});
 
 	it('requests exactly the seven approved read-only scopes', () => {

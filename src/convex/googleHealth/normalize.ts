@@ -4,6 +4,7 @@ import type { NormalizedHealthPoint } from './validators';
 const MAX_PAYLOAD_BYTES = 750 * 1024;
 const MAX_JSON_DEPTH = 128;
 const MAX_METADATA_LENGTH = 512;
+const ALL_SOURCES_FAMILY = 'users/me/dataSourceFamilies/all-sources';
 
 const SHA256_CONSTANTS = [
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -22,55 +23,6 @@ const SHA256_INITIAL_STATE = [
 
 const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
-const PRIMARY_KEY_PREFERENCES = [
-	'count',
-	'value',
-	'average',
-	'avg',
-	'sum',
-	'beatsperminute',
-	'percentage',
-	'kilograms',
-	'meters',
-	'milliliters',
-	'calories',
-	'score'
-] as const;
-
-const SEMANTIC_SUBTYPE_KEYS = new Set([
-	'activitylevel',
-	'activitytype',
-	'exercisetype',
-	'heartratezone',
-	'heartratezonetype',
-	'meallocation',
-	'mealtype',
-	'measurementlocation',
-	'measurementsource',
-	'measurementtiming',
-	'motioncontext',
-	'resultclassification',
-	'sensorlocation',
-	'sleeptype',
-	'specimen',
-	'stroketype',
-	'swimstroketype',
-	'zone',
-	'zonetype'
-]);
-
-const TIME_CONTAINER_KEYS = new Set([
-	'civilendtime',
-	'civilstarttime',
-	'civaltime',
-	'date',
-	'endtime',
-	'interval',
-	'sampletime',
-	'sessiontime',
-	'starttime'
-]);
-
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type PlainObject = Record<string, unknown>;
 
@@ -78,7 +30,14 @@ type RecordIdentity =
 	| { kind: 'named'; name: string }
 	| { kind: 'sample'; time: string; subtype: string; sourceFamily?: string }
 	| { kind: 'interval'; start: string; end: string; subtype: string; sourceFamily?: string }
-	| { kind: 'daily'; date: string; subtype: string; sourceFamily?: string }
+	| {
+			kind: 'daily';
+			date: string;
+			windowStart?: string;
+			windowEnd?: string;
+			subtype: string;
+			sourceFamily?: string;
+	  }
 	| { kind: 'session'; start: string; end: string; subtype: string; sourceFamily?: string }
 	| { kind: 'reference'; nameOrCanonicalId: string; sourceFamily?: string };
 
@@ -90,12 +49,20 @@ interface CivilDateTime {
 	readonly iso: string;
 	readonly localDate: string;
 	readonly epochMs: number;
+	readonly subMillisecondNanos: number;
 }
 
 interface Instant {
 	readonly identity: string;
 	readonly epochMs: number;
+	readonly subMillisecondNanos: number;
 	readonly localDate: string;
+}
+
+interface PhysicalTimestamp {
+	readonly identity: string;
+	readonly epochMs: number;
+	readonly subMillisecondNanos: number;
 }
 
 interface NormalizedTime {
@@ -170,7 +137,7 @@ function toCanonicalJsonValue(
 			throw invalidJson('symbol properties are not supported');
 		}
 
-		const result: { [key: string]: JsonValue } = {};
+		const result = Object.create(null) as { [key: string]: JsonValue };
 		for (const key of Object.keys(value).sort()) {
 			result[key] = toCanonicalJsonValue(value[key], ancestors, depth + 1);
 		}
@@ -273,12 +240,6 @@ function safeString(value: unknown): string | undefined {
 	return trimmed.length > 0 && trimmed.length <= MAX_METADATA_LENGTH ? trimmed : undefined;
 }
 
-function parseTimestamp(value: unknown): number | undefined {
-	if (typeof value !== 'string' || value.trim().length === 0) return undefined;
-	const timestamp = Date.parse(value);
-	return Number.isFinite(timestamp) ? timestamp : undefined;
-}
-
 function pad(value: number, length = 2): string {
 	return String(value).padStart(length, '0');
 }
@@ -308,6 +269,49 @@ function civilEpoch(
 	date.setUTCHours(hours, minutes, seconds, Math.floor(nanos / 1_000_000));
 	date.setUTCFullYear(year, month - 1, day);
 	return date.getTime();
+}
+
+function parseTimestamp(value: unknown): PhysicalTimestamp | undefined {
+	if (typeof value !== 'string') return undefined;
+	const match =
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+			value
+		);
+	if (match === null) return undefined;
+
+	const [, yearText, monthText, dayText, hoursText, minutesText, secondsText, fraction, zone] =
+		match;
+	const year = Number(yearText);
+	const month = Number(monthText);
+	const day = Number(dayText);
+	const hours = Number(hoursText);
+	const minutes = Number(minutesText);
+	const seconds = Number(secondsText);
+	if (!validDate(year, month, day) || hours > 23 || minutes > 59 || seconds > 59) {
+		return undefined;
+	}
+
+	let offsetSeconds = 0;
+	if (zone !== 'Z') {
+		const offsetHours = Number(zone.slice(1, 3));
+		const offsetMinutes = Number(zone.slice(4, 6));
+		if (offsetHours > 23 || offsetMinutes > 59) return undefined;
+		const direction = zone[0] === '+' ? 1 : -1;
+		offsetSeconds = direction * (offsetHours * 60 + offsetMinutes) * 60;
+	}
+
+	const nanos = Number((fraction ?? '').padEnd(9, '0'));
+	const wholeSecondEpoch =
+		civilEpoch(year, month, day, hours, minutes, seconds, 0) - offsetSeconds * 1000;
+	const utcDate = new Date(wholeSecondEpoch);
+	if (utcDate.getUTCFullYear() < 1 || utcDate.getUTCFullYear() > 9999) return undefined;
+	const utcSecond = utcDate.toISOString().slice(0, 19);
+	const canonicalFraction = nanos === 0 ? '' : `.${pad(nanos, 9).replace(/0+$/, '')}`;
+	return {
+		identity: `${utcSecond}${canonicalFraction}Z`,
+		epochMs: wholeSecondEpoch + Math.floor(nanos / 1_000_000),
+		subMillisecondNanos: nanos % 1_000_000
+	};
 }
 
 function parseCivilString(value: string): CivilDateTime | undefined {
@@ -345,7 +349,8 @@ function parseCivilString(value: string): CivilDateTime | undefined {
 	return {
 		iso: `${localDate}T${time}${fraction}`,
 		localDate,
-		epochMs: civilEpoch(year, month, day, hours, minutes, seconds, nanos)
+		epochMs: civilEpoch(year, month, day, hours, minutes, seconds, nanos),
+		subMillisecondNanos: nanos % 1_000_000
 	};
 }
 
@@ -395,7 +400,8 @@ function parseCivilDateTime(value: unknown): CivilDateTime | undefined {
 	return {
 		iso: `${localDate}T${timeText}${fraction}`,
 		localDate,
-		epochMs: civilEpoch(year, month, day, hours, minutes, seconds, nanos)
+		epochMs: civilEpoch(year, month, day, hours, minutes, seconds, nanos),
+		subMillisecondNanos: nanos % 1_000_000
 	};
 }
 
@@ -428,48 +434,41 @@ function normalizeInstant(
 	const civil = parseCivilDateTime(civilValue);
 	if (physicalTimestamp !== undefined) {
 		return {
-			identity: new Date(physicalTimestamp).toISOString(),
-			epochMs: physicalTimestamp,
+			identity: physicalTimestamp.identity,
+			epochMs: physicalTimestamp.epochMs,
+			subMillisecondNanos: physicalTimestamp.subMillisecondNanos,
 			localDate:
-				civil?.localDate ?? localDateFromEpoch(physicalTimestamp, parseUtcOffset(offsetValue) ?? 0)
+				civil?.localDate ??
+				localDateFromEpoch(physicalTimestamp.epochMs, parseUtcOffset(offsetValue) ?? 0)
 		};
 	}
 	if (civil !== undefined) {
 		return {
 			identity: `civil:${civil.iso}`,
 			epochMs: civil.epochMs,
+			subMillisecondNanos: civil.subMillisecondNanos,
 			localDate: civil.localDate
 		};
 	}
 	return undefined;
 }
 
-function normalizedKey(key: string): string {
-	return key.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+function valueAtPath(value: unknown, path: readonly string[]): unknown {
+	let current = value;
+	for (const field of path) {
+		if (!isPlainObject(current)) return undefined;
+		current = current[field];
+	}
+	return current;
 }
 
-function semanticSubtype(payload: PlainObject): string {
-	const values: Array<{ path: string; value: string | number | boolean }> = [];
-	const visit = (value: unknown, path: string): void => {
-		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, `${path}[${index}]`));
-			return;
-		}
-		if (!isPlainObject(value)) return;
-		for (const key of Object.keys(value).sort()) {
-			const child = value[key];
-			const childPath = path.length === 0 ? key : `${path}.${key}`;
-			if (
-				SEMANTIC_SUBTYPE_KEYS.has(normalizedKey(key)) &&
-				(typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean')
-			) {
-				values.push({ path: childPath, value: child });
-			} else {
-				visit(child, childPath);
-			}
-		}
-	};
-	visit(payload, '');
+function semanticSubtype(definition: MetricDefinition, payload: PlainObject): string {
+	const values = definition.identityPaths.flatMap((path) => {
+		const value = valueAtPath(payload, path);
+		return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+			? [{ path: path.join('.'), value }]
+			: [];
+	});
 	return values.length === 0 ? '' : canonicalJson(values);
 }
 
@@ -489,7 +488,7 @@ function normalizeRecordTime(
 	raw: PlainObject,
 	sourceFamily: string | undefined
 ): NormalizedTime {
-	const subtype = semanticSubtype(payload);
+	const subtype = semanticSubtype(definition, payload);
 	if (definition.recordKind === 'sample') {
 		const sampleTime = isPlainObject(payload.sampleTime) ? payload.sampleTime : undefined;
 		const instant =
@@ -521,6 +520,12 @@ function normalizeRecordTime(
 		if (start === undefined || end === undefined) {
 			throw new Error(`Google Health ${definition.recordKind} has no usable time interval`);
 		}
+		if (
+			end.epochMs < start.epochMs ||
+			(end.epochMs === start.epochMs && end.subMillisecondNanos < start.subMillisecondNanos)
+		) {
+			throw new Error(`Google Health ${definition.recordKind} end precedes start`);
+		}
 		const kind = definition.recordKind;
 		return {
 			identity: withSourceFamily(
@@ -535,37 +540,45 @@ function normalizeRecordTime(
 	}
 
 	if (definition.recordKind === 'daily') {
+		const isRollup = definition.readMode === 'dailyRollUp';
+		const civilStart =
+			parseCivilDateTime(payload.civilStartTime) ?? parseCivilDateTime(raw.civilStartTime);
 		const date =
+			(isRollup ? civilStart : undefined) ??
 			parseDateOnly(payload.date) ??
 			parseDateOnly(raw.date) ??
-			parseCivilDateTime(payload.civilStartTime) ??
-			parseCivilDateTime(raw.civilStartTime);
+			civilStart;
 		if (date === undefined) throw new Error('Google Health daily record has no usable date');
 		const end = parseCivilDateTime(payload.civilEndTime) ?? parseCivilDateTime(raw.civilEndTime);
+		if (isRollup && end === undefined) {
+			throw new Error('Google Health daily rollup has no usable civil end time');
+		}
 		return {
-			identity: withSourceFamily({ kind: 'daily', date: date.localDate, subtype }, sourceFamily),
+			identity: withSourceFamily(
+				{
+					kind: 'daily',
+					date: date.localDate,
+					...(isRollup ? { windowStart: date.iso } : {}),
+					...(isRollup && end !== undefined ? { windowEnd: end.iso } : {}),
+					subtype
+				},
+				sourceFamily
+			),
 			recordTimestamp: date.epochMs,
 			localDate: date.localDate,
 			...(end === undefined ? {} : { startTime: date.epochMs, endTime: end.epochMs })
 		};
 	}
 
-	const referenceName = [
-		'name',
-		'id',
-		'foodId',
-		'measurementUnitId',
-		'referenceName',
-		'displayName'
-	]
-		.map((key) => payload[key])
-		.find((value) => typeof value === 'string' && value.length > 0);
+	const referenceName = safeString(raw.name) ?? safeString(raw.dataPointName);
+	if (referenceName === undefined) {
+		throw new Error('Google Health reference record requires a resource name');
+	}
 	return {
 		identity: withSourceFamily(
 			{
 				kind: 'reference',
-				nameOrCanonicalId:
-					typeof referenceName === 'string' ? referenceName : canonicalJson(payload)
+				nameOrCanonicalId: referenceName
 			},
 			sourceFamily
 		),
@@ -583,57 +596,69 @@ function parseNumeric(value: unknown): number | undefined {
 	return Number.isFinite(numeric) ? numeric : undefined;
 }
 
-function primaryPreference(key: string): number | undefined {
-	const normalized = normalizedKey(key);
-	const index = PRIMARY_KEY_PREFERENCES.findIndex(
-		(preference) =>
-			normalized === preference ||
-			normalized.startsWith(preference) ||
-			normalized.endsWith(preference)
-	);
-	return index === -1 ? undefined : index;
+function parseDurationSeconds(value: unknown): number | undefined {
+	if (typeof value !== 'string') return undefined;
+	const match = /^(\d+)(?:\.(\d{1,9}))?s$/.exec(value);
+	if (match === null) return undefined;
+	const seconds = Number(match[1]);
+	const nanos = Number((match[2] ?? '').padEnd(9, '0'));
+	const duration = seconds + nanos / 1_000_000_000;
+	return Number.isSafeInteger(seconds) && Number.isFinite(duration) ? duration : undefined;
 }
 
-function derivePrimaryValue(payload: PlainObject): number | undefined {
-	const preferred: Array<{ preference: number; path: string; value: number }> = [];
-	const fallback: Array<{ path: string; value: number }> = [];
-	const visit = (value: unknown, path: string): void => {
-		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, `${path}[${index}]`));
-			return;
+function derivePrimaryValue(
+	definition: MetricDefinition,
+	payload: PlainObject,
+	normalizedTime: NormalizedTime
+): number | undefined {
+	const strategy = definition.primaryValueStrategy;
+	if (strategy === undefined) return undefined;
+	if (strategy.kind === 'direct') {
+		const sourceValue = parseNumeric(valueAtPath(payload, strategy.path));
+		if (sourceValue === undefined) return undefined;
+		const primaryValue = sourceValue * strategy.multiplier;
+		return Number.isFinite(primaryValue) ? primaryValue : undefined;
+	}
+	if (strategy.kind === 'sum') {
+		const values = valueAtPath(payload, strategy.arrayPath);
+		if (!Array.isArray(values)) return undefined;
+		let found = false;
+		let sum = 0;
+		for (const item of values) {
+			const numeric = parseNumeric(valueAtPath(item, strategy.valuePath));
+			if (numeric === undefined) return undefined;
+			found = true;
+			sum += numeric;
 		}
-		if (!isPlainObject(value)) return;
+		const primaryValue = sum * strategy.multiplier;
+		return found && Number.isFinite(primaryValue) ? primaryValue : undefined;
+	}
 
-		for (const key of Object.keys(value).sort()) {
-			if (TIME_CONTAINER_KEYS.has(normalizedKey(key))) continue;
-			const child = value[key];
-			const childPath = path.length === 0 ? key : `${path}.${key}`;
-			const numeric = parseNumeric(child);
-			if (numeric !== undefined) {
-				const preference = primaryPreference(key);
-				if (preference === undefined) fallback.push({ path: childPath, value: numeric });
-				else preferred.push({ preference, path: childPath, value: numeric });
-			} else {
-				visit(child, childPath);
-			}
-		}
-	};
-	visit(payload, '');
-	preferred.sort((left, right) =>
-		left.preference === right.preference
-			? left.path.localeCompare(right.path)
-			: left.preference - right.preference
-	);
-	fallback.sort((left, right) => left.path.localeCompare(right.path));
-	return preferred[0]?.value ?? fallback[0]?.value;
+	const durationSeconds = parseDurationSeconds(valueAtPath(payload, strategy.path));
+	if (durationSeconds !== undefined) {
+		const primaryValue = durationSeconds * strategy.secondsMultiplier;
+		return Number.isFinite(primaryValue) ? primaryValue : undefined;
+	}
+	if (
+		strategy.intervalFallback &&
+		normalizedTime.startTime !== undefined &&
+		normalizedTime.endTime !== undefined
+	) {
+		return (
+			((normalizedTime.endTime - normalizedTime.startTime) / 1000) * strategy.secondsMultiplier
+		);
+	}
+	return undefined;
 }
 
 function sourceMetadata(
+	definition: MetricDefinition,
 	raw: PlainObject
 ): Pick<
 	NormalizedHealthPoint,
 	'sourcePlatform' | 'sourceApplication' | 'sourceDevice' | 'recordingMethod'
 > {
+	if (definition.readMode !== 'list') return {};
 	const dataSource = isPlainObject(raw.dataSource) ? raw.dataSource : undefined;
 	if (dataSource === undefined) return {};
 	const application = isPlainObject(dataSource.application) ? dataSource.application : undefined;
@@ -669,7 +694,11 @@ export function normalizeGooglePoint(
 	}
 
 	const sourceFamily =
-		options.sourceFamily === undefined ? undefined : safeString(options.sourceFamily);
+		options.sourceFamily === undefined
+			? definition.readMode === 'list'
+				? undefined
+				: ALL_SOURCES_FAMILY
+			: safeString(options.sourceFamily);
 	if (options.sourceFamily !== undefined && sourceFamily === undefined) {
 		throw new Error('Google Health source family must be a non-empty bounded string');
 	}
@@ -681,13 +710,26 @@ export function normalizeGooglePoint(
 	const payloadDigest = sha256Base64Url(payloadJson);
 	const googleDataPointName = safeString(raw.name) ?? safeString(raw.dataPointName);
 	const normalizedTime = normalizeRecordTime(definition, payload, raw, sourceFamily);
+	const stablePayloadIdentity =
+		definition.identityReferencePath === undefined
+			? undefined
+			: safeString(valueAtPath(payload, definition.identityReferencePath));
 	const identity: RecordIdentity =
-		googleDataPointName === undefined
-			? normalizedTime.identity
-			: { kind: 'named', name: googleDataPointName };
-	const primaryValue = derivePrimaryValue(payload);
-	const googleCreateTime = parseTimestamp(raw.createTime);
-	const googleUpdateTime = parseTimestamp(raw.updateTime);
+		googleDataPointName !== undefined
+			? { kind: 'named', name: googleDataPointName }
+			: stablePayloadIdentity !== undefined
+				? withSourceFamily(
+						{ kind: 'reference', nameOrCanonicalId: stablePayloadIdentity },
+						sourceFamily
+					)
+				: normalizedTime.identity;
+	const primaryValue = derivePrimaryValue(definition, payload, normalizedTime);
+	const googleCreateTime = definition.payloadLifecycleTimestamps
+		? parseTimestamp(payload.createTime)
+		: undefined;
+	const googleUpdateTime = definition.payloadLifecycleTimestamps
+		? parseTimestamp(payload.updateTime)
+		: undefined;
 
 	return {
 		provider: 'google_health',
@@ -701,10 +743,10 @@ export function normalizeGooglePoint(
 		localDate: normalizedTime.localDate,
 		...(primaryValue === undefined ? {} : { primaryValue }),
 		primaryUnit: definition.primaryUnit,
-		...sourceMetadata(raw),
+		...sourceMetadata(definition, raw),
 		...(sourceFamily === undefined ? {} : { sourceFamily }),
-		...(googleCreateTime === undefined ? {} : { googleCreateTime }),
-		...(googleUpdateTime === undefined ? {} : { googleUpdateTime }),
+		...(googleCreateTime === undefined ? {} : { googleCreateTime: googleCreateTime.epochMs }),
+		...(googleUpdateTime === undefined ? {} : { googleUpdateTime: googleUpdateTime.epochMs }),
 		payloadDigest,
 		payloadJson
 	};

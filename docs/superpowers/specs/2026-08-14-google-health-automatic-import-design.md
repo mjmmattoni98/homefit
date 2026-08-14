@@ -118,11 +118,14 @@ Google credentials use explicit deployment environment variables rather than the
 - `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION`
+- `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS` (optional JSON map of old version to key)
 - any webhook audience or verification values required by the Google subscription configuration
 
 Refresh tokens are encrypted with AES-GCM in a Node action before being passed to a persistence mutation. The stored envelope contains ciphertext, nonce, authentication tag, and key version. Decryption only occurs in the Node action immediately before a token refresh. Tokens and secrets are redacted from logs and user-visible errors.
 
-Key rotation is supported by the versioned envelope: new writes use the current version and successful reads can schedule re-encryption with the current key.
+Key rotation is supported by the versioned envelope: new writes use the current
+version, old envelopes can be decrypted from the optional previous-key map, and
+successful old-key reads schedule re-encryption with the current key.
 
 ## Data Model
 

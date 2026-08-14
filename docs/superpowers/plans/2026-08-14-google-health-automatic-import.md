@@ -506,7 +506,7 @@ git commit -m "feat: secure Google Health connections"
 
 - [ ] **Step 1: Write failing URL and response-contract tests**
 
-Assert that the authorization URL uses `https://accounts.google.com/o/oauth2/v2/auth`, `response_type=code`, `access_type=offline`, `include_granted_scopes=true`, `prompt=consent`, the exact configured redirect URI, and all seven read-only scopes. Mock fetch to validate token exchange, refresh, `GET /v4/users/me/identity`, error redaction, and network failure classification.
+Assert that the authorization URL uses `https://accounts.google.com/o/oauth2/v2/auth`, `response_type=code`, `access_type=offline`, `include_granted_scopes=true`, `prompt=consent`, the exact configured redirect URI, and all seven read-only scopes. Mock fetch to validate token exchange, refresh with stored-scope fallback when `scope` is omitted, optional replacement refresh-token metadata, `GET /v4/users/me/identity`, error redaction, abort deadlines, capped response bodies, and network failure classification.
 
 - [ ] **Step 2: Run API client tests and verify failure**
 
@@ -536,7 +536,7 @@ Represent Google failures as `GoogleHealthError` with safe `code`, `status`, `re
 
 `beginConnection` authenticates through `requireUserId`, allows only `/dashboard/import` as `returnPath`, generates 32 random state bytes, stores only the SHA-256 digest with a 10-minute expiry, and returns the URL.
 
-`completeOAuth` consumes state, exchanges the code, requires a refresh token, parses granted scopes, calls `/users/me/identity`, encrypts the refresh token with user-bound AAD, saves the connection, initializes scope-covered cursors, and schedules the first cursor worker.
+`completeOAuth` consumes state, exchanges the code, requires a refresh token, parses granted scopes, rejects a location-only/no-identity-capable grant with a fixed safe error, calls `/users/me/identity`, encrypts the refresh token with user-bound AAD, saves the connection, and initializes scope-covered queued cursors. Task 6 wires the first cursor to the generated worker reference once that function exists; Task 5 must not hand-cast a reference to a missing function. If post-save cursor initialization fails, generation-guard the connection into a fixed `delayed` recovery state before returning an error.
 
 - [ ] **Step 5: Register the callback HTTP route**
 
@@ -557,7 +557,7 @@ http.route({
 });
 ```
 
-Catch safe callback failures and redirect with a fixed error code, never the exception text.
+Catch safe callback failures and redirect with a fixed error code, never the exception text. Connected and error redirects set `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 
 - [ ] **Step 6: Run OAuth tests and type checking**
 
@@ -585,6 +585,8 @@ git commit -m "feat: add Google Health OAuth flow"
 - Create: `src/convex/googleHealth/sync.ts`
 - Create: `src/convex/googleHealth/sync.spec.ts`
 - Modify: `src/convex/googleHealth/apiClient.ts`
+- Modify: `src/convex/googleHealth/oauth.ts`
+- Modify: `src/convex/googleHealth/oauth.spec.ts`
 
 **Interfaces:**
 - Produces internal mutation `applyReconciledPage({ connectionId, dataType, points, syncId, nextPageToken })`.
@@ -597,7 +599,7 @@ Use convex-test to seed a connection and apply the same named and unnamed pages 
 
 - [ ] **Step 2: Write failing bounded-worker tests**
 
-Mock one page with a continuation token and one final page. Assert each `runCursor` invocation fetches only one page, commits it, and schedules exactly one continuation. Cover sleep/exercise `pageSize=25`, other list/reconcile types `pageSize=1000`, dailyRollUp starting at `2000-01-01`, 14-day windows for the two rollup-only types, and retryable 429/5xx errors.
+Mock one page with a continuation token and one final page. Assert OAuth completion schedules the real generated `internal.googleHealth.sync.runCursor` reference, and each `runCursor` invocation fetches only one page, commits it, and schedules exactly one continuation. Cover sleep/exercise `pageSize=25`, other list/reconcile types `pageSize=1000`, dailyRollUp starting at `2000-01-01`, 14-day windows for the two rollup-only types, and retryable 429/5xx errors.
 
 - [ ] **Step 3: Run focused tests and verify failure**
 
@@ -619,7 +621,7 @@ For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRol
 
 - [ ] **Step 6: Implement the cursor worker**
 
-The action loads the connection/cursor internally, rejects stale generation or inactive status, decrypts the token through `rotateRefreshTokenEnvelope`, and persists any old-key replacement through the generation-and-envelope-guarded `replaceTokenEnvelope` before refreshing the access token. It then fetches one page/window, normalizes up to the page cap, applies the page, updates the run record, and schedules the next page with `ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, ...)`. Every connection error write carries the expected generation. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
+Wire OAuth completion to the generated `internal.googleHealth.sync.runCursor` reference now that the action exists. The action loads the connection/cursor internally, rejects stale generation or inactive status, decrypts the token through `rotateRefreshTokenEnvelope`, and persists any old-key replacement through the generation-and-envelope-guarded `replaceTokenEnvelope` before refreshing the access token. If Google returns a replacement refresh token, encrypt and persist it through the same guarded envelope comparison. It then fetches one page/window, normalizes up to the page cap, applies the page, updates the run record, and schedules the next page with `ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, ...)`. Every connection error write carries the expected generation. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
 
 - [ ] **Step 7: Run import tests and type checking**
 

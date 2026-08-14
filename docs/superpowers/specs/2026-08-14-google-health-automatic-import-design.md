@@ -105,7 +105,12 @@ The Google Cloud project supplies the OAuth client, OAuth consent configuration,
    supported user subscriptions automatically from granted consent.
 9. The callback redirects the browser to the HomeFit import page, where reactive Convex queries show progress.
 
-Partial consent is valid. HomeFit imports granted categories, reports missing permissions, and offers **Review access** to repeat consent for omitted scopes.
+Partial consent is valid when at least one granted metric scope can authorize the
+identity lookup. HomeFit imports granted categories, reports missing
+permissions, and offers **Review access** to repeat consent for omitted scopes.
+`location.readonly` alone is not importable because Google does not authorize
+`users/me/identity` with that scope and the current metric registry assigns no
+data type to it.
 
 ## Credential Storage
 

@@ -3,6 +3,11 @@
 		"*.css": "tailwindcss"
 	},
 	"cSpell.words": [
+		"hevy",
+		"Hevy",
+		"inlang",
+		"layerchart",
+		"outdir",
 		"paraglide",
 		"Paraglide"
 	]

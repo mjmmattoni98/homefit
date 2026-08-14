@@ -8,13 +8,21 @@
  * @module
  */
 
+import type * as helpers from "../helpers.js";
+import type * as sleep from "../sleep.js";
+import type * as workouts from "../workouts.js";
+
 import type {
   ApiFromModules,
   FilterApi,
   FunctionReference,
 } from "convex/server";
 
-declare const fullApi: ApiFromModules<{}>;
+declare const fullApi: ApiFromModules<{
+  helpers: typeof helpers;
+  sleep: typeof sleep;
+  workouts: typeof workouts;
+}>;
 
 /**
  * A utility for referencing Convex functions in your app's public API.

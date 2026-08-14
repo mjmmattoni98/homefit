@@ -70,7 +70,8 @@ Convex provides:
 
 - an authenticated action that begins OAuth;
 - a public HTTP callback for Google OAuth;
-- a public, authenticated Google webhook endpoint;
+- a public Google webhook endpoint that verifies the configured authorization
+  header and Google's payload signature;
 - internal actions that call the Google token and Health APIs;
 - internal mutations that store connection state and imported records;
 - scheduled, bounded backfill and incremental-sync jobs;
@@ -89,14 +90,19 @@ The Google Cloud project supplies the OAuth client, OAuth consent configuration,
 1. An authenticated user selects **Connect Google Health**.
 2. A Convex action derives the user from `ctx.auth.getUserIdentity()` and creates a cryptographically random, single-use OAuth state record. The stored value is a digest, not a reusable bearer value. The record includes an expiry and a validated post-callback return path.
 3. The action returns a Google authorization URL requesting:
-   - all configured read-only Google Health scopes;
+   - the configured read-only Google Health scopes for activity and fitness,
+     ECG, health metrics and measurements, irregular-rhythm notifications,
+     exercise location, nutrition, and sleep;
    - offline access; and
    - explicit consent when necessary to obtain or expand a refresh token.
 4. Google redirects to the Convex HTTP callback with a code and state.
 5. The callback hashes and atomically consumes the state. Unknown, expired, already-consumed, or mismatched state is rejected.
 6. The callback exchanges the authorization code server-side using the Google client secret.
 7. The refresh token is encrypted before storage. Access tokens are short-lived and are not persisted unless required during the active action.
-8. The connection enters `backfilling`, Google subscriptions are created for granted data types, and the first bounded import job is scheduled.
+8. The app calls `users/me/identity`, stores the stable Google `healthUserId`
+   used by webhook notifications, moves the connection to `backfilling`, and
+   schedules the first bounded import job. The project-level subscriber creates
+   supported user subscriptions automatically from granted consent.
 9. The callback redirects the browser to the HomeFit import page, where reactive Convex queries show progress.
 
 Partial consent is valid. HomeFit imports granted categories, reports missing permissions, and offers **Review access** to repeat consent for omitted scopes.
@@ -107,8 +113,9 @@ Google credentials use explicit deployment environment variables rather than the
 
 - `GOOGLE_HEALTH_CLIENT_ID`
 - `GOOGLE_HEALTH_CLIENT_SECRET`
-- `GOOGLE_HEALTH_PROJECT_ID`
+- `GOOGLE_HEALTH_PROJECT_NUMBER`
 - `GOOGLE_HEALTH_SUBSCRIBER_ID`
+- `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`
 - `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION`
 - any webhook audience or verification values required by the Google subscription configuration
@@ -141,7 +148,7 @@ One logical connection per HomeFit user:
 - `status`: `connecting`, `backfilling`, `active`, `delayed`, `action_required`, `disconnected`, or `deleting`
 - encrypted refresh-token envelope fields
 - granted scope metadata
-- Google user/resource identifier when returned by the API
+- stable Google `healthUserId` returned by `users/me/identity`
 - backfill totals and completed counts
 - `lastAttemptAt`
 - `lastSuccessfulSyncAt`
@@ -150,18 +157,6 @@ One logical connection per HomeFit user:
 - optional `disconnectedAt`
 
 The user index enforces one active logical connection through application-level transactional checks.
-
-### `googleHealthSubscriptions`
-
-One bounded record per connection and subscribed data type:
-
-- `connectionId`
-- `userId`
-- `dataType`
-- Google subscription resource name
-- subscription status and expiry when applicable
-
-Subscriptions are separate documents rather than an unbounded array on the connection.
 
 ### `googleHealthSyncCursors`
 
@@ -182,7 +177,8 @@ One document per Google data point:
 
 - `userId`
 - provider discriminator: `google_health`
-- Google `externalName`, used as the idempotency key
+- deterministic `recordKey`, used as the idempotency key
+- optional Google data-point name for identifiable types
 - `dataType`
 - display category
 - normalized event, interval, or sample timestamps
@@ -190,15 +186,24 @@ One document per Google data point:
 - optional primary scalar value and unit
 - source platform, application, device, recording method, and data-source family when present
 - Google create/update time when present
+- canonical payload digest
 - serialized original metric payload in `payloadJson`
 
 The serialized payload preserves nested and future metric-specific fields. The importer validates that it is JSON-compatible and below a conservative document-size limit before storage.
+
+Most reconciled Google data points do not have a data-point name. For an
+identifiable type, `recordKey` is derived from that name. For every other type,
+the metric registry defines stable identity fields such as the data type,
+reconciled source family, sample time, interval bounds, daily date, and semantic
+subtype. Measurement values are not identity fields. A completed reconciliation
+window replaces the set of local keys in that window, which handles corrections
+and deletions even when Google supplies no stable name.
 
 Indexes support:
 
 - user + data type + event time;
 - user + category + event time; and
-- user + external name for idempotent upserts.
+- user + record key for idempotent upserts.
 
 ### `healthDailySummaries`
 
@@ -239,9 +244,20 @@ A code-owned metric registry maps every supported Google Health data type to:
 - daily aggregation strategy; and
 - visualization type.
 
-The initial categories are Activity, Vitals, Sleep, Body, Nutrition, Cycles, and Other. Only categories containing imported data appear in navigation. The **All metrics** page lists every imported metric with its latest value, source, and update time.
+The initial categories are Activity, Vitals, Sleep, Body, Nutrition, and Other.
+Only categories containing imported data appear in navigation. The **All
+metrics** page lists every imported metric with its latest value, source, and
+update time. Types that currently expose only write operations, including the
+current reproductive-health types, are not requested by this read-only app.
 
-Known types receive tailored trend, interval, stage, session, or record views. An unrecognized incoming type or payload variant is preserved and displayed with a safe generic record view under Other. A newly introduced Google data type may require adding its scope/endpoint to the registry before HomeFit can request it, but it does not require a database-schema migration.
+Known types receive tailored trend, interval, stage, session, or record views.
+The registry supports `list`, `reconcile`, `rollUp`, and `dailyRollUp` read modes
+because not every readable type exposes the same operation. Rollup requests are
+split into Google's documented 14-day or 90-day maximum ranges. An unrecognized
+incoming type or payload variant is preserved and displayed with a safe generic
+record view under Other. A newly introduced Google data type may require adding
+its scope/endpoint to the registry before HomeFit can request it, but it does not
+require a database-schema migration.
 
 Where Google supplies a reconcile endpoint or main/reconciled record, HomeFit uses it to avoid double-counting multiple devices. Otherwise, the type-specific aggregation strategy remains source-aware. Users can see the contributing device or application on detail pages.
 
@@ -254,7 +270,7 @@ After OAuth, the coordinator creates a cursor for every configured data type cov
 1. refreshes an access token if needed;
 2. requests one bounded Google Health page;
 3. validates and normalizes each response;
-4. upserts records by user and Google external name;
+4. upserts records by user and deterministic record key;
 5. records affected local dates;
 6. rebuilds only the affected daily summaries;
 7. persists the next cursor; and
@@ -264,9 +280,25 @@ The importer requests the full range supported by each endpoint and follows pagi
 
 ### Webhook Sync
 
-The webhook endpoint verifies Google authenticity and validates the subscription/resource identifiers. It does not fetch or write a large dataset in the request. It records or coalesces the notification, schedules an incremental worker, and acknowledges promptly.
+The webhook endpoint first enforces the configured `Authorization` value and
+then verifies `GOOGLE-HEALTH-API-SIGNATURE` against the raw request body and
+Google's rotating public keyset. It implements Google's two-step subscriber
+verification handshake: an authorized verification request succeeds and the
+unauthorized challenge fails. A valid data notification is mapped to a HomeFit
+connection by `healthUserId`; the endpoint schedules an incremental worker and
+returns `204 No Content` promptly.
 
-Notifications are delivery hints rather than the sole source of truth. Duplicate notifications are safe. Create/update events upsert by external name and update time. Provider deletion notifications remove the corresponding Google record and rebuild affected summaries.
+The Google Cloud project has one subscriber configured with `AUTOMATIC` policies
+for every webhook-capable readable type. Google creates and removes the
+per-user subscriptions as consent changes; HomeFit does not persist or manage
+those automatic subscription resources individually. Types without webhook
+support are covered by reconciliation.
+
+Notifications are delivery hints rather than the sole source of truth.
+Duplicate notifications are safe. `UPSERT` notifications reconcile the affected
+type and time range. `DELETE` notifications remove an identifiable record when a
+name is supplied or reconcile the affected window otherwise, then rebuild
+affected summaries.
 
 ### Daily Reconciliation
 
@@ -321,10 +353,10 @@ All new UI copy is added to the existing English and Spanish Paraglide message c
 Disconnect is non-destructive:
 
 1. stop and invalidate scheduled work through connection status/generation checks;
-2. best-effort delete Google subscription resources;
-3. best-effort revoke Google access;
-4. remove the stored refresh-token envelope; and
-5. retain imported data points and summaries with source labels.
+2. best-effort revoke Google access, which also stops Google's automatic
+   per-user subscriptions;
+3. remove the stored refresh-token envelope; and
+4. retain imported data points and summaries with source labels.
 
 A failed external revocation does not preserve a usable local token. The connection becomes `disconnected` and can be reconnected later.
 
@@ -334,7 +366,8 @@ Deletion is a separate destructive action requiring typed confirmation. It:
 
 1. performs the disconnect sequence;
 2. marks the connection `deleting` so no new work can start;
-3. deletes OAuth states, data points, summaries, cursors, subscriptions, and sync runs in bounded indexed batches; and
+3. deletes OAuth states, data points, summaries, cursors, and sync runs in
+   bounded indexed batches; and
 4. deletes the connection after all owned Google records are gone.
 
 Hevy and Sleep Cycle CSV data are outside this deletion scope.
@@ -379,7 +412,7 @@ Hevy and Sleep Cycle CSV data are outside this deletion scope.
 - Two mocked Clerk users cannot read, mutate, disconnect, sync, or delete each other’s data.
 - OAuth state expires, is single-use, and cannot be replayed.
 - Public functions never return encrypted-token fields.
-- Re-importing the same page is idempotent.
+- Re-importing the same named or unnamed reconciled page is idempotent.
 - A newer Google update replaces the older version and rebuilds affected summaries.
 - A provider deletion removes only the matching Google record.
 - Disconnect retains data and removes usable credentials.

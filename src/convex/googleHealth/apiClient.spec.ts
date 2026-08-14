@@ -327,6 +327,45 @@ describe('Google Health API client', () => {
 		expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
 	});
 
+	it('classifies an interrupted success body as a redacted retryable network failure', async () => {
+		let reads = 0;
+		const interruptedBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (reads === 0) {
+					reads += 1;
+					controller.enqueue(new TextEncoder().encode('{"access_token":"sensitive'));
+					return;
+				}
+				controller.error(new Error('stream exposed a refresh-token secret'));
+			}
+		});
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(
+				async () =>
+					new Response(interruptedBody, {
+						status: 200,
+						headers: { 'content-type': 'application/json' }
+					})
+			)
+		);
+
+		const caught = await exchangeAuthorizationCode({
+			code: 'authorization-code',
+			clientId: CLIENT_ID,
+			clientSecret: CLIENT_SECRET,
+			redirectUri: REDIRECT_URI
+		}).catch((error: unknown) => error);
+		expect(caught).toBeInstanceOf(GoogleHealthError);
+		expect(caught).toMatchObject({
+			code: 'network_error',
+			status: null,
+			retryable: true,
+			message: 'Google Health request failed'
+		});
+		expect(String(caught)).not.toMatch(/sensitive|refresh-token|stream exposed/);
+	});
+
 	it('rejects oversized success and error bodies without reading or exposing them', async () => {
 		const oversizedErrorStream = new ReadableStream<Uint8Array>({
 			start(controller) {
@@ -363,6 +402,40 @@ describe('Google Health API client', () => {
 			await expect(operation()).rejects.toMatchObject({
 				code: 'response_too_large',
 				retryable: false,
+				message: 'Google Health request failed'
+			});
+		}
+	});
+
+	it('preserves retryability when a 429 or 5xx error body exceeds the redacted cap', async () => {
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(
+				new Response('{}', {
+					status: 429,
+					headers: { 'content-length': String(17 * 1024) }
+				})
+			)
+			.mockResolvedValueOnce(
+				new Response('{}', {
+					status: 503,
+					headers: { 'content-length': String(17 * 1024) }
+				})
+			);
+		vi.stubGlobal('fetch', fetchMock);
+
+		for (const status of [429, 503]) {
+			await expect(
+				exchangeAuthorizationCode({
+					code: 'authorization-code',
+					clientId: CLIENT_ID,
+					clientSecret: CLIENT_SECRET,
+					redirectUri: REDIRECT_URI
+				})
+			).rejects.toMatchObject({
+				code: 'response_too_large',
+				status,
+				retryable: true,
 				message: 'Google Health request failed'
 			});
 		}

@@ -59,8 +59,12 @@ function invalidRequest(): GoogleHealthError {
 	return new GoogleHealthError('invalid_request', null, false);
 }
 
+function isRetryableStatus(status: number): boolean {
+	return status === 429 || status >= 500;
+}
+
 function responseTooLarge(status: number): GoogleHealthError {
-	return new GoogleHealthError('response_too_large', status, false);
+	return new GoogleHealthError('response_too_large', status, isRetryableStatus(status));
 }
 
 function requestTimeout(): GoogleHealthError {
@@ -240,14 +244,18 @@ async function boundedJsonObject(
 	limit: number,
 	deadline: RequestDeadline
 ): Promise<JsonObject> {
-	let text: string;
+	let bytes: Uint8Array;
 	try {
-		text = new TextDecoder('utf-8', { fatal: true }).decode(
-			await boundedResponseBytes(response, limit, deadline)
-		);
+		bytes = await boundedResponseBytes(response, limit, deadline);
 	} catch (error) {
 		if (error instanceof GoogleHealthError) throw error;
 		if (deadline.timedOut()) throw requestTimeout();
+		throw new GoogleHealthError('network_error', null, true);
+	}
+	let text: string;
+	try {
+		text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+	} catch {
 		throw invalidResponse(response.status);
 	}
 	let value: unknown;
@@ -271,17 +279,15 @@ async function responseError(
 	} catch (error) {
 		if (
 			error instanceof GoogleHealthError &&
-			(error.code === 'response_too_large' || error.code === 'request_timeout')
+			(error.code === 'response_too_large' ||
+				error.code === 'request_timeout' ||
+				error.code === 'network_error')
 		) {
 			throw error;
 		}
 		// Malformed error bodies are ignored; status remains the safe source of truth.
 	}
-	return new GoogleHealthError(
-		code,
-		response.status,
-		response.status === 429 || response.status >= 500
-	);
+	return new GoogleHealthError(code, response.status, isRetryableStatus(response.status));
 }
 
 async function executeRequest<Result>(

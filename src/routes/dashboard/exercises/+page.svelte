@@ -23,7 +23,12 @@
 	const exercises = $derived(exercisesQuery.data ?? []);
 
 	let selected = $state<string | null>(null);
-	const activeExercise = $derived(selected ?? exercises[0]?.exerciseTitle ?? '');
+	const activeExercise = $derived.by(() => {
+		if (selected && exercises.some((exercise) => exercise.exerciseTitle === selected)) {
+			return selected;
+		}
+		return exercises[0]?.exerciseTitle ?? '';
+	});
 
 	const historyQuery = useQuery(api.workouts.exerciseHistory, () =>
 		auth.isAuthenticated && activeExercise ? { exerciseTitle: activeExercise } : 'skip'
@@ -73,19 +78,14 @@
 		sessions.map((s) => ({ label: formatDateAxis(s.startTime), volume: Math.round(s.volume) }))
 	);
 
-	const isLoading = $derived(
-		auth.isLoading || (auth.isAuthenticated && exercisesQuery.isLoading)
-	);
+	const isLoading = $derived(auth.isLoading || (auth.isAuthenticated && exercisesQuery.isLoading));
 </script>
 
 <div class="flex flex-col gap-6">
 	<div class="flex flex-wrap items-center justify-between gap-4">
 		<h1 class="text-2xl font-bold tracking-tight">{m.exercises_title()}</h1>
 		{#if exercises.length > 0}
-			<Select.Root
-				type="single"
-				bind:value={() => activeExercise, (v) => (selected = v)}
-			>
+			<Select.Root type="single" bind:value={() => activeExercise, (v) => (selected = v)}>
 				<Select.Trigger class="w-full max-w-sm">
 					{activeExercise || m.exercises_select()}
 				</Select.Trigger>

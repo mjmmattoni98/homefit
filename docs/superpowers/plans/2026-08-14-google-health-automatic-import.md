@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let every Clerk-authenticated HomeFit user connect Google Health, import all 39 currently readable health data types, browse every imported metric, and stay synchronized through verified webhooks plus reconciliation.
+**Goal:** Let every Clerk-authenticated HomeFit user connect Google Health, import all 40 currently readable health data types, browse every imported metric, and stay synchronized through verified webhooks plus reconciliation.
 
 **Architecture:** Convex is the sole backend and owns OAuth, AES-GCM-encrypted refresh tokens, the Google Health v4 client, bounded import jobs, webhook verification, reconciliation, generic health records, and daily summaries. Svelte exposes connection controls and the approved category dashboard; every metric uses the same normalized envelope while preserving its canonical Google payload.
 
@@ -17,7 +17,7 @@
 - Every growing read path uses a named index and `.take(...)` or `.paginate(...)`; never use `.filter()` or unbounded `.collect()`.
 - Derive ownership from `identity.tokenIdentifier`; never accept a user ID from the client.
 - Request only these read-only scopes: `activity_and_fitness`, `ecg`, `health_metrics_and_measurements`, `irn`, `location`, `nutrition`, and `sleep`.
-- Import all 39 readable types listed in Task 2; exclude write-only menstrual-period, moods, ovulation-test, and symptoms.
+- Import all 40 readable types listed in Task 2; exclude write-only menstrual-period, moods, ovulation-test, and symptoms.
 - Treat automatic Google subscriptions as project-level configuration; do not create or persist per-user subscription records.
 - A Google webhook must pass the configured `Authorization` value and Tink-prefixed ECDSA signature verification before work is scheduled.
 - Keep refresh tokens, OAuth client secrets, encryption keys, webhook secrets, raw payloads, and Google account identifiers out of browser responses and logs.
@@ -36,7 +36,7 @@
 - `src/convex/convex.config.ts` — type the required Google Health environment variables.
 - `src/convex/helpers.ts` — allow authenticated actions to reuse `requireUserId`.
 - `src/convex/googleHealth/validators.ts` — shared Convex validators and inferred domain types.
-- `src/convex/googleHealth/registry.ts` — authoritative 39-type metric registry, scopes, operations, categories, identity strategy, and aggregation strategy.
+- `src/convex/googleHealth/registry.ts` — authoritative 40-type metric registry, scopes, operations, categories, identity strategy, and aggregation strategy.
 - `src/convex/googleHealth/normalize.ts` — canonical JSON, stable record keys, timestamp extraction, and normalized envelopes.
 - `src/convex/googleHealth/crypto.ts` — OAuth-state hashing and AES-256-GCM token envelopes.
 - `src/convex/googleHealth/apiClient.ts` — OAuth/token, identity, list/reconcile/dailyRollUp, revoke, and typed Google error handling.
@@ -64,7 +64,7 @@
 - `src/routes/dashboard/health/[category]/+page.svelte` — category metric grid.
 - `src/routes/dashboard/health/metrics/+page.svelte` — all-metrics catalog.
 - `src/routes/dashboard/health/metrics/[dataType]/+page.svelte` — detail chart and paginated records.
-- `messages/en.json`, `messages/es.json` — connection, navigation, category, status, action, and 39 metric labels.
+- `messages/en.json`, `messages/es.json` — connection, navigation, category, status, action, and 40 metric labels.
 
 ### Tests and operations
 
@@ -253,16 +253,16 @@ git commit -m "feat: add Google Health data model"
 - Produces: `GOOGLE_HEALTH_READ_SCOPES: readonly string[]`.
 - Produces: `METRIC_DEFINITIONS: readonly MetricDefinition[]`.
 - Produces: `getMetricDefinition(dataType: string): MetricDefinition | null`.
-- `MetricDefinition` contains `dataType`, `payloadField`, `recordKind`, `category`, `scope`, `readMode`, `webhook`, `aggregation`, and `primaryUnit`.
+- `MetricDefinition` contains `dataType`, `payloadField`, `recordKind`, `category`, `scope`, `readMode`, `webhook`, `aggregation`, `primaryUnit`, registry-owned identity selectors, an optional typed primary-value strategy, lifecycle-timestamp placement, and the optional maximum window.
 
 - [ ] **Step 1: Write registry completeness tests**
 
-Assert that the registry contains exactly 39 unique kebab-case identifiers, contains no write-only types, uses only seven approved read-only scopes, and marks the 27 official webhook-capable identifiers correctly.
+Assert that the registry contains exactly 40 unique kebab-case identifiers, contains no write-only types, uses only seven approved read-only scopes, and marks the 27 official webhook-capable identifiers correctly.
 
 ```ts
 const expected = [
   "active-energy-burned", "active-minutes", "active-zone-minutes", "activity-level",
-  "altitude", "blood-glucose", "body-fat", "calories-in-heart-rate-zone",
+  "altitude", "basal-energy-burned", "blood-glucose", "body-fat", "calories-in-heart-rate-zone",
   "core-body-temperature", "daily-heart-rate-variability", "daily-heart-rate-zones",
   "daily-oxygen-saturation", "daily-respiratory-rate", "daily-resting-heart-rate",
   "daily-sleep-temperature-derivations", "daily-vo2-max", "distance",
@@ -294,7 +294,8 @@ const definitions = [
   ["active-minutes","activeMinutes","interval","activity","activity_and_fitness","reconcile",false,"sum","min"],
   ["active-zone-minutes","activeZoneMinutes","interval","activity","activity_and_fitness","reconcile",true,"sum","min"],
   ["activity-level","activityLevel","interval","activity","activity_and_fitness","reconcile",true,"duration",""],
-  ["altitude","altitude","interval","activity","activity_and_fitness","reconcile",true,"average","m"],
+  ["altitude","altitude","interval","activity","activity_and_fitness","reconcile",true,"sum","m"],
+  ["basal-energy-burned","basalEnergyBurned","interval","activity","activity_and_fitness","reconcile",false,"sum","kcal"],
   ["blood-glucose","bloodGlucose","sample","vitals","health_metrics_and_measurements","reconcile",true,"average","mmol/L"],
   ["body-fat","bodyFat","sample","body","health_metrics_and_measurements","reconcile",true,"average","%"],
   ["calories-in-heart-rate-zone","caloriesInHeartRateZone","daily","activity","activity_and_fitness","dailyRollUp",true,"sum","kcal"],
@@ -308,7 +309,7 @@ const definitions = [
   ["daily-vo2-max","dailyVo2Max","daily","activity","activity_and_fitness","reconcile",false,"latest","mL/kg/min"],
   ["distance","distance","interval","activity","activity_and_fitness","reconcile",true,"sum","m"],
   ["electrocardiogram","electrocardiogram","session","vitals","ecg","list",false,"latest",""],
-  ["exercise","exercise","session","activity","activity_and_fitness","reconcile",true,"duration",""],
+  ["exercise","exercise","session","activity","activity_and_fitness","reconcile",true,"duration","min"],
   ["floors","floors","interval","activity","activity_and_fitness","reconcile",true,"sum","floors"],
   ["food","food","reference","nutrition","nutrition","list",false,"latest",""],
   ["food-measurement-unit","foodMeasurementUnit","reference","nutrition","nutrition","list",false,"latest",""],
@@ -317,14 +318,14 @@ const definitions = [
   ["height","height","sample","body","health_metrics_and_measurements","reconcile",true,"latest","m"],
   ["hydration-log","hydrationLog","session","nutrition","nutrition","reconcile",true,"sum","mL"],
   ["irregular-rhythm-notification","irregularRhythmNotification","session","vitals","irn","list",false,"latest",""],
-  ["nutrition-log","nutritionLog","sample","nutrition","nutrition","reconcile",true,"sum","kcal"],
+  ["nutrition-log","nutritionLog","session","nutrition","nutrition","reconcile",true,"sum","kcal"],
   ["oxygen-saturation","oxygenSaturation","sample","vitals","health_metrics_and_measurements","reconcile",false,"average","%"],
   ["respiratory-rate-sleep-summary","respiratoryRateSleepSummary","sample","vitals","health_metrics_and_measurements","reconcile",true,"average","breaths/min"],
   ["run-vo2-max","runVo2Max","sample","activity","activity_and_fitness","reconcile",true,"latest","mL/kg/min"],
   ["sedentary-period","sedentaryPeriod","interval","activity","activity_and_fitness","reconcile",true,"duration",""],
-  ["sleep","sleep","session","sleep","sleep","reconcile",true,"duration",""],
+  ["sleep","sleep","session","sleep","sleep","reconcile",true,"duration","min"],
   ["steps","steps","interval","activity","activity_and_fitness","reconcile",true,"sum","steps"],
-  ["swim-lengths-data","swimLengthsData","interval","activity","activity_and_fitness","reconcile",false,"sum","lengths"],
+  ["swim-lengths-data","swimLengthsData","interval","activity","activity_and_fitness","reconcile",false,"sum","strokes"],
   ["time-in-heart-rate-zone","timeInHeartRateZone","interval","activity","activity_and_fitness","reconcile",true,"duration",""],
   ["total-calories","totalCalories","daily","activity","activity_and_fitness","dailyRollUp",false,"sum","kcal"],
   ["vo2-max","vo2Max","sample","activity","activity_and_fitness","reconcile",false,"latest","mL/kg/min"],
@@ -332,7 +333,7 @@ const definitions = [
 ] as const;
 ```
 
-Build each scope by appending `${scopeSuffix}.readonly` to `https://www.googleapis.com/auth/googlehealth.`, add `https://www.googleapis.com/auth/googlehealth.location.readonly`, and expose immutable definitions through a `Map` lookup. Set the daily-rollup maximum window to 14 days for calories-in-heart-rate-zone and total-calories; default other future rollup definitions to 90 days.
+Build each scope by appending `${scopeSuffix}.readonly` to `https://www.googleapis.com/auth/googlehealth.`, add `https://www.googleapis.com/auth/googlehealth.location.readonly`, and expose deeply immutable definitions through a `Map` lookup. Store per-type stable identity paths (including prioritized alternatives where needed) and typed `direct`, `sum`, or protobuf-duration primary-value strategies. Every non-empty `primaryUnit` must have an explicit compatible strategy; ambiguous complex metrics omit `primaryValue`. Set the daily-rollup maximum window to 14 days for calories-in-heart-rate-zone and total-calories; default other future rollup definitions to 90 days.
 
 - [ ] **Step 4: Run the registry test**
 
@@ -340,7 +341,7 @@ Build each scope by appending `${scopeSuffix}.readonly` to `https://www.googleap
 bunx vitest --project convex --run src/convex/googleHealth/registry.spec.ts
 ```
 
-Expected: PASS with 39 unique definitions and seven read-only scopes.
+Expected: PASS with 40 unique definitions and seven read-only scopes.
 
 - [ ] **Step 5: Commit the registry**
 
@@ -356,16 +357,19 @@ git commit -m "feat: define Google Health metric registry"
 **Files:**
 - Create: `src/convex/googleHealth/normalize.ts`
 - Create: `src/convex/googleHealth/normalize.spec.ts`
+- Modify: `src/convex/googleHealth/validators.ts`
+- Modify: `src/convex/googleHealth/registry.ts`
+- Modify: `src/convex/googleHealth/registry.spec.ts`
 
 **Interfaces:**
 - Consumes: `MetricDefinition` from Task 2.
-- Produces: `normalizeGooglePoint(definition, raw): NormalizedHealthPoint`.
+- Produces: `normalizeGooglePoint(definition, raw, options?): NormalizedHealthPoint`, where `options.sourceFamily` carries the actual reconciliation family.
 - Produces: `canonicalJson(value: unknown): string` and `sha256Base64Url(value: string): string`.
 - `NormalizedHealthPoint.recordKey` is stable across measurement corrections.
 
 - [ ] **Step 1: Write failing normalizer tests**
 
-Cover a named sleep session, unnamed heart-rate sample, unnamed steps interval, daily record, daily-rollup record, reference record, correction with a changed measurement value, invalid payload, and payloads above 750 KiB. The correction assertion is essential:
+Cover current-v4 fixtures for a named sleep session, nutrition session, unnamed heart-rate sample, unnamed steps interval, daily record, daily-rollup record, named reference record, correction with a changed measurement value, invalid payload, and payloads above 750 KiB. Also cover nanosecond-distinct physical times, strict timezone/calendar rejection, unit conversions, aggregate strategies, lifecycle timestamps, source metadata, the implicit `all-sources` family, semantic identity alternatives, and reversed intervals/windows. The correction assertion is essential:
 
 ```ts
 const first = normalizeGooglePoint(heartRate, {
@@ -400,9 +404,9 @@ type RecordIdentity =
   | { kind: "reference"; nameOrCanonicalId: string };
 ```
 
-For named points use `name` or `dataPointName`. Otherwise use the registry payload field and time/date fields; include semantic subtype fields such as exercise type, sleep type, zone, or reference name, but never include a mutable measured value. Hash `dataType + "\n" + canonicalJson(identity)` with SHA-256 for `recordKey`, and hash full canonical payload separately for `payloadDigest`.
+For named points use `name` or `dataPointName`. Named reference resources require a resource name. Otherwise use registry-owned identity selectors with time/date or full daily-rollup window bounds; include stable semantic subtype fields such as exercise type, sleep type, zone, or prioritized nutrition food reference/display-name alternatives, but never include a mutable measured value. Do not promote a source-local ID to sole identity without concrete source identity. Include the actual reconciliation source family; normalize an omitted reconcile/rollup family to Google's documented `users/me/dataSourceFamilies/all-sources` default. Hash `dataType + "\n" + canonicalJson(identity)` with SHA-256 for `recordKey`, and hash full canonical payload separately for `payloadDigest`.
 
-Use physical time when present, fall back to civil ISO time, derive `localDate` from civil date before UTC time, and reject any record without a usable time/date except reference records. Limit UTF-8 `payloadJson` to 750 KiB. Derive a primary numeric scalar by recursively preferring keys matching `count`, `value`, `average`, `avg`, `sum`, `beatsPerMinute`, `percentage`, `kilograms`, `meters`, `milliliters`, `calories`, and `score`; complex records may leave it absent and render as “Recorded.”
+Parse physical time as strict RFC 3339, retain canonical nanosecond precision in identity while storing epoch milliseconds for queries, fall back to civil time, derive `localDate` from civil date before UTC time, and reject reversed or unusable time ranges except named reference records. Preserve list-record `DataSource` metadata and sleep/exercise payload lifecycle timestamps. Limit canonical UTF-8 `payloadJson` to 750 KiB and retain own JSON keys such as `__proto__`. Derive `primaryValue` only through the registry's explicit unit-compatible strategy, including required gram/millimeter/mg-dL conversions and all-or-nothing aggregate sums; complex records without an unambiguous scalar render as “Recorded.”
 
 - [ ] **Step 4: Run normalizer tests**
 

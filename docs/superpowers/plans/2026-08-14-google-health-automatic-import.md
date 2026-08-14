@@ -604,7 +604,7 @@ Mock one page with a continuation token and one final page. Assert OAuth complet
 - [ ] **Step 3: Run focused tests and verify failure**
 
 ```bash
-bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.spec.ts
 ```
 
 Expected: FAIL because records and sync modules are missing.
@@ -626,7 +626,7 @@ Wire OAuth completion to the generated `internal.googleHealth.sync.runCursor` re
 - [ ] **Step 7: Run import tests and type checking**
 
 ```bash
-bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -635,7 +635,7 @@ Expected: PASS with deterministic scheduled-function tests.
 - [ ] **Step 8: Commit the import engine**
 
 ```bash
-git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts
+git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts
 git commit -m "feat: import Google Health history"
 ```
 

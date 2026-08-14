@@ -397,11 +397,11 @@ Implement recursive plain-JSON validation with sorted object keys. Extract ident
 ```ts
 type RecordIdentity =
   | { kind: "named"; name: string }
-  | { kind: "sample"; time: string }
-  | { kind: "interval"; start: string; end: string; subtype: string }
-  | { kind: "daily"; date: string; subtype: string }
-  | { kind: "session"; start: string; end: string; subtype: string }
-  | { kind: "reference"; nameOrCanonicalId: string };
+  | { kind: "sample"; time: string; subtype: string; sourceFamily?: string }
+  | { kind: "interval"; start: string; end: string; subtype: string; sourceFamily?: string }
+  | { kind: "daily"; date: string; windowStart?: string; windowEnd?: string; subtype: string; sourceFamily?: string }
+  | { kind: "session"; start: string; end: string; subtype: string; sourceFamily?: string }
+  | { kind: "reference"; nameOrCanonicalId: string; sourceFamily?: string };
 ```
 
 For named points use `name` or `dataPointName`. Named reference resources require a resource name. Otherwise use registry-owned identity selectors with time/date or full daily-rollup window bounds; include stable semantic subtype fields such as exercise type, sleep type, zone, or prioritized nutrition food reference/display-name alternatives, but never include a mutable measured value. Do not promote a source-local ID to sole identity without concrete source identity. Include the actual reconciliation source family; normalize an omitted reconcile/rollup family to Google's documented `users/me/dataSourceFamilies/all-sources` default. Hash `dataType + "\n" + canonicalJson(identity)` with SHA-256 for `recordKey`, and hash full canonical payload separately for `payloadDigest`.
@@ -419,7 +419,7 @@ Expected: PASS, including stable keys for changed values.
 - [ ] **Step 5: Commit the normalizer**
 
 ```bash
-git add src/convex/googleHealth/normalize.ts src/convex/googleHealth/normalize.spec.ts
+git add src/convex/googleHealth/normalize.ts src/convex/googleHealth/normalize.spec.ts src/convex/googleHealth/validators.ts src/convex/googleHealth/registry.ts src/convex/googleHealth/registry.spec.ts
 git commit -m "feat: normalize Google Health records"
 ```
 

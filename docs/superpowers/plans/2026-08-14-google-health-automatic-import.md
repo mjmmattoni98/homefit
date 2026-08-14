@@ -127,7 +127,7 @@ describe("Google Health ownership foundation", () => {
 Run:
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/schema.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/schema.spec.ts
 ```
 
 Expected: FAIL because `api.googleHealth.model.getConnectionStatus` and the Google Health schema do not exist.
@@ -228,7 +228,7 @@ Extend `requireUserId` to accept `ActionCtx`. Add `getConnectionStatus` with `ar
 Run:
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/schema.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/schema.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -279,7 +279,7 @@ expect(METRIC_DEFINITIONS.map((d) => d.dataType).sort()).toEqual([...expected].s
 - [ ] **Step 2: Run the registry test and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/registry.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/registry.spec.ts
 ```
 
 Expected: FAIL because `registry.ts` does not exist.
@@ -337,7 +337,7 @@ Build each scope by appending `${scopeSuffix}.readonly` to `https://www.googleap
 - [ ] **Step 4: Run the registry test**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/registry.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/registry.spec.ts
 ```
 
 Expected: PASS with 39 unique definitions and seven read-only scopes.
@@ -381,7 +381,7 @@ expect(corrected.payloadDigest).not.toBe(first.payloadDigest);
 - [ ] **Step 2: Run tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/normalize.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/normalize.spec.ts
 ```
 
 Expected: FAIL because the normalizer is missing.
@@ -407,7 +407,7 @@ Use physical time when present, fall back to civil ISO time, derive `localDate` 
 - [ ] **Step 4: Run normalizer tests**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/normalize.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/normalize.spec.ts
 ```
 
 Expected: PASS, including stable keys for changed values.
@@ -452,7 +452,7 @@ With convex-test, verify OAuth state is found by digest, expires after 10 minute
 - [ ] **Step 3: Run focused tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/crypto.spec.ts src/convex/googleHealth/model.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/crypto.spec.ts src/convex/googleHealth/model.spec.ts
 ```
 
 Expected: FAIL because the implementation files are absent.
@@ -470,7 +470,7 @@ Every function has explicit validators. `consumeOAuthState` queries `by_stateDig
 - [ ] **Step 6: Run tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/crypto.spec.ts src/convex/googleHealth/model.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/crypto.spec.ts src/convex/googleHealth/model.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -507,7 +507,7 @@ Assert that the authorization URL uses `https://accounts.google.com/o/oauth2/v2/
 - [ ] **Step 2: Run API client tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/oauth.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/oauth.spec.ts
 ```
 
 Expected: FAIL because the API client and OAuth actions do not exist.
@@ -558,7 +558,7 @@ Catch safe callback failures and redirect with a fixed error code, never the exc
 - [ ] **Step 6: Run OAuth tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/oauth.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/oauth.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -598,7 +598,7 @@ Mock one page with a continuation token and one final page. Assert each `runCurs
 - [ ] **Step 3: Run focused tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
 ```
 
 Expected: FAIL because records and sync modules are missing.
@@ -620,7 +620,7 @@ The Node action loads the connection/cursor internally, rejects stale generation
 - [ ] **Step 7: Run import tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -660,7 +660,7 @@ Cover the authorized `{"type":"verification"}` handshake, unauthorized challenge
 - [ ] **Step 3: Run webhook tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.spec.ts
 ```
 
 Expected: FAIL because webhook modules are absent.
@@ -680,7 +680,7 @@ Read `await request.text()` exactly once. Unauthorized requests, including Googl
 - [ ] **Step 7: Run webhook tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -718,7 +718,7 @@ Seed more active connections than one batch. Assert the daily coordinator proces
 - [ ] **Step 3: Run tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/account.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/account.spec.ts
 ```
 
 Expected: FAIL because account and maintenance functions are absent.
@@ -745,7 +745,7 @@ Both handlers use indexes, `.take(50|100)`, scheduler continuations, generation 
 - [ ] **Step 6: Run lifecycle tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/account.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/account.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 
@@ -776,7 +776,7 @@ Seed two identities, six categories, known/unknown metrics, numeric and complex 
 - [ ] **Step 2: Run focused tests and verify failure**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/records.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts
 ```
 
 Expected: FAIL because public read functions are missing.
@@ -788,7 +788,7 @@ Use `paginationOptsValidator` unchanged for record pagination and `paginationRes
 - [ ] **Step 4: Run tests and type checking**
 
 ```bash
-bunx vitest --project server --run src/convex/googleHealth/records.spec.ts
+bunx vitest --project convex --run src/convex/googleHealth/records.spec.ts
 bunx tsc --noEmit -p src/convex/tsconfig.json
 ```
 

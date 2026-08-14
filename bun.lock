@@ -30,6 +30,7 @@
         "@vitest/browser-playwright": "^4.1.8",
         "bits-ui": "^2.16.3",
         "clsx": "^2.1.1",
+        "convex-test": "^0.0.54",
         "embla-carousel-svelte": "^8.6.0",
         "eslint": "^10.4.1",
         "eslint-config-prettier": "^10.1.8",
@@ -791,6 +792,8 @@
     "convex": ["convex@1.42.3", "", { "dependencies": { "esbuild": "0.27.0", "prettier": "^3.0.0", "ws": "8.21.0" }, "peerDependencies": { "@auth0/auth0-react": "^2.0.1", "@clerk/clerk-react": "^4.12.8 || ^5.0.0", "@clerk/react": "^6.4.3", "react": "^18.0.0 || ^19.0.0-0 || ^19.0.0" }, "optionalPeers": ["@auth0/auth0-react", "@clerk/clerk-react", "@clerk/react", "react"], "bin": { "convex": "bin/main.js" } }, "sha512-7Tz/lH6UlZdiqzLPF/zrlH6Rlo/DOp836dL+GZkUMEQ2jaGGNnBIiIDcOOiEqtfSehuQ65r/rdNMnb4LupowaA=="],
 
     "convex-svelte": ["convex-svelte@0.14.0", "", { "dependencies": { "esm-env": "^1.2.2", "runed": "^0.37.1" }, "peerDependencies": { "convex": "^1.30.0", "svelte": "^5.19.0" } }, "sha512-eCaId++XnczQvEGc0sQi30BHkSEQ5AZjdDWaAqSlva2h9zKezGz8enp6MdFN7MIIMIlYZF3dKdzQ/LQ0d59KhQ=="],
+
+    "convex-test": ["convex-test@0.0.54", "", { "peerDependencies": { "convex": "^1.32.0" } }, "sha512-C0v2SQcuxrELAJRNzE6fQ686XDPor7UFoC22jcoJXeCRqhLo8ZIMZ4jyUHoo1UdAL2enCb0AbiprCVpLDN8u9Q=="],
 
     "cookie": ["cookie@0.6.0", "", {}, "sha512-U71cyTamuh1CRNCfpGY6to28lxvNwPG4Guz/EVjgf3Jmzv0vlDp1atT9eS5dDjMYHucpHbWns6Lwf3BKz6svdw=="],
 

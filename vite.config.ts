@@ -14,7 +14,8 @@ export default defineConfig({
 			},
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
-				runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+				runes: ({ filename }) =>
+					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 			adapter: adapter()
 		}),
@@ -45,10 +46,19 @@ export default defineConfig({
 			{
 				extends: './vite.config.ts',
 				test: {
+					name: 'convex',
+					environment: 'edge-runtime',
+					include: ['src/convex/**/*.{test,spec}.{js,ts}']
+				}
+			},
+
+			{
+				extends: './vite.config.ts',
+				test: {
 					name: 'server',
 					environment: 'node',
 					include: ['src/**/*.{test,spec}.{js,ts}'],
-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
+					exclude: ['src/convex/**/*.{test,spec}.{js,ts}', 'src/**/*.svelte.{test,spec}.{js,ts}']
 				}
 			}
 		]

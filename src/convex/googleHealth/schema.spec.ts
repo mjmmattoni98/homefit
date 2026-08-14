@@ -64,8 +64,8 @@ describe('Google Health ownership foundation', () => {
 				tokenKeyVersion: 'v1',
 				grantedScopes: ['scope-alice'],
 				generation: 1,
-				backfillTotalTypes: 39,
-				backfillCompletedTypes: 39,
+				backfillTotalTypes: 40,
+				backfillCompletedTypes: 40,
 				lastAttemptAt: 1_723_600_000_000,
 				lastSuccessfulSyncAt: 1_723_600_000_000
 			});
@@ -79,7 +79,7 @@ describe('Google Health ownership foundation', () => {
 				tokenKeyVersion: 'v1',
 				grantedScopes: ['scope-bob'],
 				generation: 1,
-				backfillTotalTypes: 39,
+				backfillTotalTypes: 40,
 				backfillCompletedTypes: 7,
 				lastAttemptAt: 1_723_600_100_000
 			});
@@ -112,15 +112,15 @@ describe('Google Health ownership foundation', () => {
 			{
 				status: 'active',
 				grantedScopes: ['scope-alice'],
-				backfillTotalTypes: 39,
-				backfillCompletedTypes: 39,
+				backfillTotalTypes: 40,
+				backfillCompletedTypes: 40,
 				lastAttemptAt: 1_723_600_000_000,
 				lastSuccessfulSyncAt: 1_723_600_000_000
 			},
 			{
 				status: 'backfilling',
 				grantedScopes: ['scope-bob'],
-				backfillTotalTypes: 39,
+				backfillTotalTypes: 40,
 				backfillCompletedTypes: 7,
 				lastAttemptAt: 1_723_600_100_000
 			},

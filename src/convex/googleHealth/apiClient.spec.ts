@@ -15,6 +15,7 @@ const CLIENT_SECRET = 'google-client-secret';
 const REDIRECT_URI = 'https://example.convex.site/google-health/oauth/callback';
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
@@ -93,12 +94,13 @@ describe('Google Health API client', () => {
 		});
 	});
 
-	it('refreshes access with the exact form contract and never returns a persisted refresh token', async () => {
+	it('refreshes with stored scope fallback and preserves a rotated refresh-token contract', async () => {
 		const fetchMock = vi.fn<typeof fetch>(async () =>
 			jsonResponse({
 				access_token: 'new-access-token',
 				expires_in: 3600,
-				scope: GOOGLE_HEALTH_READ_SCOPES.join(' '),
+				refresh_token: 'rotated-refresh-token',
+				refresh_token_expires_in: 15_552_000,
 				token_type: 'Bearer'
 			})
 		);
@@ -108,12 +110,15 @@ describe('Google Health API client', () => {
 			refreshAccessToken({
 				refreshToken: 'stored-refresh-token',
 				clientId: CLIENT_ID,
-				clientSecret: CLIENT_SECRET
+				clientSecret: CLIENT_SECRET,
+				grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0], GOOGLE_HEALTH_READ_SCOPES[6]]
 			})
 		).resolves.toEqual({
 			accessToken: 'new-access-token',
 			expiresIn: 3600,
-			grantedScopes: [...GOOGLE_HEALTH_READ_SCOPES],
+			grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0], GOOGLE_HEALTH_READ_SCOPES[6]],
+			refreshToken: 'rotated-refresh-token',
+			refreshTokenExpiresIn: 15_552_000,
 			tokenType: 'Bearer'
 		});
 
@@ -127,6 +132,29 @@ describe('Google Health API client', () => {
 		});
 	});
 
+	it('uses a returned refresh scope instead of the validated stored fallback', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () =>
+				jsonResponse({
+					access_token: 'new-access-token',
+					expires_in: 3600,
+					scope: GOOGLE_HEALTH_READ_SCOPES[6],
+					token_type: 'Bearer'
+				})
+			)
+		);
+
+		await expect(
+			refreshAccessToken({
+				refreshToken: 'stored-refresh-token',
+				clientId: CLIENT_ID,
+				clientSecret: CLIENT_SECRET,
+				grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0]]
+			})
+		).resolves.toMatchObject({ grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[6]] });
+	});
+
 	it('gets the stable Health identity through the bearer-authenticated v4 endpoint', async () => {
 		const fetchMock = vi.fn(async () => jsonResponse({ healthUserId: 'health-user-123' }));
 		vi.stubGlobal('fetch', fetchMock);
@@ -136,7 +164,8 @@ describe('Google Health API client', () => {
 		});
 		expect(fetchMock).toHaveBeenCalledWith('https://health.googleapis.com/v4/users/me/identity', {
 			method: 'GET',
-			headers: { authorization: 'Bearer ephemeral-access-token' }
+			headers: { authorization: 'Bearer ephemeral-access-token' },
+			signal: expect.any(AbortSignal)
 		});
 	});
 
@@ -156,7 +185,8 @@ describe('Google Health API client', () => {
 			'https://health.googleapis.com/v4/users/me/dataTypes/steps/dataPoints:reconcile?pageSize=1000&pageToken=page-token',
 			{
 				method: 'GET',
-				headers: { authorization: 'Bearer ephemeral-access-token' }
+				headers: { authorization: 'Bearer ephemeral-access-token' },
+				signal: expect.any(AbortSignal)
 			}
 		);
 
@@ -174,6 +204,28 @@ describe('Google Health API client', () => {
 		});
 	});
 
+	it('enforces bounded Health URLs, query values, and request bodies before fetch', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(
+			fetchHealthPage({
+				accessToken: 'ephemeral-access-token',
+				path: '/users/me/dataTypes/steps/dataPoints',
+				query: { pageToken: 'x'.repeat(9000) }
+			})
+		).rejects.toMatchObject({ code: 'invalid_request', message: 'Google Health request failed' });
+		await expect(
+			fetchHealthPage({
+				accessToken: 'ephemeral-access-token',
+				path: '/users/me/dataTypes/steps/dataPoints:dailyRollUp',
+				method: 'POST',
+				body: { payload: 'x'.repeat(70 * 1024) }
+			})
+		).rejects.toMatchObject({ code: 'invalid_request', message: 'Google Health request failed' });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it('revokes a refresh token without placing it in a body or returned value', async () => {
 		const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
 		vi.stubGlobal('fetch', fetchMock);
@@ -183,7 +235,8 @@ describe('Google Health API client', () => {
 			'https://oauth2.googleapis.com/revoke?token=refresh%20token%2Fwith%20symbols',
 			{
 				method: 'POST',
-				headers: { 'content-type': 'application/x-www-form-urlencoded' }
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				signal: expect.any(AbortSignal)
 			}
 		);
 	});
@@ -234,13 +287,105 @@ describe('Google Health API client', () => {
 		}
 	});
 
-	it('rejects success responses that omit required token or identity fields', async () => {
+	it('applies one abort deadline to stalled fetches and stalled success or error bodies', async () => {
+		vi.useFakeTimers();
+		const never = new ReadableStream<Uint8Array>({ start() {} });
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockImplementationOnce(async (_input, init) => {
+				return await new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(new Error('secret abort cause')));
+				});
+			})
+			.mockResolvedValueOnce(
+				new Response(never, { status: 200, headers: { 'content-type': 'application/json' } })
+			)
+			.mockResolvedValueOnce(
+				new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+					status: 503,
+					headers: { 'content-type': 'application/json' }
+				})
+			);
+		vi.stubGlobal('fetch', fetchMock);
+
+		for (let index = 0; index < 3; index += 1) {
+			const pending = exchangeAuthorizationCode({
+				code: 'authorization-code',
+				clientId: CLIENT_ID,
+				clientSecret: CLIENT_SECRET,
+				redirectUri: REDIRECT_URI
+			});
+			const assertion = expect(pending).rejects.toMatchObject({
+				code: 'request_timeout',
+				status: null,
+				retryable: true,
+				message: 'Google Health request failed'
+			});
+			await vi.advanceTimersByTimeAsync(60_000);
+			await assertion;
+		}
+		expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
+	});
+
+	it('rejects oversized success and error bodies without reading or exposing them', async () => {
+		const oversizedErrorStream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array(17 * 1024));
+				controller.close();
+			}
+		});
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(
+				new Response('{}', {
+					status: 200,
+					headers: { 'content-length': String(65 * 1024), 'content-type': 'application/json' }
+				})
+			)
+			.mockResolvedValueOnce(
+				new Response(oversizedErrorStream, {
+					status: 400,
+					headers: { 'content-type': 'application/json' }
+				})
+			);
+		vi.stubGlobal('fetch', fetchMock);
+
+		for (const operation of [
+			() => getHealthIdentity('ephemeral-access-token'),
+			() =>
+				exchangeAuthorizationCode({
+					code: 'authorization-code',
+					clientId: CLIENT_ID,
+					clientSecret: CLIENT_SECRET,
+					redirectUri: REDIRECT_URI
+				})
+		]) {
+			await expect(operation()).rejects.toMatchObject({
+				code: 'response_too_large',
+				retryable: false,
+				message: 'Google Health request failed'
+			});
+		}
+	});
+
+	it('rejects success responses with missing token fields, invalid rotation bounds, or invalid identity', async () => {
 		const fetchMock = vi
 			.fn()
 			.mockResolvedValueOnce(
 				jsonResponse({ access_token: 'token', expires_in: 3600, token_type: 'Bearer' })
 			)
-			.mockResolvedValueOnce(jsonResponse({ healthUserId: '' }));
+			.mockResolvedValueOnce(
+				jsonResponse({
+					access_token: 'token',
+					expires_in: 3600,
+					scope: GOOGLE_HEALTH_READ_SCOPES[0],
+					token_type: 'Bearer',
+					refresh_token: 'rotated-refresh-token',
+					refresh_token_expires_in: 0
+				})
+			)
+			.mockResolvedValueOnce(jsonResponse({ healthUserId: 'invalid_identity' }))
+			.mockResolvedValueOnce(jsonResponse({ healthUserId: 'a'.repeat(64) }));
 		vi.stubGlobal('fetch', fetchMock);
 
 		await expect(
@@ -251,6 +396,18 @@ describe('Google Health API client', () => {
 				redirectUri: REDIRECT_URI
 			})
 		).rejects.toMatchObject({ code: 'invalid_response', message: 'Google Health request failed' });
+		await expect(
+			refreshAccessToken({
+				refreshToken: 'stored-refresh-token',
+				clientId: CLIENT_ID,
+				clientSecret: CLIENT_SECRET,
+				grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0]]
+			})
+		).rejects.toMatchObject({ code: 'invalid_response', message: 'Google Health request failed' });
+		await expect(getHealthIdentity('ephemeral-access-token')).rejects.toMatchObject({
+			code: 'invalid_response',
+			message: 'Google Health request failed'
+		});
 		await expect(getHealthIdentity('ephemeral-access-token')).rejects.toMatchObject({
 			code: 'invalid_response',
 			message: 'Google Health request failed'

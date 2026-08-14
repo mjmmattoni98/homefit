@@ -37,6 +37,13 @@ function jsonResponse(value: unknown, status = 200): Response {
 	});
 }
 
+function expectPrivateRedirect(response: Response, location: string): void {
+	expect(response.status).toBe(302);
+	expect(response.headers.get('location')).toBe(location);
+	expect(response.headers.get('cache-control')).toBe('no-store');
+	expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+}
+
 async function sha256Base64Url(value: string): Promise<string> {
 	const digest = new Uint8Array(
 		await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
@@ -149,9 +156,7 @@ describe('Google Health OAuth flow', () => {
 		const response = await t.fetch(
 			`/google-health/oauth/callback?code=partial-code&state=${encodeURIComponent(state)}`
 		);
-		expect(response.headers.get('location')).toBe(
-			`${APP_URL}/dashboard/import?googleHealth=connected`
-		);
+		expectPrivateRedirect(response, `${APP_URL}/dashboard/import?googleHealth=connected`);
 		const stored = await t.run(async (ctx) => {
 			const connection = await ctx.db
 				.query('googleHealthConnections')
@@ -169,7 +174,7 @@ describe('Google Health OAuth flow', () => {
 		expect(stored.cursors.map((cursor) => cursor.dataType)).toEqual(['sleep']);
 	});
 
-	it('completes through the HTTP callback, encrypts the token, initializes 40 cursors, and schedules one worker', async () => {
+	it('completes through the callback, encrypts the token, and queues 40 cursors for Task 6', async () => {
 		const t = convexTest(schema, modules);
 		const { authorizationUrl } = await t
 			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
@@ -198,10 +203,7 @@ describe('Google Health OAuth flow', () => {
 		const response = await t.fetch(
 			`/google-health/oauth/callback?code=one-time-code&state=${encodeURIComponent(state)}`
 		);
-		expect(response.status).toBe(302);
-		expect(response.headers.get('location')).toBe(
-			`${APP_URL}/dashboard/import?googleHealth=connected`
-		);
+		expectPrivateRedirect(response, `${APP_URL}/dashboard/import?googleHealth=connected`);
 
 		const stored = await t.run(async (ctx) => {
 			const connection = await ctx.db
@@ -213,7 +215,7 @@ describe('Google Health OAuth flow', () => {
 				.query('googleHealthSyncCursors')
 				.withIndex('by_userId', (q) => q.eq('userId', 'clerk|user-a'))
 				.take(41);
-			const scheduled = await ctx.db.system.query('_scheduled_functions').take(2);
+			const scheduled = await ctx.db.system.query('_scheduled_functions').take(1);
 			return { connection, cursors, scheduled };
 		});
 
@@ -230,19 +232,89 @@ describe('Google Health OAuth flow', () => {
 		);
 		expect(JSON.stringify(stored.connection)).not.toContain('refresh-token-that-must-be-encrypted');
 		expect(stored.cursors).toHaveLength(40);
-		expect(stored.scheduled).toHaveLength(1);
-		expect(stored.scheduled[0]).toMatchObject({
-			name: 'googleHealth/sync:runCursor',
-			args: [
-				{
-					cursorId: stored.cursors.find((cursor) => cursor.dataType === 'active-energy-burned')
-						?._id,
-					generation: 1,
-					trigger: 'oauth'
-				}
-			],
-			state: { kind: 'pending' }
+		expect(stored.scheduled).toEqual([]);
+	});
+
+	it('rejects a location-only grant before requesting a Health identity', async () => {
+		const t = convexTest(schema, modules);
+		const { authorizationUrl } = await t
+			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
+			.action(beginConnection, { returnPath: '/dashboard/import' });
+		const state = new URL(authorizationUrl).searchParams.get('state');
+		if (!state) throw new Error('Missing state fixture');
+		const fetchMock = vi.fn(async () =>
+			jsonResponse({
+				access_token: 'access-token',
+				refresh_token: 'refresh-token',
+				expires_in: 3600,
+				scope: GOOGLE_HEALTH_READ_SCOPES[4],
+				token_type: 'Bearer'
+			})
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const response = await t.fetch(
+			`/google-health/oauth/callback?code=one-time-code&state=${encodeURIComponent(state)}`
+		);
+		expectPrivateRedirect(response, `${APP_URL}/dashboard/import?googleHealth=error`);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const connection = await t.run(async (ctx) =>
+			ctx.db
+				.query('googleHealthConnections')
+				.withIndex('by_userId', (q) => q.eq('userId', 'clerk|user-a'))
+				.unique()
+		);
+		expect(connection).toBeNull();
+	});
+
+	it('marks a saved connection delayed when cursor initialization rolls back', async () => {
+		const t = convexTest({
+			schema,
+			modules,
+			transactionLimits: { documentsWritten: 2 }
 		});
+		const { authorizationUrl } = await t
+			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
+			.action(beginConnection, { returnPath: '/dashboard/import' });
+		const state = new URL(authorizationUrl).searchParams.get('state');
+		if (!state) throw new Error('Missing state fixture');
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? jsonResponse({
+							access_token: 'access-token',
+							refresh_token: 'refresh-token',
+							expires_in: 3600,
+							scope: GOOGLE_HEALTH_READ_SCOPES.join(' '),
+							token_type: 'Bearer'
+						})
+					: jsonResponse({ healthUserId: 'google-health-user-a' })
+			)
+		);
+
+		const response = await t.fetch(
+			`/google-health/oauth/callback?code=one-time-code&state=${encodeURIComponent(state)}`
+		);
+		expectPrivateRedirect(response, `${APP_URL}/dashboard/import?googleHealth=error`);
+		const stored = await t.run(async (ctx) => {
+			const connection = await ctx.db
+				.query('googleHealthConnections')
+				.withIndex('by_userId', (q) => q.eq('userId', 'clerk|user-a'))
+				.unique();
+			const cursors = await ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_userId', (q) => q.eq('userId', 'clerk|user-a'))
+				.take(1);
+			return { connection, cursors };
+		});
+		expect(stored.connection).toMatchObject({
+			status: 'delayed',
+			generation: 1,
+			lastErrorCode: 'cursor_initialization_failed',
+			lastErrorMessage: 'Google Health is temporarily unavailable'
+		});
+		expect(stored.cursors).toEqual([]);
 	});
 
 	it('accepts partial consent but requires a refresh token and at least one approved scope', async () => {
@@ -281,10 +353,7 @@ describe('Google Health OAuth flow', () => {
 			const response = await t.fetch(
 				`/google-health/oauth/callback?code=one-time-code&state=${encodeURIComponent(state)}`
 			);
-			expect(response.status).toBe(302);
-			expect(response.headers.get('location')).toBe(
-				`${APP_URL}/dashboard/import?googleHealth=error`
-			);
+			expectPrivateRedirect(response, `${APP_URL}/dashboard/import?googleHealth=error`);
 			const connection = await t.run(async (ctx) =>
 				ctx.db
 					.query('googleHealthConnections')
@@ -318,8 +387,7 @@ describe('Google Health OAuth flow', () => {
 			'/google-health/oauth/callback?code=a&state=0123456789abcdefghijklmnopqrstuvwxyzABCDEFG&returnPath=https://attacker.example'
 		]) {
 			const response = await t.fetch(path);
-			expect(response.status).toBe(302);
-			expect(response.headers.get('location')).toBe(errorLocation);
+			expectPrivateRedirect(response, errorLocation);
 		}
 
 		const { authorizationUrl } = await t
@@ -346,8 +414,8 @@ describe('Google Health OAuth flow', () => {
 			`/google-health/oauth/callback?code=one-time-code&state=${encodeURIComponent(state)}`
 		);
 
-		expect(first.headers.get('location')).toBe(errorLocation);
-		expect(replay.headers.get('location')).toBe(errorLocation);
+		expectPrivateRedirect(first, errorLocation);
+		expectPrivateRedirect(replay, errorLocation);
 		expect(replay.headers.get('location')).not.toContain('one-time-code');
 		expect(replay.headers.get('location')).not.toContain(state);
 	});

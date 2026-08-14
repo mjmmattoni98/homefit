@@ -1,7 +1,5 @@
-import type { Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
 import { action, env, internalAction } from '../_generated/server';
-import { type FunctionReference, makeFunctionReference } from 'convex/server';
 import { v } from 'convex/values';
 import { requireUserId } from '../helpers';
 import {
@@ -12,29 +10,11 @@ import {
 } from './apiClient';
 import { createTokenKeyring, encryptRefreshToken } from './crypto';
 import { sha256Base64Url } from './normalize';
+import { METRIC_DEFINITIONS } from './registry';
 
 const IMPORT_RETURN_PATH = '/dashboard/import';
 const STATE_BYTE_LENGTH = 32;
-
-function internalActionReference<Args extends Record<string, unknown>, Return>(
-	name: string
-): FunctionReference<'action', 'internal', Args, Return> {
-	return makeFunctionReference<'action', Args, Return>(name) as unknown as FunctionReference<
-		'action',
-		'internal',
-		Args,
-		Return
-	>;
-}
-
-const runCursor = internalActionReference<
-	{
-		cursorId: Id<'googleHealthSyncCursors'>;
-		generation: number;
-		trigger: 'oauth';
-	},
-	null
->('googleHealth/sync:runCursor');
+const IMPORTABLE_SCOPES = new Set(METRIC_DEFINITIONS.map((definition) => definition.scope));
 
 function encodeBase64Url(bytes: Uint8Array): string {
 	let binary = '';
@@ -92,6 +72,9 @@ export const completeOAuth = internalAction({
 		});
 		if (tokens.refreshToken === undefined) throw oauthFlowError('missing_refresh_token');
 		if (tokens.grantedScopes.length === 0) throw oauthFlowError('invalid_granted_scopes');
+		if (!tokens.grantedScopes.some((scope) => IMPORTABLE_SCOPES.has(scope))) {
+			throw oauthFlowError('no_importable_scopes');
+		}
 
 		const { healthUserId } = await getHealthIdentity(tokens.accessToken);
 		const keyring = createTokenKeyring(
@@ -111,15 +94,18 @@ export const completeOAuth = internalAction({
 			grantedScopes: tokens.grantedScopes,
 			...tokenEnvelope
 		});
-		const cursors = await ctx.runMutation(internal.googleHealth.model.initializeCursors, {
-			connectionId: connection.connectionId
-		});
-		if (cursors.firstCursorId !== null) {
-			await ctx.scheduler.runAfter(0, runCursor, {
-				cursorId: cursors.firstCursorId,
-				generation: connection.generation,
-				trigger: 'oauth'
+		try {
+			await ctx.runMutation(internal.googleHealth.model.initializeCursors, {
+				connectionId: connection.connectionId
 			});
+		} catch {
+			await ctx.runMutation(internal.googleHealth.model.setConnectionError, {
+				connectionId: connection.connectionId,
+				expectedGeneration: connection.generation,
+				status: 'delayed',
+				lastErrorCode: 'cursor_initialization_failed'
+			});
+			throw oauthFlowError('cursor_initialization_failed');
 		}
 		return null;
 	}

@@ -28,7 +28,14 @@ function applicationOrigin(value: string): string | null {
 }
 
 function callbackRedirect(origin: string, status: 'connected' | 'error'): Response {
-	return Response.redirect(`${origin}${IMPORT_PATH}?googleHealth=${status}`, 302);
+	return new Response(null, {
+		status: 302,
+		headers: {
+			location: `${origin}${IMPORT_PATH}?googleHealth=${status}`,
+			'cache-control': 'no-store',
+			'referrer-policy': 'no-referrer'
+		}
+	});
 }
 
 const http = httpRouter();

@@ -6,7 +6,8 @@ const EXPECTED_DEFINITION_ROWS = [
 	'active-minutes|activeMinutes|interval|activity|activity_and_fitness|reconcile|false|sum|min',
 	'active-zone-minutes|activeZoneMinutes|interval|activity|activity_and_fitness|reconcile|true|sum|min',
 	'activity-level|activityLevel|interval|activity|activity_and_fitness|reconcile|true|duration|',
-	'altitude|altitude|interval|activity|activity_and_fitness|reconcile|true|average|m',
+	'altitude|altitude|interval|activity|activity_and_fitness|reconcile|true|sum|m',
+	'basal-energy-burned|basalEnergyBurned|interval|activity|activity_and_fitness|reconcile|false|sum|kcal',
 	'blood-glucose|bloodGlucose|sample|vitals|health_metrics_and_measurements|reconcile|true|average|mmol/L',
 	'body-fat|bodyFat|sample|body|health_metrics_and_measurements|reconcile|true|average|%',
 	'calories-in-heart-rate-zone|caloriesInHeartRateZone|daily|activity|activity_and_fitness|dailyRollUp|true|sum|kcal',
@@ -100,11 +101,11 @@ function serializeDefinition(definition: (typeof METRIC_DEFINITIONS)[number]): s
 }
 
 describe('Google Health metric registry', () => {
-	it('defines exactly the 39 readable data types with unique kebab-case identifiers', () => {
+	it('defines exactly the 40 readable data types with unique kebab-case identifiers', () => {
 		const dataTypes = METRIC_DEFINITIONS.map((definition) => definition.dataType);
 
-		expect(dataTypes).toHaveLength(39);
-		expect(new Set(dataTypes).size).toBe(39);
+		expect(dataTypes).toHaveLength(40);
+		expect(new Set(dataTypes).size).toBe(40);
 		expect(dataTypes.every((dataType) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(dataType))).toBe(true);
 		expect(dataTypes).toEqual(
 			EXPECTED_DEFINITION_ROWS.map((definition) => definition.split('|')[0])
@@ -121,7 +122,7 @@ describe('Google Health metric registry', () => {
 	it('owns exact source-unit conversion and semantic identity metadata', () => {
 		expect(getMetricDefinition('weight')).toMatchObject({
 			primaryValueStrategy: { path: ['weightGrams'], multiplier: 0.001 },
-			identityPaths: []
+			identityStrategy: { components: [] }
 		});
 		expect(getMetricDefinition('height')).toMatchObject({
 			primaryValueStrategy: { path: ['heightMillimeters'], multiplier: 0.001 }
@@ -132,29 +133,48 @@ describe('Google Health metric registry', () => {
 		expect(getMetricDefinition('altitude')).toMatchObject({
 			primaryValueStrategy: { path: ['gainMillimeters'], multiplier: 0.001 }
 		});
+		expect(getMetricDefinition('basal-energy-burned')).toMatchObject({
+			aggregation: 'sum',
+			primaryUnit: 'kcal',
+			primaryValueStrategy: { path: ['kcal'], multiplier: 1 }
+		});
 		expect(getMetricDefinition('blood-glucose')).toMatchObject({
 			primaryValueStrategy: {
 				path: ['bloodGlucoseMilligramsPerDeciliter'],
 				multiplier: 1 / 18.0182
 			}
 		});
-		expect(getMetricDefinition('activity-level')?.identityPaths).toEqual([['activityLevelType']]);
-		expect(getMetricDefinition('active-zone-minutes')?.identityPaths).toEqual([['heartRateZone']]);
-		expect(getMetricDefinition('sleep')?.identityPaths).toEqual([['type']]);
-		expect(getMetricDefinition('exercise')?.identityPaths).toEqual([['exerciseType']]);
-		expect(getMetricDefinition('vo2-max')?.identityPaths).toEqual([['measurementMethod']]);
-		expect(getMetricDefinition('nutrition-log')?.identityPaths).toEqual([
-			['food'],
-			['foodDisplayName'],
-			['mealType']
+		expect(getMetricDefinition('activity-level')?.identityStrategy.components).toEqual([
+			{ kind: 'value', path: ['activityLevelType'] }
 		]);
-		expect(getMetricDefinition('time-in-heart-rate-zone')?.identityPaths).toEqual([
-			['heartRateZoneType']
+		expect(getMetricDefinition('active-zone-minutes')?.identityStrategy.components).toEqual([
+			{ kind: 'value', path: ['heartRateZone'] }
 		]);
-		expect(getMetricDefinition('core-body-temperature')?.identityPaths).toEqual([
-			['id'],
-			['measurementLocation']
+		expect(getMetricDefinition('sleep')?.identityStrategy).toEqual({
+			components: [{ kind: 'value', path: ['type'] }]
+		});
+		expect(getMetricDefinition('exercise')?.identityStrategy.components).toEqual([
+			{ kind: 'value', path: ['exerciseType'] }
 		]);
+		expect(getMetricDefinition('vo2-max')?.identityStrategy.components).toEqual([
+			{ kind: 'value', path: ['measurementMethod'] }
+		]);
+		expect(getMetricDefinition('nutrition-log')?.identityStrategy).toEqual({
+			components: [
+				{ kind: 'firstPresent', paths: [['food'], ['foodDisplayName']] },
+				{ kind: 'value', path: ['mealType'] }
+			]
+		});
+		expect(getMetricDefinition('time-in-heart-rate-zone')?.identityStrategy.components).toEqual([
+			{ kind: 'value', path: ['heartRateZoneType'] }
+		]);
+		expect(getMetricDefinition('core-body-temperature')?.identityStrategy).toEqual({
+			components: [
+				{ kind: 'value', path: ['id'] },
+				{ kind: 'value', path: ['measurementLocation'] }
+			],
+			stableReferencePath: ['id']
+		});
 		expect(getMetricDefinition('sleep')?.payloadLifecycleTimestamps).toBe(true);
 		expect(getMetricDefinition('exercise')?.payloadLifecycleTimestamps).toBe(true);
 		expect(getMetricDefinition('heart-rate')?.payloadLifecycleTimestamps).toBe(false);

@@ -39,6 +39,21 @@ export type MetricPrimaryValueStrategy =
 			readonly intervalFallback: boolean;
 	  };
 
+export type MetricIdentityComponent =
+	| {
+			readonly kind: 'value';
+			readonly path: readonly string[];
+	  }
+	| {
+			readonly kind: 'firstPresent';
+			readonly paths: readonly (readonly string[])[];
+	  };
+
+export interface MetricIdentityStrategy {
+	readonly components: readonly MetricIdentityComponent[];
+	readonly stableReferencePath?: readonly string[];
+}
+
 export interface MetricDefinition {
 	readonly dataType: string;
 	readonly payloadField: string;
@@ -49,8 +64,7 @@ export interface MetricDefinition {
 	readonly webhook: boolean;
 	readonly aggregation: MetricAggregation;
 	readonly primaryUnit: string;
-	readonly identityPaths: readonly (readonly string[])[];
-	readonly identityReferencePath?: readonly string[];
+	readonly identityStrategy: MetricIdentityStrategy;
 	readonly primaryValueStrategy?: MetricPrimaryValueStrategy;
 	readonly payloadLifecycleTimestamps: boolean;
 	readonly maxWindowDays?: number;
@@ -76,7 +90,8 @@ const definitions = [
 	['active-minutes', 'activeMinutes', 'interval', 'activity', 'activity_and_fitness', 'reconcile', false, 'sum', 'min'],
 	['active-zone-minutes', 'activeZoneMinutes', 'interval', 'activity', 'activity_and_fitness', 'reconcile', true, 'sum', 'min'],
 	['activity-level', 'activityLevel', 'interval', 'activity', 'activity_and_fitness', 'reconcile', true, 'duration', ''],
-	['altitude', 'altitude', 'interval', 'activity', 'activity_and_fitness', 'reconcile', true, 'average', 'm'],
+	['altitude', 'altitude', 'interval', 'activity', 'activity_and_fitness', 'reconcile', true, 'sum', 'm'],
+	['basal-energy-burned', 'basalEnergyBurned', 'interval', 'activity', 'activity_and_fitness', 'reconcile', false, 'sum', 'kcal'],
 	['blood-glucose', 'bloodGlucose', 'sample', 'vitals', 'health_metrics_and_measurements', 'reconcile', true, 'average', 'mmol/L'],
 	['body-fat', 'bodyFat', 'sample', 'body', 'health_metrics_and_measurements', 'reconcile', true, 'average', '%'],
 	['calories-in-heart-rate-zone', 'caloriesInHeartRateZone', 'daily', 'activity', 'activity_and_fitness', 'dailyRollUp', true, 'sum', 'kcal'],
@@ -113,24 +128,62 @@ const definitions = [
 	['weight', 'weight', 'sample', 'body', 'health_metrics_and_measurements', 'reconcile', true, 'latest', 'kg'],
 ] as const satisfies readonly RawMetricDefinition[];
 
-const IDENTITY_PATHS_BY_DATA_TYPE: Readonly<
-	Partial<Record<string, readonly (readonly string[])[]>>
-> = {
-	'active-zone-minutes': [['heartRateZone']],
-	'activity-level': [['activityLevelType']],
-	'blood-glucose': [['measurementSource'], ['mealType'], ['measurementTiming'], ['specimen']],
-	'core-body-temperature': [['id'], ['measurementLocation']],
-	exercise: [['exerciseType']],
-	'nutrition-log': [['food'], ['foodDisplayName'], ['mealType']],
-	sleep: [['type']],
-	'swim-lengths-data': [['swimStrokeType']],
-	'time-in-heart-rate-zone': [['heartRateZoneType']],
-	'vo2-max': [['measurementMethod']]
+type RawMetricIdentityStrategy = {
+	readonly components: readonly (
+		| { readonly kind: 'value'; readonly path: readonly string[] }
+		| {
+				readonly kind: 'firstPresent';
+				readonly paths: readonly (readonly string[])[];
+		  }
+	)[];
+	readonly stableReferencePath?: readonly string[];
 };
 
-const IDENTITY_REFERENCE_PATHS: Readonly<Partial<Record<string, readonly string[]>>> = {
-	'core-body-temperature': ['id'],
-	sleep: ['metadata', 'externalId']
+const IDENTITY_STRATEGIES_BY_DATA_TYPE: Readonly<
+	Partial<Record<string, RawMetricIdentityStrategy>>
+> = {
+	'active-zone-minutes': {
+		components: [{ kind: 'value', path: ['heartRateZone'] }]
+	},
+	'activity-level': {
+		components: [{ kind: 'value', path: ['activityLevelType'] }]
+	},
+	'blood-glucose': {
+		components: [
+			{ kind: 'value', path: ['measurementSource'] },
+			{ kind: 'value', path: ['mealType'] },
+			{ kind: 'value', path: ['measurementTiming'] },
+			{ kind: 'value', path: ['specimen'] }
+		]
+	},
+	'core-body-temperature': {
+		components: [
+			{ kind: 'value', path: ['id'] },
+			{ kind: 'value', path: ['measurementLocation'] }
+		],
+		stableReferencePath: ['id']
+	},
+	exercise: {
+		components: [{ kind: 'value', path: ['exerciseType'] }]
+	},
+	'nutrition-log': {
+		components: [
+			{ kind: 'firstPresent', paths: [['food'], ['foodDisplayName']] },
+			{ kind: 'value', path: ['mealType'] }
+		]
+	},
+	sleep: {
+		components: [{ kind: 'value', path: ['type'] }]
+	},
+	'swim-lengths-data': {
+		components: [{ kind: 'value', path: ['swimStrokeType'] }]
+	},
+	'time-in-heart-rate-zone': {
+		components: [{ kind: 'value', path: ['heartRateZoneType'] }]
+	},
+	'vo2-max': {
+		components: [{ kind: 'value', path: ['measurementMethod'] }]
+	}
 };
 
 const PRIMARY_VALUE_STRATEGIES: Readonly<
@@ -161,6 +214,7 @@ const PRIMARY_VALUE_STRATEGIES: Readonly<
 	},
 	'active-zone-minutes': { path: ['activeZoneMinutes'] },
 	altitude: { path: ['gainMillimeters'], multiplier: 0.001 },
+	'basal-energy-burned': { path: ['kcal'] },
 	'blood-glucose': {
 		path: ['bloodGlucoseMilligramsPerDeciliter'],
 		multiplier: 1 / 18.0182
@@ -204,10 +258,24 @@ const PRIMARY_VALUE_STRATEGIES: Readonly<
 	}
 };
 
-function freezePaths(
-	paths: readonly (readonly string[])[] | undefined
-): readonly (readonly string[])[] {
-	return Object.freeze((paths ?? []).map((path) => Object.freeze([...path])));
+function getIdentityStrategy(dataType: string): MetricIdentityStrategy {
+	const strategy = IDENTITY_STRATEGIES_BY_DATA_TYPE[dataType];
+	const components = (strategy?.components ?? []).map((component): MetricIdentityComponent => {
+		if (component.kind === 'firstPresent') {
+			return Object.freeze({
+				kind: 'firstPresent',
+				paths: Object.freeze(component.paths.map((path) => Object.freeze([...path])))
+			});
+		}
+		return Object.freeze({ kind: 'value', path: Object.freeze([...component.path]) });
+	});
+	const stableReferencePath = strategy?.stableReferencePath;
+	return Object.freeze({
+		components: Object.freeze(components),
+		...(stableReferencePath === undefined
+			? {}
+			: { stableReferencePath: Object.freeze([...stableReferencePath]) })
+	});
 }
 
 function getPrimaryValueStrategy(dataType: string): MetricPrimaryValueStrategy | undefined {
@@ -263,7 +331,6 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = Object.freeze(
 		]) => {
 			const maxWindowDays = getMaxWindowDays(readMode);
 			const primaryValueStrategy = getPrimaryValueStrategy(dataType);
-			const identityReferencePath = IDENTITY_REFERENCE_PATHS[dataType];
 
 			return Object.freeze({
 				dataType,
@@ -275,11 +342,8 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = Object.freeze(
 				webhook,
 				aggregation,
 				primaryUnit,
-				identityPaths: freezePaths(IDENTITY_PATHS_BY_DATA_TYPE[dataType]),
+				identityStrategy: getIdentityStrategy(dataType),
 				payloadLifecycleTimestamps: dataType === 'exercise' || dataType === 'sleep',
-				...(identityReferencePath === undefined
-					? {}
-					: { identityReferencePath: Object.freeze([...identityReferencePath]) }),
 				...(primaryValueStrategy === undefined ? {} : { primaryValueStrategy }),
 				...(maxWindowDays === undefined ? {} : { maxWindowDays })
 			});

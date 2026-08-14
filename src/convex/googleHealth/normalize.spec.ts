@@ -555,6 +555,26 @@ describe('Google Health point normalization', () => {
 		expect(electrocardiogram).not.toHaveProperty('primaryValue');
 	});
 
+	it('normalizes current basal-energy-burned interval records', () => {
+		const point = normalizeGooglePoint(metric('basal-energy-burned'), {
+			basalEnergyBurned: {
+				interval: {
+					startTime: '2026-08-14T10:00:00Z',
+					endTime: '2026-08-14T11:00:00Z'
+				},
+				kcal: 72.5
+			}
+		});
+
+		expect(point).toMatchObject({
+			dataType: 'basal-energy-burned',
+			primaryValue: 72.5,
+			primaryUnit: 'kcal',
+			startTime: Date.parse('2026-08-14T10:00:00Z'),
+			endTime: Date.parse('2026-08-14T11:00:00Z')
+		});
+	});
+
 	it('chooses only explicitly registered values for multi-value metrics', () => {
 		const temperature = normalizeGooglePoint(metric('daily-sleep-temperature-derivations'), {
 			dailySleepTemperatureDerivations: {
@@ -639,6 +659,15 @@ describe('Google Health point normalization', () => {
 		const corrected = point('users/me/foods/salad', 'LUNCH', 475);
 		const differentFood = point('users/me/foods/soup', 'LUNCH', 450);
 		const differentMeal = point('users/me/foods/salad', 'DINNER', 450);
+		const renamedIdentifiedFood = normalizeGooglePoint(metric('nutrition-log'), {
+			nutritionLog: {
+				interval,
+				food: 'users/me/foods/salad',
+				foodDisplayName: 'Renamed salad',
+				mealType: 'LUNCH',
+				energy: { kcal: 450 }
+			}
+		});
 		const anonymous = (foodDisplayName: string) =>
 			normalizeGooglePoint(metric('nutrition-log'), {
 				nutritionLog: { interval, foodDisplayName, mealType: 'LUNCH', energy: { kcal: 450 } }
@@ -655,6 +684,8 @@ describe('Google Health point normalization', () => {
 		expect(corrected.payloadDigest).not.toBe(first.payloadDigest);
 		expect(differentFood.recordKey).not.toBe(first.recordKey);
 		expect(differentMeal.recordKey).not.toBe(first.recordKey);
+		expect(renamedIdentifiedFood.recordKey).toBe(first.recordKey);
+		expect(renamedIdentifiedFood.payloadDigest).not.toBe(first.payloadDigest);
 		expect(anonymous('Salad').recordKey).not.toBe(anonymous('Soup').recordKey);
 	});
 
@@ -758,7 +789,7 @@ describe('Google Health point normalization', () => {
 		expect(point).not.toHaveProperty('primaryValue');
 	});
 
-	it('uses stable external IDs before interval identity when the registry provides one', () => {
+	it('does not treat source-scoped sleep external IDs as global identity', () => {
 		const sleep = (externalId: string, startHour: string) =>
 			normalizeGooglePoint(metric('sleep'), {
 				sleep: {
@@ -771,12 +802,12 @@ describe('Google Health point normalization', () => {
 				}
 			});
 		const first = sleep('sleep-abc', '08');
-		const correctedBounds = sleep('sleep-abc', '09');
-		const other = sleep('sleep-def', '08');
+		const sameExternalIdDifferentBounds = sleep('sleep-abc', '09');
+		const differentExternalIdSameBounds = sleep('sleep-def', '08');
 
-		expect(correctedBounds.recordKey).toBe(first.recordKey);
-		expect(correctedBounds.payloadDigest).not.toBe(first.payloadDigest);
-		expect(other.recordKey).not.toBe(first.recordKey);
+		expect(sameExternalIdDifferentBounds.recordKey).not.toBe(first.recordKey);
+		expect(differentExternalIdSameBounds.recordKey).toBe(first.recordKey);
+		expect(differentExternalIdSameBounds.payloadDigest).not.toBe(first.payloadDigest);
 	});
 
 	it('includes both daily-rollup civil bounds in unnamed identity', () => {
@@ -795,6 +826,21 @@ describe('Google Health point normalization', () => {
 				totalCalories: { kcalSum: 100 }
 			})
 		).toThrow(/civil end time/);
+	});
+
+	it('rejects daily-rollup windows reversed within the same millisecond', () => {
+		const time = (nanos: number) => ({
+			date: { year: 2026, month: 8, day: 14 },
+			time: { hours: 10, minutes: 0, seconds: 0, nanos }
+		});
+
+		expect(() =>
+			normalizeGooglePoint(metric('total-calories'), {
+				civilStartTime: time(900_000),
+				civilEndTime: time(800_000),
+				totalCalories: { kcalSum: 100 }
+			})
+		).toThrow(/end precedes start/);
 	});
 
 	it('preserves RFC3339 nanoseconds in identity and rejects non-RFC3339 physical times', () => {

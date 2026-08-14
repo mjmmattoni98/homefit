@@ -73,6 +73,11 @@ interface NormalizedTime {
 	readonly endTime?: number;
 }
 
+interface OrderedTime {
+	readonly epochMs: number;
+	readonly subMillisecondNanos: number;
+}
+
 function isPlainObject(value: unknown): value is PlainObject {
 	if (value === null || typeof value !== 'object' || Array.isArray(value)) {
 		return false;
@@ -463,13 +468,24 @@ function valueAtPath(value: unknown, path: readonly string[]): unknown {
 }
 
 function semanticSubtype(definition: MetricDefinition, payload: PlainObject): string {
-	const values = definition.identityPaths.flatMap((path) => {
-		const value = valueAtPath(payload, path);
-		return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
-			? [{ path: path.join('.'), value }]
-			: [];
+	const values = definition.identityStrategy.components.flatMap((component) => {
+		const paths = component.kind === 'value' ? [component.path] : component.paths;
+		for (const path of paths) {
+			const value = valueAtPath(payload, path);
+			if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+				return [{ path: path.join('.'), value }];
+			}
+		}
+		return [];
 	});
 	return values.length === 0 ? '' : canonicalJson(values);
+}
+
+function precedes(left: OrderedTime, right: OrderedTime): boolean {
+	return (
+		left.epochMs < right.epochMs ||
+		(left.epochMs === right.epochMs && left.subMillisecondNanos < right.subMillisecondNanos)
+	);
 }
 
 function withSourceFamily(
@@ -520,10 +536,7 @@ function normalizeRecordTime(
 		if (start === undefined || end === undefined) {
 			throw new Error(`Google Health ${definition.recordKind} has no usable time interval`);
 		}
-		if (
-			end.epochMs < start.epochMs ||
-			(end.epochMs === start.epochMs && end.subMillisecondNanos < start.subMillisecondNanos)
-		) {
+		if (precedes(end, start)) {
 			throw new Error(`Google Health ${definition.recordKind} end precedes start`);
 		}
 		const kind = definition.recordKind;
@@ -552,6 +565,9 @@ function normalizeRecordTime(
 		const end = parseCivilDateTime(payload.civilEndTime) ?? parseCivilDateTime(raw.civilEndTime);
 		if (isRollup && end === undefined) {
 			throw new Error('Google Health daily rollup has no usable civil end time');
+		}
+		if (isRollup && end !== undefined && precedes(end, date)) {
+			throw new Error('Google Health daily rollup end precedes start');
 		}
 		return {
 			identity: withSourceFamily(
@@ -711,9 +727,9 @@ export function normalizeGooglePoint(
 	const googleDataPointName = safeString(raw.name) ?? safeString(raw.dataPointName);
 	const normalizedTime = normalizeRecordTime(definition, payload, raw, sourceFamily);
 	const stablePayloadIdentity =
-		definition.identityReferencePath === undefined
+		definition.identityStrategy.stableReferencePath === undefined
 			? undefined
-			: safeString(valueAtPath(payload, definition.identityReferencePath));
+			: safeString(valueAtPath(payload, definition.identityStrategy.stableReferencePath));
 	const identity: RecordIdentity =
 		googleDataPointName !== undefined
 			? { kind: 'named', name: googleDataPointName }

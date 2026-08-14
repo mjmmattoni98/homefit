@@ -524,3 +524,186 @@ export async function fetchHealthPage(args: FetchHealthPageArgs): Promise<JsonOb
 	);
 	return response.value;
 }
+
+export type GoogleHealthPageReadMode = 'list' | 'reconcile' | 'dailyRollUp';
+
+export interface GoogleHealthTimeFilter {
+	readonly kind: 'physical' | 'civil';
+	readonly recordKind: 'sample' | 'interval' | 'daily' | 'session';
+	readonly start: string;
+	readonly end: string;
+}
+
+export interface GoogleHealthPageResult {
+	readonly points: readonly unknown[];
+	readonly nextPageToken?: string;
+}
+
+function parsePageToken(value: unknown): string | undefined {
+	if (value === undefined || value === '') return undefined;
+	return requiredBoundedString(value, MAX_QUERY_VALUE_LENGTH) ?? undefined;
+}
+
+function dataPointsFromResponse(
+	response: JsonObject,
+	readMode: GoogleHealthPageReadMode,
+	pageSize: number
+): GoogleHealthPageResult {
+	const field = readMode === 'dailyRollUp' ? 'rollupDataPoints' : 'dataPoints';
+	const value = response[field];
+	if (value !== undefined && !Array.isArray(value)) throw invalidResponse(200);
+	const points = value ?? [];
+	if (!Array.isArray(points) || points.length > pageSize) throw invalidResponse(200);
+	const nextPageToken = parsePageToken(response.nextPageToken);
+	if (
+		response.nextPageToken !== undefined &&
+		response.nextPageToken !== '' &&
+		nextPageToken === undefined
+	) {
+		throw invalidResponse(200);
+	}
+	return { points, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
+}
+
+function parseCivilDate(value: string): { year: number; month: number; day: number } | null {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (match === null) return null;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	if (year < 1 || year > 9999) return null;
+	const date = new Date(0);
+	date.setUTCHours(0, 0, 0, 0);
+	date.setUTCFullYear(year, month - 1, day);
+	if (
+		date.getUTCFullYear() !== year ||
+		date.getUTCMonth() !== month - 1 ||
+		date.getUTCDate() !== day
+	) {
+		return null;
+	}
+	return { year, month, day };
+}
+
+function isPhysicalFilterValue(value: string): boolean {
+	const match =
+		/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(
+			value
+		);
+	if (match === null || parseCivilDate(match[1]) === null) return false;
+	if (
+		Number(match[2]) > 23 ||
+		Number(match[3]) > 59 ||
+		Number(match[4]) > 59 ||
+		Number(match[5] ?? 0) > 23 ||
+		Number(match[6] ?? 0) > 59
+	) {
+		return false;
+	}
+	return Number.isFinite(Date.parse(value));
+}
+
+function isCivilFilterValue(value: string): boolean {
+	const match = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?)?$/.exec(value);
+	if (match === null || parseCivilDate(match[1]) === null) return false;
+	return Number(match[2] ?? 0) <= 23 && Number(match[3] ?? 0) <= 59 && Number(match[4] ?? 0) <= 59;
+}
+
+function filterField(dataType: string, filter: GoogleHealthTimeFilter): string {
+	if (!['sample', 'interval', 'daily', 'session'].includes(filter.recordKind)) {
+		throw invalidRequest();
+	}
+	const prefix = dataType.replaceAll('-', '_');
+	if (filter.recordKind === 'daily') {
+		if (filter.kind !== 'civil') throw invalidRequest();
+		return `${prefix}.date`;
+	}
+	if (filter.recordKind === 'sample') {
+		return `${prefix}.sample_time.${filter.kind === 'physical' ? 'physical_time' : 'civil_time'}`;
+	}
+	if (filter.recordKind === 'session' && dataType === 'sleep') {
+		return `${prefix}.interval.${filter.kind === 'physical' ? 'end_time' : 'civil_end_time'}`;
+	}
+	return `${prefix}.interval.${filter.kind === 'physical' ? 'start_time' : 'civil_start_time'}`;
+}
+
+function escapedFilterLiteral(value: string): string {
+	return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+}
+
+export async function fetchGoogleHealthDataPage(args: {
+	accessToken: string;
+	dataType: string;
+	readMode: GoogleHealthPageReadMode;
+	pageSize: number;
+	pageToken?: string;
+	filter?: GoogleHealthTimeFilter;
+	range?: { start: string; end: string };
+}): Promise<GoogleHealthPageResult> {
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(args.dataType)) throw invalidRequest();
+	if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > 1000) {
+		throw invalidRequest();
+	}
+	if (args.readMode === 'dailyRollUp') {
+		const startDate = args.range === undefined ? null : parseCivilDate(args.range.start);
+		const endDate = args.range === undefined ? null : parseCivilDate(args.range.end);
+		if (
+			args.range === undefined ||
+			args.pageToken !== undefined ||
+			args.filter !== undefined ||
+			startDate === null ||
+			endDate === null ||
+			args.range.start >= args.range.end
+		) {
+			throw invalidRequest();
+		}
+		const response = await fetchHealthPage({
+			accessToken: args.accessToken,
+			path: `/users/me/dataTypes/${args.dataType}/dataPoints:dailyRollUp`,
+			method: 'POST',
+			body: {
+				range: {
+					start: { date: startDate },
+					end: { date: endDate }
+				},
+				windowSizeDays: 1,
+				pageSize: args.pageSize
+			}
+		});
+		return dataPointsFromResponse(response, args.readMode, args.pageSize);
+	}
+
+	if (args.range !== undefined) throw invalidRequest();
+	if (
+		args.pageToken !== undefined &&
+		requiredBoundedString(args.pageToken, MAX_QUERY_VALUE_LENGTH) === null
+	) {
+		throw invalidRequest();
+	}
+	const query: Record<string, string | number | undefined> = {
+		pageSize: args.pageSize,
+		pageToken: args.pageToken
+	};
+	if (args.filter !== undefined) {
+		const valueValidator =
+			args.filter.kind === 'physical' ? isPhysicalFilterValue : isCivilFilterValue;
+		if (
+			!valueValidator(args.filter.start) ||
+			!valueValidator(args.filter.end) ||
+			(args.filter.kind === 'physical'
+				? Date.parse(args.filter.start) >= Date.parse(args.filter.end)
+				: args.filter.start >= args.filter.end)
+		) {
+			throw invalidRequest();
+		}
+		const field = filterField(args.dataType, args.filter);
+		query.filter = `${field} >= "${escapedFilterLiteral(args.filter.start)}" AND ${field} < "${escapedFilterLiteral(args.filter.end)}"`;
+	}
+	const suffix = args.readMode === 'reconcile' ? ':reconcile' : '';
+	const response = await fetchHealthPage({
+		accessToken: args.accessToken,
+		path: `/users/me/dataTypes/${args.dataType}/dataPoints${suffix}`,
+		query
+	});
+	return dataPointsFromResponse(response, args.readMode, args.pageSize);
+}

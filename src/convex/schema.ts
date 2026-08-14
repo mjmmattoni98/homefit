@@ -124,6 +124,12 @@ export default defineSchema({
 		.index('by_userId_and_recordKey', ['userId', 'recordKey'])
 		.index('by_userId_and_dataType_and_recordTimestamp', ['userId', 'dataType', 'recordTimestamp'])
 		.index('by_userId_and_dataType_and_localDate', ['userId', 'dataType', 'localDate'])
+		.index('by_userId_and_dataType_and_localDate_and_recordTimestamp', [
+			'userId',
+			'dataType',
+			'localDate',
+			'recordTimestamp'
+		])
 		.index('by_userId_and_category_and_recordTimestamp', ['userId', 'category', 'recordTimestamp'])
 		.index('by_connectionId', ['connectionId']),
 

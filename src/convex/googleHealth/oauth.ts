@@ -95,9 +95,16 @@ export const completeOAuth = internalAction({
 			...tokenEnvelope
 		});
 		try {
-			await ctx.runMutation(internal.googleHealth.model.initializeCursors, {
+			const initialized = await ctx.runMutation(internal.googleHealth.model.initializeCursors, {
 				connectionId: connection.connectionId
 			});
+			if (initialized.firstCursorId !== null) {
+				await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+					cursorId: initialized.firstCursorId,
+					generation: connection.generation,
+					trigger: 'oauth'
+				});
+			}
 		} catch {
 			await ctx.runMutation(internal.googleHealth.model.setConnectionError, {
 				connectionId: connection.connectionId,

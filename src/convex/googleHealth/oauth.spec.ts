@@ -133,23 +133,34 @@ describe('Google Health OAuth flow', () => {
 	});
 
 	it('persists partial consent and initializes only the metrics covered by granted scopes', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
 		const t = convexTest(schema, modules);
 		const { authorizationUrl } = await t
 			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
 			.action(beginConnection, { returnPath: '/dashboard/import' });
 		const state = new URL(authorizationUrl).searchParams.get('state');
 		if (!state) throw new Error('Missing state fixture');
+		let tokenRequests = 0;
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-			if (String(input) === 'https://oauth2.googleapis.com/token') {
+			const url = String(input);
+			if (url === 'https://oauth2.googleapis.com/token') {
+				tokenRequests += 1;
 				return jsonResponse({
 					access_token: 'ephemeral-access-token',
-					refresh_token: 'partial-refresh-token',
+					...(tokenRequests === 1 ? { refresh_token: 'partial-refresh-token' } : {}),
 					expires_in: 3600,
-					scope: GOOGLE_HEALTH_READ_SCOPES[6],
+					...(tokenRequests === 1 ? { scope: GOOGLE_HEALTH_READ_SCOPES[6] } : {}),
 					token_type: 'Bearer'
 				});
 			}
-			return jsonResponse({ healthUserId: 'google-health-user-a' });
+			if (url === 'https://health.googleapis.com/v4/users/me/identity') {
+				return jsonResponse({ healthUserId: 'google-health-user-a' });
+			}
+			if (url.includes('/dataTypes/sleep/dataPoints:reconcile')) {
+				return jsonResponse({ dataPoints: [] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
 		});
 		vi.stubGlobal('fetch', fetchMock);
 
@@ -167,14 +178,28 @@ describe('Google Health OAuth flow', () => {
 				.query('googleHealthSyncCursors')
 				.withIndex('by_userId', (q) => q.eq('userId', 'clerk|user-a'))
 				.take(10);
-			return { connection, cursors };
+			const scheduled = await ctx.db.system.query('_scheduled_functions').take(10);
+			return { connection, cursors, scheduled };
 		});
 		expect(stored.connection.grantedScopes).toEqual([GOOGLE_HEALTH_READ_SCOPES[6]]);
 		expect(stored.connection.backfillTotalTypes).toBe(1);
 		expect(stored.cursors.map((cursor) => cursor.dataType)).toEqual(['sleep']);
+		expect(stored.scheduled).toHaveLength(1);
+		expect(stored.scheduled[0].name).toBe('googleHealth/sync:runCursor');
+
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const completed = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', stored.connection._id),
+			cursor: await ctx.db.get('googleHealthSyncCursors', stored.cursors[0]._id)
+		}));
+		expect(completed.connection).toMatchObject({
+			status: 'active',
+			backfillCompletedTypes: 1
+		});
+		expect(completed.cursor).toMatchObject({ status: 'complete' });
 	});
 
-	it('completes through the callback, encrypts the token, and queues 40 cursors for Task 6', async () => {
+	it('completes through the callback, encrypts the token, and schedules the first of 40 cursors', async () => {
 		const t = convexTest(schema, modules);
 		const { authorizationUrl } = await t
 			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
@@ -232,7 +257,8 @@ describe('Google Health OAuth flow', () => {
 		);
 		expect(JSON.stringify(stored.connection)).not.toContain('refresh-token-that-must-be-encrypted');
 		expect(stored.cursors).toHaveLength(40);
-		expect(stored.scheduled).toEqual([]);
+		expect(stored.scheduled).toHaveLength(1);
+		expect(stored.scheduled[0].name).toBe('googleHealth/sync:runCursor');
 	});
 
 	it('rejects a location-only grant before requesting a Health identity', async () => {

@@ -45,6 +45,7 @@ export const normalizedHealthPointValidator = v.object({
 	sourceApplication: v.optional(v.string()),
 	sourceDevice: v.optional(v.string()),
 	recordingMethod: v.optional(v.string()),
+	sourceFamily: v.optional(v.string()),
 	googleCreateTime: v.optional(v.number()),
 	googleUpdateTime: v.optional(v.number()),
 	payloadDigest: v.string(),

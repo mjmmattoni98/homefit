@@ -379,7 +379,8 @@ Deletion is a separate destructive action requiring typed confirmation. It:
 
 1. performs the disconnect sequence;
 2. marks the connection `deleting` so no new work can start;
-3. deletes OAuth states, data points, summaries, cursors, and sync runs in
+3. deletes summary dependencies, compact point contributions, summary rebuild
+   state, OAuth states, data points, summaries, cursors, and sync runs in
    bounded indexed batches; and
 4. deletes the connection after all owned Google records are gone.
 

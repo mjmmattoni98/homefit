@@ -12,6 +12,12 @@ function testBackend() {
 	return convexTest({ schema, modules, transactionLimits: true });
 }
 
+function physicalKey(timestamp: number, extraNanos = 0): string {
+	const date = new Date(timestamp);
+	const nanos = date.getUTCMilliseconds() * 1_000_000 + extraNanos;
+	return `${date.toISOString().slice(0, 19)}.${String(nanos).padStart(9, '0')}Z`;
+}
+
 function point(args: {
 	recordKey: string;
 	timestamp: number;
@@ -29,7 +35,7 @@ function point(args: {
 		startTime: args.timestamp,
 		endTime: args.timestamp + 60_000,
 		localDate: '2026-08-14',
-		physicalCoverageTime: args.timestamp,
+		physicalCoverageKey: physicalKey(args.timestamp),
 		primaryValue: args.value,
 		primaryUnit: dataType === 'steps' ? 'steps' : 'm',
 		payloadDigest: args.digest ?? `digest-${args.value}`,
@@ -78,9 +84,9 @@ async function seedRecord(
 			recordTimestamp: args.point.recordTimestamp,
 			...(args.point.primaryValue === undefined ? {} : { primaryValue: args.point.primaryValue }),
 			durationSeconds: 60,
-			...(args.point.physicalCoverageTime === undefined
+			...(args.point.physicalCoverageKey === undefined
 				? {}
-				: { physicalCoverageTime: args.point.physicalCoverageTime }),
+				: { physicalCoverageKey: args.point.physicalCoverageKey }),
 			...(args.point.civilCoverageTime === undefined
 				? {}
 				: { civilCoverageTime: args.point.civilCoverageTime }),
@@ -128,7 +134,18 @@ async function seedOwnedRun(
 			skipped: 0,
 			status: 'running'
 		});
-		await ctx.db.patch('googleHealthSyncCursors', cursorId, { activeRunId: runId });
+		const leaseExpiresAt = Date.now() + 5 * 60 * 1000;
+		await ctx.db.patch('googleHealthSyncCursors', cursorId, {
+			activeRunId: runId,
+			leaseExpiresAt,
+			leaseVersion: 1
+		});
+		await ctx.db.patch('googleHealthConnections', connectionId, {
+			activeSyncCursorId: cursorId,
+			activeSyncRunId: runId,
+			syncLeaseExpiresAt: leaseExpiresAt,
+			syncLeaseVersion: 1
+		});
 		return { cursorId, runId };
 	});
 }
@@ -244,7 +261,7 @@ describe('bounded Google Health record reconciliation', () => {
 						recordTimestamp: item.recordTimestamp,
 						primaryValue: item.primaryValue,
 						durationSeconds: 60,
-						physicalCoverageTime: item.physicalCoverageTime,
+						physicalCoverageKey: item.physicalCoverageKey,
 						seenEpoch: 1
 					});
 				}
@@ -343,11 +360,16 @@ describe('bounded Google Health record reconciliation', () => {
 				expectedGeneration: 1,
 				dataType: 'steps',
 				cleanupEpoch: 2,
-				coveredRange: { kind: 'physical', startMs: start, endMsExclusive: end },
+				coveredRange: {
+					kind: 'physical',
+					startKey: physicalKey(start),
+					endKeyExclusive: physicalKey(end)
+				},
 				completion: {
 					trigger: 'reconciliation',
 					counts: { fetched: 1, inserted: 0, updated: 1, skipped: 0 },
-					finish: true
+					finish: true,
+					hadMalformed: false
 				}
 			})
 		).toBe(true);
@@ -380,5 +402,187 @@ describe('bounded Google Health record reconciliation', () => {
 		expect(stored.bob.map((row) => row.recordKey)).toEqual(['bob-inside']);
 		expect(stored.cursor).toMatchObject({ status: 'complete' });
 		expect(stored.run).toMatchObject({ status: 'succeeded', deleted: 140 });
+	});
+
+	it('uses nanosecond-exact closed-open physical cleanup bounds', async () => {
+		vi.useFakeTimers();
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		const timestamp = Date.parse('2026-08-14T10:00:00Z');
+		for (const [recordKey, physicalCoverageKey] of [
+			['before', '2026-08-14T10:00:00.000000099Z'],
+			['inside', '2026-08-14T10:00:00.000000100Z'],
+			['exclusive-end', '2026-08-14T10:00:00.000000150Z']
+		] as const) {
+			await seedRecord(t, {
+				connectionId,
+				userId: 'user-a',
+				point: {
+					...point({ recordKey, timestamp, value: 1 }),
+					physicalCoverageKey
+				},
+				epoch: 1
+			});
+		}
+		const { cursorId, runId } = await seedOwnedRun(t, connectionId, 2);
+		expect(
+			await t.mutation(internal.googleHealth.records.beginCleanup, {
+				connectionId,
+				cursorId,
+				runId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				cleanupEpoch: 2,
+				coveredRange: {
+					kind: 'physical',
+					startKey: '2026-08-14T10:00:00.000000100Z',
+					endKeyExclusive: '2026-08-14T10:00:00.000000150Z'
+				},
+				completion: {
+					trigger: 'reconciliation',
+					counts: { fetched: 0, inserted: 0, updated: 0, skipped: 0 },
+					finish: true,
+					hadMalformed: false
+				}
+			})
+		).toBe(true);
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const keys = await t.run(async (ctx) =>
+			(
+				await ctx.db
+					.query('healthDataPoints')
+					.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+					.take(10)
+			)
+				.map((row) => row.recordKey)
+				.sort()
+		);
+		expect(keys).toEqual(['before', 'exclusive-end']);
+	});
+
+	it('renews ownership from a healthy cleanup batch even after the previous lease duration', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		const { cursorId, runId } = await seedOwnedRun(t, connectionId, 2);
+		vi.setSystemTime(new Date('2026-08-14T12:06:00Z'));
+		await t.mutation(internal.googleHealth.records.cleanupCoveredRange, {
+			connectionId,
+			cursorId,
+			runId,
+			expectedGeneration: 1,
+			dataType: 'steps',
+			cleanupEpoch: 2,
+			coveredRange: {
+				kind: 'physical',
+				startKey: '2026-08-14T10:00:00.000000000Z',
+				endKeyExclusive: '2026-08-14T11:00:00.000000000Z'
+			},
+			completion: {
+				trigger: 'reconciliation',
+				counts: { fetched: 0, inserted: 0, updated: 0, skipped: 0 },
+				finish: true,
+				hadMalformed: false
+			},
+			paginationOpts: { numItems: 64, cursor: null }
+		});
+		const renewed = await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId));
+		expect(renewed).toMatchObject({
+			leaseVersion: 2,
+			leaseExpiresAt: Date.parse('2026-08-14T12:11:00Z')
+		});
+		expect(
+			await t.mutation(internal.googleHealth.sync.recoverStaleRun, {
+				cursorId,
+				generation: 1,
+				runId,
+				leaseVersion: 1,
+				leaseExpiresAt: Date.parse('2026-08-14T12:05:00Z')
+			})
+		).toBe(false);
+	});
+
+	it('rejects a late older insertion after a newer empty reconciliation has completed', async () => {
+		vi.useFakeTimers();
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		const old = await seedOwnedRun(t, connectionId, 1);
+		await t.run(async (ctx) => {
+			await ctx.db.patch('googleHealthSyncRuns', old.runId, {
+				status: 'failed',
+				finishedAt: Date.now(),
+				errorCode: 'superseded',
+				errorMessage: 'Google Health synchronization abandoned'
+			});
+			await ctx.db.patch('googleHealthSyncCursors', old.cursorId, {
+				status: 'queued',
+				activeRunId: undefined,
+				activeEpoch: undefined,
+				leaseExpiresAt: undefined,
+				leaseVersion: undefined
+			});
+			await ctx.db.patch('googleHealthConnections', connectionId, {
+				activeSyncCursorId: undefined,
+				activeSyncRunId: undefined,
+				syncLeaseExpiresAt: undefined
+			});
+		});
+		const newer = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId: old.cursorId,
+			generation: 1,
+			trigger: 'reconciliation'
+		});
+		if (newer === null) throw new Error('expected newer reconciliation');
+		expect(
+			await t.mutation(internal.googleHealth.records.beginCleanup, {
+				connectionId,
+				cursorId: newer.cursorId,
+				runId: newer.runId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				cleanupEpoch: newer.reconciliationEpoch,
+				coveredRange: {
+					kind: 'physical',
+					startKey: '2026-08-14T10:00:00.000000000Z',
+					endKeyExclusive: '2026-08-14T11:00:00.000000000Z'
+				},
+				completion: {
+					trigger: 'reconciliation',
+					counts: { fetched: 0, inserted: 0, updated: 0, skipped: 0 },
+					finish: true,
+					hadMalformed: false
+				}
+			})
+		).toBe(true);
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		await expect(
+			t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				cursorId: old.cursorId,
+				runId: old.runId,
+				dataType: 'steps',
+				points: [
+					point({
+						recordKey: 'late-absent',
+						timestamp: Date.parse('2026-08-14T10:30:00Z'),
+						value: 1
+					})
+				],
+				syncId: 'late-old',
+				seenEpoch: 1
+			})
+		).rejects.toThrow('stale Google Health');
+		expect(
+			await t.run(async (ctx) =>
+				ctx.db
+					.query('healthDataPoints')
+					.withIndex('by_userId_and_recordKey', (q) =>
+						q.eq('userId', 'user-a').eq('recordKey', 'late-absent')
+					)
+					.unique()
+			)
+		).toBeNull();
 	});
 });

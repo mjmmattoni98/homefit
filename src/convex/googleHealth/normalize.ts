@@ -61,6 +61,7 @@ interface Instant {
 
 interface PhysicalTimestamp {
 	readonly identity: string;
+	readonly sortKey: string;
 	readonly epochMs: number;
 	readonly subMillisecondNanos: number;
 }
@@ -314,6 +315,7 @@ function parseTimestamp(value: unknown): PhysicalTimestamp | undefined {
 	const canonicalFraction = nanos === 0 ? '' : `.${pad(nanos, 9).replace(/0+$/, '')}`;
 	return {
 		identity: `${utcSecond}${canonicalFraction}Z`,
+		sortKey: `${utcSecond}.${pad(nanos, 9)}Z`,
 		epochMs: wholeSecondEpoch + Math.floor(nanos / 1_000_000),
 		subMillisecondNanos: nanos % 1_000_000
 	};
@@ -698,11 +700,15 @@ function sourceMetadata(
 	};
 }
 
+export function canonicalPhysicalCoverageKey(value: string): string | undefined {
+	return parseTimestamp(value)?.sortKey;
+}
+
 function coverageMetadata(
 	definition: MetricDefinition,
 	payload: PlainObject,
 	raw: PlainObject
-): Pick<NormalizedHealthPoint, 'physicalCoverageTime' | 'civilCoverageTime'> {
+): Pick<NormalizedHealthPoint, 'physicalCoverageKey' | 'civilCoverageTime'> {
 	const strategies = definition.filterStrategies;
 	if (strategies.physical === undefined && strategies.civil === undefined) return {};
 	if (definition.recordKind === 'daily') {
@@ -737,7 +743,7 @@ function coverageMetadata(
 	const physical = strategies.physical === undefined ? undefined : parseTimestamp(physicalValue);
 	const civil = strategies.civil === undefined ? undefined : parseCivilDateTime(civilValue);
 	return {
-		...(physical === undefined ? {} : { physicalCoverageTime: physical.epochMs }),
+		...(physical === undefined ? {} : { physicalCoverageKey: physical.sortKey }),
 		...(civil === undefined ? {} : { civilCoverageTime: civil.iso })
 	};
 }

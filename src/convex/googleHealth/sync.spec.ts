@@ -167,6 +167,9 @@ describe('Google Health bounded cursor worker', () => {
 
 		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
 		expect(page).toBe(1);
+		expect(
+			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
+		).toBe('running');
 		const afterFirst = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			scheduled: await ctx.db.system.query('_scheduled_functions').take(10),
@@ -177,16 +180,16 @@ describe('Google Health bounded cursor worker', () => {
 				)
 				.take(10)
 		}));
-		expect(afterFirst.cursor).toMatchObject({ status: 'queued', pageToken: 'page-2' });
+		expect(afterFirst.cursor).toMatchObject({ status: 'running' });
 		expect(afterFirst.points).toHaveLength(1);
 		expect(
 			afterFirst.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
-		).toHaveLength(1);
+		).toHaveLength(0);
 		expect(
 			afterFirst.scheduled.some((job) => job.name === 'googleHealth/sync:recoverStaleRun')
 		).toBe(true);
 
-		await pumpReady(t);
+		await pumpReady(t, 5);
 		expect(page).toBe(2);
 		const afterSecond = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -273,15 +276,21 @@ describe('Google Health bounded cursor worker', () => {
 			)
 		);
 		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
-		const rows = await t.run(async (ctx) =>
-			ctx.db
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(50),
+			rows: await ctx.db
 				.query('healthDataPoints')
 				.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
 					q.eq('userId', 'user-a').eq('dataType', 'steps')
 				)
 				.take(20)
-		);
-		expect(rows).toHaveLength(17);
+		}));
+		expect(stored.rows).toHaveLength(17);
+		expect(stored.cursor).toMatchObject({ status: 'running' });
+		expect(
+			stored.scheduled.filter((job) => job.name === 'googleHealth/records:rebuildSummaryBatch')
+		).toHaveLength(1);
 	});
 
 	it.each(['calories-in-heart-rate-zone', 'total-calories'] as const)(
@@ -302,7 +311,7 @@ describe('Google Health bounded cursor worker', () => {
 			);
 
 			await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
-			await pumpReady(t, 2);
+			await pumpReady(t, 3);
 			expect(rollupBody).toEqual({
 				range: {
 					start: { date: { year: 2000, month: 1, day: 1 } },
@@ -639,7 +648,7 @@ describe('Google Health bounded cursor worker', () => {
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
 		).toBe('running');
-		await pumpReady(t, 2);
+		await pumpReady(t, 3);
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			stale: await ctx.db.get('healthDataPoints', staleId)
@@ -653,6 +662,7 @@ describe('Google Health bounded cursor worker', () => {
 	});
 
 	it('keeps incremental continuations backfilling until every backfill type completes', async () => {
+		vi.useFakeTimers();
 		const t = boundedConvexTest();
 		const { connectionId, cursorId } = await seedCursor(t, {
 			dataType: 'heart-rate',
@@ -672,6 +682,7 @@ describe('Google Health bounded cursor worker', () => {
 			)
 		);
 		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await pumpReady(t);
 		const stored = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId)
@@ -779,12 +790,57 @@ describe('Google Health bounded cursor worker', () => {
 				cursorId,
 				generation: 1,
 				runId: work.runId,
-				leaseExpiresAt: Date.parse('2026-08-14T12:05:00Z')
+				leaseExpiresAt: Date.parse('2026-08-14T12:05:00Z'),
+				leaseVersion: work.leaseVersion
 			})
 		).toBe(false);
 	});
 
-	it('assigns reconciliation epochs monotonically across cursors on the same connection', async () => {
+	it('renews a healthy run with an exact lease version so an older watchdog cannot recover it', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = boundedConvexTest();
+		const { cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'oauth'
+		});
+		if (work === null) throw new Error('expected leased work');
+		const oldExpiry = Date.parse('2026-08-14T12:05:00Z');
+		vi.setSystemTime(new Date('2026-08-14T12:06:00Z'));
+		const renewed = await t.mutation(internal.googleHealth.sync.renewRunLease, {
+			cursorId,
+			generation: 1,
+			runId: work.runId,
+			expectedLeaseVersion: work.leaseVersion
+		});
+		expect(renewed).toEqual({
+			leaseVersion: work.leaseVersion + 1,
+			leaseExpiresAt: Date.parse('2026-08-14T12:11:00Z')
+		});
+		expect(
+			await t.mutation(internal.googleHealth.sync.recoverStaleRun, {
+				cursorId,
+				generation: 1,
+				runId: work.runId,
+				leaseExpiresAt: oldExpiry,
+				leaseVersion: work.leaseVersion
+			})
+		).toBe(false);
+		vi.setSystemTime(new Date('2026-08-14T12:11:00Z'));
+		expect(
+			await t.mutation(internal.googleHealth.sync.recoverStaleRun, {
+				cursorId,
+				generation: 1,
+				runId: work.runId,
+				leaseExpiresAt: renewed?.leaseExpiresAt ?? 0,
+				leaseVersion: renewed?.leaseVersion ?? 0
+			})
+		).toBe(true);
+	});
+
+	it('serializes overlapping backfill and incremental cursors per connection without stranding the waiter', async () => {
 		const t = boundedConvexTest();
 		const { connectionId, cursorId: backfillCursorId } = await seedCursor(t, {
 			dataType: 'steps'
@@ -813,11 +869,68 @@ describe('Google Health bounded cursor worker', () => {
 			trigger: 'webhook'
 		});
 		expect(first?.reconciliationEpoch).toBe(1);
-		expect(second?.reconciliationEpoch).toBe(2);
+		expect(second).toBeNull();
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId)))
 				?.reconciliationEpoch
-		).toBe(2);
+		).toBe(1);
+		const scheduled = await t.run(async (ctx) =>
+			ctx.db.system.query('_scheduled_functions').take(10)
+		);
+		expect(
+			scheduled.filter(
+				(job) =>
+					job.name === 'googleHealth/sync:runCursor' &&
+					job.args[0]?.cursorId === incrementalCursorId
+			)
+		).toHaveLength(1);
+	});
+
+	it('validates run cursor, generation, and connection ownership before abandoning anything', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const active = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'oauth'
+		});
+		if (active === null) throw new Error('expected active run');
+		const unrelatedRunId = await t.run(async (ctx) =>
+			ctx.db.insert('googleHealthSyncRuns', {
+				connectionId,
+				userId: 'user-a',
+				generation: 1,
+				reconciliationEpoch: 99,
+				trigger: 'manual',
+				dataType: 'steps',
+				startedAt: Date.now(),
+				pages: 0,
+				fetched: 0,
+				inserted: 0,
+				updated: 0,
+				deleted: 0,
+				skipped: 0,
+				status: 'running'
+			})
+		);
+		expect(
+			await t.mutation(internal.googleHealth.sync.abandonRun, {
+				cursorId,
+				generation: 1,
+				runId: unrelatedRunId,
+				errorCode: 'wrong_run'
+			})
+		).toBe(false);
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			activeRun: await ctx.db.get('googleHealthSyncRuns', active.runId),
+			unrelatedRun: await ctx.db.get('googleHealthSyncRuns', unrelatedRunId)
+		}));
+		expect(stored.cursor).toMatchObject({ status: 'running', activeRunId: active.runId });
+		expect(stored.connection).toMatchObject({ activeSyncRunId: active.runId });
+		expect(stored.activeRun).toMatchObject({ status: 'running' });
+		expect(stored.unrelatedRun).toMatchObject({ status: 'running' });
 	});
 
 	it('closes an active old-generation run when cursor initialization replaces its generation', async () => {
@@ -842,7 +955,7 @@ describe('Google Health bounded cursor worker', () => {
 		expect(stored.run).toMatchObject({ status: 'failed', errorCode: 'stale_generation' });
 	});
 
-	it('schedules a retry for a non-retryable malformed success page instead of stranding the cursor', async () => {
+	it('leaves a non-retryable malformed page in terminal manual-recovery state without a hot loop', async () => {
 		vi.useFakeTimers();
 		const t = boundedConvexTest();
 		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
@@ -867,7 +980,8 @@ describe('Google Health bounded cursor worker', () => {
 		expect(stored.cursor).toMatchObject({ status: 'retry', attempt: 1 });
 		expect(
 			stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
-		).toHaveLength(1);
+		).toHaveLength(0);
+		expect(stored.connection?.nextRetryAt).toBeUndefined();
 	});
 
 	it('imports valid siblings and suppresses omission cleanup when one response point is malformed', async () => {
@@ -937,5 +1051,116 @@ describe('Google Health bounded cursor worker', () => {
 		expect(stored.points).toHaveLength(2);
 		expect(stored.points.map((row) => row.recordKey)).toContain('stale-but-protected');
 		expect(stored.runs[0]).toMatchObject({ status: 'succeeded', fetched: 2, skipped: 1 });
+	});
+
+	it('carries malformed state across network pages and suppresses cleanup for the whole covered unit', async () => {
+		vi.useFakeTimers();
+		const t = boundedConvexTest();
+		const start = '2026-08-14T10:00:00Z';
+		const end = '2026-08-14T11:00:00Z';
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'steps',
+			mode: 'incremental',
+			status: 'active',
+			windowStart: start,
+			windowEnd: end
+		});
+		const staleId = await t.run(async (ctx) => {
+			const dataPointId = await ctx.db.insert('healthDataPoints', {
+				connectionId,
+				userId: 'user-a',
+				provider: 'google_health',
+				recordKey: 'omitted-across-pages',
+				dataType: 'steps',
+				category: 'activity',
+				recordTimestamp: Date.parse(start) + 1,
+				localDate: '2026-08-14',
+				physicalCoverageKey: '2026-08-14T10:00:00.000000001Z',
+				primaryValue: 5,
+				primaryUnit: 'steps',
+				payloadDigest: 'old',
+				payloadJson: '{}',
+				lastSeenSyncId: 'old',
+				seenEpoch: 0
+			});
+			await ctx.db.insert('healthDataPointContributions', {
+				connectionId,
+				dataPointId,
+				userId: 'user-a',
+				recordKey: 'omitted-across-pages',
+				dataType: 'steps',
+				category: 'activity',
+				localDate: '2026-08-14',
+				recordTimestamp: Date.parse(start) + 1,
+				primaryValue: 5,
+				physicalCoverageKey: '2026-08-14T10:00:00.000000001Z',
+				seenEpoch: 0
+			});
+			return dataPointId;
+		});
+		let page = 0;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) === 'https://oauth2.googleapis.com/token') return tokenResponse();
+				page += 1;
+				return jsonResponse(
+					page === 1
+						? {
+								dataPoints: [
+									{
+										steps: {
+											interval: { startTime: start, endTime: end },
+											count: 10
+										}
+									},
+									{ steps: { count: 99 } }
+								],
+								nextPageToken: 'page-2'
+							}
+						: {
+								dataPoints: [
+									{
+										steps: {
+											interval: {
+												startTime: '2026-08-14T10:30:00Z',
+												endTime: '2026-08-14T10:31:00Z'
+											},
+											count: 20
+										}
+									}
+								]
+							}
+				);
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		expect(
+			await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId))
+		).toMatchObject({ status: 'running', hadMalformed: true });
+		await pumpReady(t, 2);
+		expect(page).toBe(2);
+		const pendingCleanup = await t.run(async (ctx) =>
+			(await ctx.db.system.query('_scheduled_functions').take(50)).filter(
+				(job) => job.name === 'googleHealth/records:cleanupCoveredRange'
+			)
+		);
+		expect(pendingCleanup).toHaveLength(0);
+		await pumpReady(t, 2);
+		const stored = await t.run(async (ctx) => ({
+			stale: await ctx.db.get('healthDataPoints', staleId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_connectionId_and_startedAt', (q) => q.eq('connectionId', connectionId))
+				.take(10)
+		}));
+		expect(stored.stale).not.toBeNull();
+		expect(stored.cursor).toMatchObject({ status: 'complete', hadMalformed: false });
+		expect(stored.runs[0]).toMatchObject({
+			status: 'succeeded',
+			errorCode: 'warning_skipped_records',
+			errorMessage: 'Some Google Health records could not be imported'
+		});
 	});
 });

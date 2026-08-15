@@ -3,9 +3,11 @@ import { v } from 'convex/values';
 import { internal } from '../_generated/api';
 import type { Doc, Id } from '../_generated/dataModel';
 import { internalMutation, type MutationCtx } from '../_generated/server';
+import { canonicalPhysicalCoverageKey } from './normalize';
 import { getMetricDefinition } from './registry';
 import {
 	normalizedHealthPointValidator,
+	pageCountsValidator,
 	syncTriggerValidator,
 	type NormalizedHealthPoint
 } from './validators';
@@ -13,18 +15,12 @@ import {
 const MAX_MUTATION_POINTS = 16;
 const CLEANUP_PAGE_SIZE = 64;
 const SUMMARY_PAGE_SIZE = 128;
+const RUN_LEASE_MS = 5 * 60 * 1000;
 
 const coveredRangeValidator = v.union(
-	v.object({ kind: v.literal('physical'), startMs: v.number(), endMsExclusive: v.number() }),
+	v.object({ kind: v.literal('physical'), startKey: v.string(), endKeyExclusive: v.string() }),
 	v.object({ kind: v.literal('civil'), startDate: v.string(), endDateExclusive: v.string() })
 );
-
-const pageCountsValidator = v.object({
-	fetched: v.number(),
-	inserted: v.number(),
-	updated: v.number(),
-	skipped: v.number()
-});
 
 const cleanupCompletionValidator = v.object({
 	trigger: syncTriggerValidator,
@@ -32,11 +28,12 @@ const cleanupCompletionValidator = v.object({
 	nextPageToken: v.optional(v.string()),
 	nextWindowStart: v.optional(v.string()),
 	nextWindowEnd: v.optional(v.string()),
-	finish: v.boolean()
+	finish: v.boolean(),
+	hadMalformed: v.boolean()
 });
 
 type CoveredRange =
-	| { kind: 'physical'; startMs: number; endMsExclusive: number }
+	| { kind: 'physical'; startKey: string; endKeyExclusive: string }
 	| { kind: 'civil'; startDate: string; endDateExclusive: string };
 
 function isValidCivil(value: string): boolean {
@@ -65,9 +62,9 @@ function isValidCivil(value: string): boolean {
 function assertCoveredRange(range: CoveredRange): void {
 	if (range.kind === 'physical') {
 		if (
-			!Number.isFinite(range.startMs) ||
-			!Number.isFinite(range.endMsExclusive) ||
-			range.startMs >= range.endMsExclusive
+			canonicalPhysicalCoverageKey(range.startKey) !== range.startKey ||
+			canonicalPhysicalCoverageKey(range.endKeyExclusive) !== range.endKeyExclusive ||
+			range.startKey >= range.endKeyExclusive
 		) {
 			throw new Error('invalid physical covered range');
 		}
@@ -103,14 +100,67 @@ function contributionFor(
 		recordTimestamp: point.recordTimestamp,
 		...(point.primaryValue === undefined ? {} : { primaryValue: point.primaryValue }),
 		...(durationSeconds === undefined ? {} : { durationSeconds }),
-		...(point.physicalCoverageTime === undefined
+		...(point.physicalCoverageKey === undefined
 			? {}
-			: { physicalCoverageTime: point.physicalCoverageTime }),
+			: { physicalCoverageKey: point.physicalCoverageKey }),
 		...(point.civilCoverageTime === undefined
 			? {}
 			: { civilCoverageTime: point.civilCoverageTime }),
 		seenEpoch
 	};
+}
+
+async function renewOwnedLease(
+	ctx: MutationCtx,
+	args: {
+		connectionId: Id<'googleHealthConnections'>;
+		cursorId: Id<'googleHealthSyncCursors'>;
+		runId: Id<'googleHealthSyncRuns'>;
+		generation: number;
+	}
+): Promise<boolean> {
+	const [connection, cursor, run] = await Promise.all([
+		ctx.db.get('googleHealthConnections', args.connectionId),
+		ctx.db.get('googleHealthSyncCursors', args.cursorId),
+		ctx.db.get('googleHealthSyncRuns', args.runId)
+	]);
+	if (
+		!connection ||
+		!cursor ||
+		!run ||
+		run.status !== 'running' ||
+		run.cursorId !== cursor._id ||
+		run.connectionId !== connection._id ||
+		run.generation !== args.generation ||
+		cursor.status !== 'running' ||
+		cursor.generation !== args.generation ||
+		cursor.activeRunId !== run._id ||
+		connection.generation !== args.generation ||
+		connection.activeSyncCursorId !== cursor._id ||
+		connection.activeSyncRunId !== run._id ||
+		cursor.leaseVersion === undefined ||
+		cursor.leaseVersion !== connection.syncLeaseVersion
+	)
+		return false;
+	const leaseVersion = cursor.leaseVersion + 1;
+	const leaseExpiresAt = Date.now() + RUN_LEASE_MS;
+	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+		leaseVersion,
+		leaseExpiresAt,
+		updatedAt: Date.now()
+	});
+	await ctx.db.patch('googleHealthConnections', connection._id, {
+		syncLeaseVersion: leaseVersion,
+		syncLeaseExpiresAt: leaseExpiresAt
+	});
+	await ctx.scheduler.runAfter(RUN_LEASE_MS, internal.googleHealth.sync.recoverStaleRun, {
+		cursorId: cursor._id,
+		generation: args.generation,
+		runId: run._id,
+		leaseVersion,
+		leaseExpiresAt
+	});
+	return true;
 }
 
 async function enqueueSummary(
@@ -121,6 +171,8 @@ async function enqueueSummary(
 		dataType: string;
 		category: Doc<'healthDataPointContributions'>['category'];
 		localDate: string;
+		cursorId?: Id<'googleHealthSyncCursors'>;
+		runId?: Id<'googleHealthSyncRuns'>;
 	}
 ): Promise<void> {
 	const existing = await ctx.db
@@ -138,6 +190,7 @@ async function enqueueSummary(
 		localDate: args.localDate,
 		version,
 		status: 'queued' as const,
+		workingVersion: undefined,
 		paginationCursor: undefined,
 		count: 0,
 		valueCount: 0,
@@ -149,21 +202,68 @@ async function enqueueSummary(
 		durationSeconds: 0,
 		updatedAt: Date.now()
 	};
-	const rebuildId = existing
-		? (await ctx.db.patch('healthSummaryRebuilds', existing._id, reset), existing._id)
-		: await ctx.db.insert('healthSummaryRebuilds', reset);
-	await ctx.scheduler.runAfter(0, internal.googleHealth.records.rebuildSummaryBatch, {
-		rebuildId,
-		version
-	});
+	let rebuildId: Id<'healthSummaryRebuilds'>;
+	let shouldSchedule = false;
+	if (!existing) {
+		rebuildId = await ctx.db.insert('healthSummaryRebuilds', reset);
+		shouldSchedule = true;
+	} else {
+		rebuildId = existing._id;
+		if (existing.status === 'complete') {
+			await ctx.db.patch('healthSummaryRebuilds', existing._id, reset);
+			shouldSchedule = true;
+		} else {
+			// The existing worker owns the one durable chain. A version bump makes it
+			// restart from the beginning without fanning out scheduler jobs.
+			await ctx.db.patch('healthSummaryRebuilds', existing._id, {
+				version,
+				updatedAt: Date.now()
+			});
+		}
+	}
+	if ((args.cursorId === undefined) !== (args.runId === undefined))
+		throw new Error('summary dependency ownership must be provided together');
+	if (args.cursorId !== undefined && args.runId !== undefined) {
+		const cursorId = args.cursorId;
+		const runId = args.runId;
+		const dependency = await ctx.db
+			.query('healthSummaryDependencies')
+			.withIndex('by_runId_and_dataType_and_localDate', (q) =>
+				q.eq('runId', runId).eq('dataType', args.dataType).eq('localDate', args.localDate)
+			)
+			.unique();
+		const value = {
+			connectionId: args.connectionId,
+			cursorId,
+			runId,
+			rebuildId,
+			userId: args.userId,
+			dataType: args.dataType,
+			localDate: args.localDate,
+			targetVersion: version
+		};
+		if (dependency) await ctx.db.replace('healthSummaryDependencies', dependency._id, value);
+		else await ctx.db.insert('healthSummaryDependencies', value);
+	}
+	if (shouldSchedule)
+		await ctx.scheduler.runAfter(0, internal.googleHealth.records.rebuildSummaryBatch, {
+			rebuildId
+		});
 }
 
 export const rebuildSummaryBatch = internalMutation({
-	args: { rebuildId: v.id('healthSummaryRebuilds'), version: v.number() },
+	args: { rebuildId: v.id('healthSummaryRebuilds') },
 	returns: v.null(),
 	handler: async (ctx, args) => {
 		const rebuild = await ctx.db.get('healthSummaryRebuilds', args.rebuildId);
-		if (!rebuild || rebuild.version !== args.version || rebuild.status === 'complete') return null;
+		if (!rebuild || rebuild.status === 'complete') return null;
+		const dependency = await ctx.db
+			.query('healthSummaryDependencies')
+			.withIndex('by_rebuildId', (q) => q.eq('rebuildId', rebuild._id))
+			.first();
+		const restarting = rebuild.status === 'queued' || rebuild.workingVersion !== rebuild.version;
+		const workingVersion = rebuild.version;
+		const paginationCursor = restarting ? null : (rebuild.paginationCursor ?? null);
 		const page = await ctx.db
 			.query('healthDataPointContributions')
 			.withIndex('by_userId_and_dataType_and_localDate', (q) =>
@@ -172,15 +272,15 @@ export const rebuildSummaryBatch = internalMutation({
 					.eq('dataType', rebuild.dataType)
 					.eq('localDate', rebuild.localDate)
 			)
-			.paginate({ numItems: SUMMARY_PAGE_SIZE, cursor: rebuild.paginationCursor ?? null });
-		let count = rebuild.count;
-		let valueCount = rebuild.valueCount;
-		let sum = rebuild.sum;
-		let min = rebuild.min;
-		let max = rebuild.max;
-		let latestTimestamp = rebuild.latestTimestamp;
-		let latestValue = rebuild.latestValue;
-		let durationSeconds = rebuild.durationSeconds;
+			.paginate({ numItems: SUMMARY_PAGE_SIZE, cursor: paginationCursor });
+		let count = restarting ? 0 : rebuild.count;
+		let valueCount = restarting ? 0 : rebuild.valueCount;
+		let sum = restarting ? 0 : rebuild.sum;
+		let min = restarting ? undefined : rebuild.min;
+		let max = restarting ? undefined : rebuild.max;
+		let latestTimestamp = restarting ? undefined : rebuild.latestTimestamp;
+		let latestValue = restarting ? undefined : rebuild.latestValue;
+		let durationSeconds = restarting ? 0 : rebuild.durationSeconds;
 		for (const row of page.page) {
 			count += 1;
 			if (row.primaryValue !== undefined) {
@@ -195,9 +295,20 @@ export const rebuildSummaryBatch = internalMutation({
 			}
 			durationSeconds += row.durationSeconds ?? 0;
 		}
+		if (dependency) {
+			const run = await ctx.db.get('googleHealthSyncRuns', dependency.runId);
+			if (run?.generation !== undefined)
+				await renewOwnedLease(ctx, {
+					connectionId: dependency.connectionId,
+					cursorId: dependency.cursorId,
+					runId: dependency.runId,
+					generation: run.generation
+				});
+		}
 		if (!page.isDone) {
 			await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
 				status: 'running',
+				workingVersion,
 				paginationCursor: page.continueCursor,
 				count,
 				valueCount,
@@ -243,6 +354,7 @@ export const rebuildSummaryBatch = internalMutation({
 		}
 		await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
 			status: 'complete',
+			workingVersion,
 			paginationCursor: undefined,
 			count,
 			valueCount,
@@ -254,6 +366,19 @@ export const rebuildSummaryBatch = internalMutation({
 			durationSeconds,
 			updatedAt: Date.now()
 		});
+		const dependencies = await ctx.db
+			.query('healthSummaryDependencies')
+			.withIndex('by_rebuildId', (q) => q.eq('rebuildId', rebuild._id))
+			.take(32);
+		const runs = new Set<Id<'googleHealthSyncRuns'>>();
+		for (const dependency of dependencies) {
+			if (dependency.targetVersion <= workingVersion) {
+				runs.add(dependency.runId);
+				await ctx.db.delete('healthSummaryDependencies', dependency._id);
+			}
+		}
+		for (const runId of runs)
+			await ctx.scheduler.runAfter(0, internal.googleHealth.sync.tryFinalizeRun, { runId });
 		return null;
 	}
 });
@@ -297,7 +422,9 @@ export const applyReconciledPage = internalMutation({
 				cursor.generation !== args.expectedGeneration ||
 				cursor.status !== 'running' ||
 				cursor.activeRunId !== args.runId ||
-				cursor.activeEpoch !== seenEpoch
+				cursor.activeEpoch !== seenEpoch ||
+				connection.activeSyncCursorId !== cursor._id ||
+				connection.activeSyncRunId !== args.runId
 			) {
 				throw new Error('stale Google Health chunk');
 			}
@@ -371,7 +498,8 @@ export const applyReconciledPage = internalMutation({
 				userId: connection.userId,
 				dataType: args.dataType,
 				category: definition.category,
-				localDate
+				localDate,
+				...(args.cursorId === undefined ? {} : { cursorId: args.cursorId, runId: args.runId })
 			});
 		}
 		return { inserted, updated, skipped };
@@ -396,13 +524,17 @@ export const beginCleanup = internalMutation({
 			throw new Error('invalid cleanup epoch');
 		}
 		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+		const connection = await ctx.db.get('googleHealthConnections', args.connectionId);
 		if (
 			!cursor ||
+			!connection ||
 			cursor.connectionId !== args.connectionId ||
 			cursor.generation !== args.expectedGeneration ||
 			cursor.status !== 'running' ||
 			cursor.activeRunId !== args.runId ||
-			cursor.activeEpoch !== args.cleanupEpoch
+			cursor.activeEpoch !== args.cleanupEpoch ||
+			connection.activeSyncCursorId !== cursor._id ||
+			connection.activeSyncRunId !== args.runId
 		)
 			return false;
 		await ctx.scheduler.runAfter(0, internal.googleHealth.records.cleanupCoveredRange, {
@@ -444,7 +576,15 @@ export const cleanupCoveredRange = internalMutation({
 			cursor.status !== 'running' ||
 			cursor.activeRunId !== run._id ||
 			cursor.activeEpoch !== args.cleanupEpoch ||
+			connection.activeSyncCursorId !== cursor._id ||
+			connection.activeSyncRunId !== run._id ||
 			run.status !== 'running'
+		)
+			return null;
+		if (
+			run.cursorId !== cursor._id ||
+			run.connectionId !== connection._id ||
+			run.generation !== args.expectedGeneration
 		)
 			return null;
 		const range = args.coveredRange;
@@ -452,12 +592,12 @@ export const cleanupCoveredRange = internalMutation({
 			range.kind === 'physical'
 				? await ctx.db
 						.query('healthDataPointContributions')
-						.withIndex('by_connectionId_and_dataType_and_physicalCoverageTime', (q) =>
+						.withIndex('by_connectionId_and_dataType_and_physicalCoverageKey', (q) =>
 							q
 								.eq('connectionId', connection._id)
 								.eq('dataType', args.dataType)
-								.gte('physicalCoverageTime', range.startMs)
-								.lt('physicalCoverageTime', range.endMsExclusive)
+								.gte('physicalCoverageKey', range.startKey)
+								.lt('physicalCoverageKey', range.endKeyExclusive)
 						)
 						.paginate(args.paginationOpts)
 				: await ctx.db
@@ -485,11 +625,22 @@ export const cleanupCoveredRange = internalMutation({
 				userId: connection.userId,
 				dataType: args.dataType,
 				category: getMetricDefinition(args.dataType)?.category ?? 'other',
-				localDate
+				localDate,
+				cursorId: cursor._id,
+				runId: run._id
 			});
 		}
 		if (deleted > 0)
 			await ctx.db.patch('googleHealthSyncRuns', run._id, { deleted: run.deleted + deleted });
+		if (
+			!(await renewOwnedLease(ctx, {
+				connectionId: connection._id,
+				cursorId: cursor._id,
+				runId: run._id,
+				generation: args.expectedGeneration
+			}))
+		)
+			return null;
 		if (!page.isDone) {
 			await ctx.scheduler.runAfter(0, internal.googleHealth.records.cleanupCoveredRange, {
 				...args,

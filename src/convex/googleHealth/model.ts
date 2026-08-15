@@ -244,11 +244,20 @@ export const initializeCursors = internalMutation({
 							});
 						}
 					}
+					if (connection.activeSyncCursorId === existing._id) {
+						await ctx.db.patch('googleHealthConnections', connection._id, {
+							activeSyncCursorId: undefined,
+							activeSyncRunId: undefined,
+							syncLeaseExpiresAt: undefined
+						});
+					}
 					await ctx.db.patch('googleHealthSyncCursors', existing._id, {
 						status: 'queued',
 						activeRunId: undefined,
 						activeEpoch: undefined,
 						leaseExpiresAt: undefined,
+						leaseVersion: undefined,
+						hadMalformed: false,
 						pageToken: undefined,
 						windowStart: undefined,
 						windowEnd: undefined,

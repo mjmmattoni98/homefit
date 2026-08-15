@@ -120,7 +120,7 @@ describe('Google Health point normalization', () => {
 			recordTimestamp: Date.parse('2026-08-14T22:30:00Z'),
 			startTime: Date.parse('2026-08-14T22:30:00Z'),
 			endTime: Date.parse('2026-08-15T06:30:00Z'),
-			physicalCoverageTime: Date.parse('2026-08-15T06:30:00Z'),
+			physicalCoverageKey: '2026-08-15T06:30:00.000000000Z',
 			civilCoverageTime: '2026-08-15T08:30:00',
 			localDate: '2026-08-15',
 			primaryUnit: 'min',
@@ -164,7 +164,7 @@ describe('Google Health point normalization', () => {
 
 		expect(first).toMatchObject({
 			recordTimestamp: Date.parse('2026-08-14T10:00:00Z'),
-			physicalCoverageTime: Date.parse('2026-08-14T10:00:00Z'),
+			physicalCoverageKey: '2026-08-14T10:00:00.000000000Z',
 			civilCoverageTime: '2026-08-14T12:00:00',
 			localDate: '2026-08-14',
 			primaryValue: 61,
@@ -278,7 +278,7 @@ describe('Google Health point normalization', () => {
 
 		expect(point).toMatchObject({
 			recordTimestamp: Date.parse('2026-08-14T08:00:00Z'),
-			physicalCoverageTime: Date.parse('2026-08-14T08:00:00Z'),
+			physicalCoverageKey: '2026-08-14T08:00:00.000000000Z',
 			startTime: Date.parse('2026-08-14T08:00:00Z'),
 			endTime: Date.parse('2026-08-14T08:15:00Z'),
 			localDate: '2026-08-14',
@@ -307,8 +307,8 @@ describe('Google Health point normalization', () => {
 		});
 
 		expect(exercise).toMatchObject({ civilCoverageTime: '2026-08-14T10:00:00' });
-		expect(exercise).not.toHaveProperty('physicalCoverageTime');
-		expect(ecg).toMatchObject({ physicalCoverageTime: Date.parse('2026-08-14T08:00:00Z') });
+		expect(exercise).not.toHaveProperty('physicalCoverageKey');
+		expect(ecg).toMatchObject({ physicalCoverageKey: '2026-08-14T08:00:00.000000000Z' });
 		expect(ecg).not.toHaveProperty('civilCoverageTime');
 	});
 

@@ -79,6 +79,10 @@ export default defineSchema({
 		grantedScopes: v.array(v.string()),
 		generation: v.number(),
 		reconciliationEpoch: v.optional(v.number()),
+		activeSyncCursorId: v.optional(v.id('googleHealthSyncCursors')),
+		activeSyncRunId: v.optional(v.id('googleHealthSyncRuns')),
+		syncLeaseExpiresAt: v.optional(v.number()),
+		syncLeaseVersion: v.optional(v.number()),
 		backfillTotalTypes: v.number(),
 		backfillCompletedTypes: v.number(),
 		lastAttemptAt: v.optional(v.number()),
@@ -112,6 +116,8 @@ export default defineSchema({
 		generation: v.number(),
 		activeRunId: v.optional(v.id('googleHealthSyncRuns')),
 		leaseExpiresAt: v.optional(v.number()),
+		leaseVersion: v.optional(v.number()),
+		hadMalformed: v.optional(v.boolean()),
 		reconciliationEpoch: v.optional(v.number()),
 		activeEpoch: v.optional(v.number()),
 		updatedAt: v.number()
@@ -137,17 +143,7 @@ export default defineSchema({
 			'recordTimestamp'
 		])
 		.index('by_userId_and_category_and_recordTimestamp', ['userId', 'category', 'recordTimestamp'])
-		.index('by_connectionId', ['connectionId'])
-		.index('by_connectionId_and_dataType_and_physicalCoverageTime', [
-			'connectionId',
-			'dataType',
-			'physicalCoverageTime'
-		])
-		.index('by_connectionId_and_dataType_and_civilCoverageTime', [
-			'connectionId',
-			'dataType',
-			'civilCoverageTime'
-		]),
+		.index('by_connectionId', ['connectionId']),
 
 	healthDataPointContributions: defineTable({
 		connectionId: v.id('googleHealthConnections'),
@@ -160,16 +156,17 @@ export default defineSchema({
 		recordTimestamp: v.number(),
 		primaryValue: v.optional(v.number()),
 		durationSeconds: v.optional(v.number()),
-		physicalCoverageTime: v.optional(v.number()),
+		physicalCoverageKey: v.optional(v.string()),
 		civilCoverageTime: v.optional(v.string()),
 		seenEpoch: v.number()
 	})
 		.index('by_userId_and_recordKey', ['userId', 'recordKey'])
+		.index('by_dataPointId', ['dataPointId'])
 		.index('by_userId_and_dataType_and_localDate', ['userId', 'dataType', 'localDate'])
-		.index('by_connectionId_and_dataType_and_physicalCoverageTime', [
+		.index('by_connectionId_and_dataType_and_physicalCoverageKey', [
 			'connectionId',
 			'dataType',
-			'physicalCoverageTime'
+			'physicalCoverageKey'
 		])
 		.index('by_connectionId_and_dataType_and_civilCoverageTime', [
 			'connectionId',
@@ -184,6 +181,7 @@ export default defineSchema({
 		category: healthCategoryValidator,
 		localDate: v.string(),
 		version: v.number(),
+		workingVersion: v.optional(v.number()),
 		status: v.union(v.literal('queued'), v.literal('running'), v.literal('complete')),
 		paginationCursor: v.optional(v.string()),
 		count: v.number(),
@@ -198,6 +196,20 @@ export default defineSchema({
 	})
 		.index('by_userId_and_dataType_and_localDate', ['userId', 'dataType', 'localDate'])
 		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
+
+	healthSummaryDependencies: defineTable({
+		connectionId: v.id('googleHealthConnections'),
+		cursorId: v.id('googleHealthSyncCursors'),
+		runId: v.id('googleHealthSyncRuns'),
+		rebuildId: v.id('healthSummaryRebuilds'),
+		userId: v.string(),
+		dataType: v.string(),
+		localDate: v.string(),
+		targetVersion: v.number()
+	})
+		.index('by_runId', ['runId'])
+		.index('by_rebuildId', ['rebuildId'])
+		.index('by_runId_and_dataType_and_localDate', ['runId', 'dataType', 'localDate']),
 
 	healthDailySummaries: defineTable({
 		connectionId: v.id('googleHealthConnections'),
@@ -238,9 +250,18 @@ export default defineSchema({
 		deleted: v.number(),
 		skipped: v.number(),
 		status: v.union(v.literal('running'), v.literal('succeeded'), v.literal('failed')),
+		completionKind: v.optional(
+			v.union(v.literal('finish'), v.literal('page'), v.literal('window'))
+		),
+		completionTrigger: v.optional(syncTriggerValidator),
+		completionNextPageToken: v.optional(v.string()),
+		completionNextWindowStart: v.optional(v.string()),
+		completionNextWindowEnd: v.optional(v.string()),
+		completionHadMalformed: v.optional(v.boolean()),
 		errorCode: v.optional(v.string()),
 		errorMessage: v.optional(v.string())
 	})
+		.index('by_cursorId', ['cursorId'])
 		.index('by_connectionId_and_startedAt', ['connectionId', 'startedAt'])
 		.index('by_userId_and_startedAt', ['userId', 'startedAt'])
 		.index('by_status_and_startedAt', ['status', 'startedAt'])

@@ -29,6 +29,13 @@ export const syncTriggerValidator = v.union(
 	v.literal('reconciliation')
 );
 
+export const pageCountsValidator = v.object({
+	fetched: v.number(),
+	inserted: v.number(),
+	updated: v.number(),
+	skipped: v.number()
+});
+
 export const normalizedHealthPointValidator = v.object({
 	provider: v.literal('google_health'),
 	recordKey: v.string(),
@@ -39,7 +46,7 @@ export const normalizedHealthPointValidator = v.object({
 	startTime: v.optional(v.number()),
 	endTime: v.optional(v.number()),
 	localDate: v.string(),
-	physicalCoverageTime: v.optional(v.number()),
+	physicalCoverageKey: v.optional(v.string()),
 	civilCoverageTime: v.optional(v.string()),
 	primaryValue: v.optional(v.number()),
 	primaryUnit: v.optional(v.string()),
@@ -58,4 +65,5 @@ export type ConnectionStatus = Infer<typeof connectionStatusValidator>;
 export type HealthCategory = Infer<typeof healthCategoryValidator>;
 export type SyncMode = Infer<typeof syncModeValidator>;
 export type SyncTrigger = Infer<typeof syncTriggerValidator>;
+export type PageCounts = Infer<typeof pageCountsValidator>;
 export type NormalizedHealthPoint = Infer<typeof normalizedHealthPointValidator>;

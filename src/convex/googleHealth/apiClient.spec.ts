@@ -45,8 +45,9 @@ describe('Google Health API client', () => {
 				pageSize: 1000,
 				pageToken: 'current',
 				filter: {
-					kind: 'physical',
-					recordKind: 'sample',
+					axis: 'physical',
+					field: 'heart_rate.sample_time.physical_time',
+					comparison: 'closedOpen',
 					start: '2026-08-14T10:00:00Z',
 					end: '2026-08-14T11:00:00Z'
 				}
@@ -66,6 +67,7 @@ describe('Google Health API client', () => {
 				dataType: 'total-calories',
 				readMode: 'dailyRollUp',
 				pageSize: 1000,
+				pageToken: 'rollup-current',
 				range: { start: '2000-01-01', end: '2000-01-15' }
 			})
 		).resolves.toEqual({ points: [{ id: 3 }] });
@@ -92,7 +94,8 @@ describe('Google Health API client', () => {
 					end: { date: { year: 2000, month: 1, day: 15 } }
 				},
 				windowSizeDays: 1,
-				pageSize: 1000
+				pageSize: 1000,
+				pageToken: 'rollup-current'
 			})
 		});
 	});
@@ -109,8 +112,9 @@ describe('Google Health API client', () => {
 			pageSize: 1000,
 			pageToken,
 			filter: {
-				kind: 'physical',
-				recordKind: 'interval',
+				axis: 'physical',
+				field: 'steps.interval.start_time',
+				comparison: 'closedOpen',
 				start: '2026-08-14T10:00:00Z',
 				end: '2026-08-14T11:00:00Z'
 			}
@@ -128,13 +132,49 @@ describe('Google Health API client', () => {
 				readMode: 'reconcile',
 				pageSize: 1000,
 				filter: {
-					kind: 'physical',
-					recordKind: 'interval',
+					axis: 'physical',
+					field: 'steps.interval.start_time',
+					comparison: 'closedOpen',
 					start: '2026-08-14T10:00:00Z" OR true',
 					end: '2026-08-14T11:00:00Z'
 				}
 			})
 		).rejects.toMatchObject({ code: 'invalid_request', message: 'Google Health request failed' });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('emits ECG as a registry-owned one-sided physical lower bound and rejects field injection', async () => {
+		const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ dataPoints: [] }));
+		vi.stubGlobal('fetch', fetchMock);
+		await fetchGoogleHealthDataPage({
+			accessToken: 'access-token',
+			dataType: 'electrocardiogram',
+			readMode: 'list',
+			pageSize: 25,
+			filter: {
+				axis: 'physical',
+				field: 'electrocardiogram.interval.start_time',
+				comparison: 'lowerBoundOnly',
+				start: '2026-08-14T10:00:00Z'
+			}
+		});
+		expect(new URL(String(fetchMock.mock.calls[0][0])).searchParams.get('filter')).toBe(
+			'electrocardiogram.interval.start_time >= "2026-08-14T10:00:00Z"'
+		);
+		await expect(
+			fetchGoogleHealthDataPage({
+				accessToken: 'access-token',
+				dataType: 'electrocardiogram',
+				readMode: 'list',
+				pageSize: 25,
+				filter: {
+					axis: 'physical',
+					field: 'electrocardiogram.interval.start_time OR true',
+					comparison: 'lowerBoundOnly',
+					start: '2026-08-14T10:00:00Z'
+				}
+			})
+		).rejects.toMatchObject({ code: 'invalid_request' });
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 

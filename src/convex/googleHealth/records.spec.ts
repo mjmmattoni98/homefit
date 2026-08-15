@@ -1,142 +1,195 @@
 /// <reference types="vite/client" />
 
-import { type FunctionReference, makeFunctionReference } from 'convex/server';
 import { convexTest } from 'convex-test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import schema from '../schema';
+import { internal } from '../_generated/api';
 import type { Id } from '../_generated/dataModel';
-import { summarizeHealthRows } from './records';
+import schema from '../schema';
 import type { NormalizedHealthPoint } from './validators';
 
 const modules = import.meta.glob('/src/convex/**/*.*s');
-
-type CoveredRange =
-	| { kind: 'physical'; startMs: number; endMsExclusive: number }
-	| { kind: 'civil'; startDate: string; endDateExclusive: string };
-
-type ApplyArgs = {
-	connectionId: Id<'googleHealthConnections'>;
-	expectedGeneration: number;
-	dataType: string;
-	points: NormalizedHealthPoint[];
-	syncId: string;
-	nextPageToken?: string;
-	coveredRange?: CoveredRange;
-};
-
-const applyReconciledPage = makeFunctionReference<
-	'mutation',
-	ApplyArgs,
-	{
-		inserted: number;
-		updated: number;
-		skipped: number;
-	}
->('googleHealth/records:applyReconciledPage') as unknown as FunctionReference<
-	'mutation',
-	'internal',
-	ApplyArgs,
-	{ inserted: number; updated: number; skipped: number }
->;
+function testBackend() {
+	return convexTest({ schema, modules, transactionLimits: true });
+}
 
 function point(args: {
 	recordKey: string;
 	timestamp: number;
 	value: number;
 	digest?: string;
-	name?: string;
 	dataType?: string;
-	localDate?: string;
 }): NormalizedHealthPoint {
 	const dataType = args.dataType ?? 'steps';
 	return {
 		provider: 'google_health',
 		recordKey: args.recordKey,
-		...(args.name === undefined ? {} : { googleDataPointName: args.name }),
 		dataType,
 		category: 'activity',
 		recordTimestamp: args.timestamp,
 		startTime: args.timestamp,
 		endTime: args.timestamp + 60_000,
-		localDate: args.localDate ?? '2026-08-14',
+		localDate: '2026-08-14',
+		physicalCoverageTime: args.timestamp,
 		primaryValue: args.value,
-		primaryUnit: 'steps',
+		primaryUnit: dataType === 'steps' ? 'steps' : 'm',
 		payloadDigest: args.digest ?? `digest-${args.value}`,
-		payloadJson: JSON.stringify({ dataType, value: args.value })
+		payloadJson: JSON.stringify({ [dataType]: { value: args.value } })
 	};
 }
 
-async function seedConnection(
-	t: ReturnType<typeof convexTest>,
-	userId: string,
-	generation = 1
-): Promise<Id<'googleHealthConnections'>> {
+async function seedConnection(t: ReturnType<typeof testBackend>, userId: string) {
 	return await t.run(async (ctx) =>
 		ctx.db.insert('googleHealthConnections', {
 			userId,
-			healthUserId: `health-${userId}`,
 			status: 'backfilling',
-			encryptedRefreshToken: 'ciphertext',
-			tokenNonce: 'nonce',
-			tokenTag: 'tag',
-			tokenKeyVersion: 'v1',
 			grantedScopes: [],
-			generation,
+			generation: 1,
 			backfillTotalTypes: 1,
 			backfillCompletedTypes: 0
 		})
 	);
 }
 
-describe('Google Health reconciled record application', () => {
+async function seedRecord(
+	t: ReturnType<typeof testBackend>,
+	args: {
+		connectionId: Id<'googleHealthConnections'>;
+		userId: string;
+		point: NormalizedHealthPoint;
+		epoch: number;
+	}
+) {
+	return await t.run(async (ctx) => {
+		const dataPointId = await ctx.db.insert('healthDataPoints', {
+			connectionId: args.connectionId,
+			userId: args.userId,
+			...args.point,
+			lastSeenSyncId: `epoch-${args.epoch}`,
+			seenEpoch: args.epoch
+		});
+		await ctx.db.insert('healthDataPointContributions', {
+			connectionId: args.connectionId,
+			dataPointId,
+			userId: args.userId,
+			recordKey: args.point.recordKey,
+			dataType: args.point.dataType,
+			category: args.point.category,
+			localDate: args.point.localDate,
+			recordTimestamp: args.point.recordTimestamp,
+			...(args.point.primaryValue === undefined ? {} : { primaryValue: args.point.primaryValue }),
+			durationSeconds: 60,
+			...(args.point.physicalCoverageTime === undefined
+				? {}
+				: { physicalCoverageTime: args.point.physicalCoverageTime }),
+			...(args.point.civilCoverageTime === undefined
+				? {}
+				: { civilCoverageTime: args.point.civilCoverageTime }),
+			seenEpoch: args.epoch
+		});
+		return dataPointId;
+	});
+}
+
+async function seedOwnedRun(
+	t: ReturnType<typeof testBackend>,
+	connectionId: Id<'googleHealthConnections'>,
+	epoch: number
+) {
+	return await t.run(async (ctx) => {
+		const cursorId = await ctx.db.insert('googleHealthSyncCursors', {
+			connectionId,
+			userId: 'user-a',
+			dataType: 'steps',
+			mode: 'incremental',
+			status: 'running',
+			windowStart: '2026-08-14T10:00:00Z',
+			windowEnd: '2026-08-14T12:00:00Z',
+			syncId: 'owned-sync',
+			attempt: 0,
+			generation: 1,
+			reconciliationEpoch: epoch,
+			activeEpoch: epoch,
+			updatedAt: Date.now()
+		});
+		const runId = await ctx.db.insert('googleHealthSyncRuns', {
+			connectionId,
+			userId: 'user-a',
+			cursorId,
+			generation: 1,
+			reconciliationEpoch: epoch,
+			trigger: 'reconciliation',
+			dataType: 'steps',
+			startedAt: Date.now(),
+			pages: 0,
+			fetched: 0,
+			inserted: 0,
+			updated: 0,
+			deleted: 0,
+			skipped: 0,
+			status: 'running'
+		});
+		await ctx.db.patch('googleHealthSyncCursors', cursorId, { activeRunId: runId });
+		return { cursorId, runId };
+	});
+}
+
+describe('bounded Google Health record reconciliation', () => {
 	afterEach(() => {
 		vi.useRealTimers();
 	});
 
-	it('idempotently upserts named and unnamed records and replaces corrected payloads', async () => {
-		const t = convexTest(schema, modules);
+	it('idempotently replaces corrected payloads and rebuilds exact summaries from compact contributions', async () => {
+		vi.useFakeTimers();
+		const t = testBackend();
 		const connectionId = await seedConnection(t, 'user-a');
-		const named = point({
-			recordKey: 'named-key',
-			name: 'users/me/dataTypes/steps/dataPoints/named',
+		const first = point({
+			recordKey: 'first',
 			timestamp: Date.parse('2026-08-14T09:00:00Z'),
 			value: 100
 		});
-		const unnamed = point({
-			recordKey: 'unnamed-key',
+		const second = point({
+			recordKey: 'second',
 			timestamp: Date.parse('2026-08-14T10:00:00Z'),
 			value: 200
 		});
-
-		const first = await t.mutation(applyReconciledPage, {
-			connectionId,
-			expectedGeneration: 1,
-			dataType: 'steps',
-			points: [named, unnamed],
-			syncId: 'sync-1'
-		});
-		const replay = await t.mutation(applyReconciledPage, {
-			connectionId,
-			expectedGeneration: 1,
-			dataType: 'steps',
-			points: [named, unnamed],
-			syncId: 'sync-1'
-		});
-		const correctedNamed = { ...named, primaryValue: 120, payloadDigest: 'corrected-digest' };
-		const correction = await t.mutation(applyReconciledPage, {
-			connectionId,
-			expectedGeneration: 1,
-			dataType: 'steps',
-			points: [correctedNamed],
-			syncId: 'sync-2'
-		});
-
-		expect(first).toEqual({ inserted: 2, updated: 0, skipped: 0 });
-		expect(replay).toEqual({ inserted: 0, updated: 0, skipped: 2 });
-		expect(correction).toEqual({ inserted: 0, updated: 1, skipped: 0 });
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				points: [first, second],
+				syncId: 'sync-1',
+				seenEpoch: 1
+			})
+		).toEqual({ inserted: 2, updated: 0, skipped: 0 });
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				points: [first, second],
+				syncId: 'sync-1',
+				seenEpoch: 1
+			})
+		).toEqual({ inserted: 0, updated: 0, skipped: 2 });
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				points: [{ ...first, primaryValue: 120, payloadDigest: 'corrected' }],
+				syncId: 'sync-2',
+				seenEpoch: 2
+			})
+		).toEqual({ inserted: 0, updated: 1, skipped: 0 });
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
 		const stored = await t.run(async (ctx) => ({
 			points: await ctx.db
 				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.take(10),
+			contributions: await ctx.db
+				.query('healthDataPointContributions')
 				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
 					q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
 				)
@@ -149,258 +202,63 @@ describe('Google Health reconciled record application', () => {
 				.unique()
 		}));
 		expect(stored.points).toHaveLength(2);
-		expect(stored.points.find((row) => row.recordKey === 'named-key')).toMatchObject({
-			primaryValue: 120,
-			payloadDigest: 'corrected-digest',
-			lastSeenSyncId: 'sync-2'
-		});
+		expect(stored.contributions).toHaveLength(2);
 		expect(stored.summary).toMatchObject({
 			count: 2,
 			sum: 320,
 			average: 160,
 			min: 120,
 			max: 200,
-			latestValue: 200,
-			latestTimestamp: Date.parse('2026-08-14T10:00:00Z')
+			latestValue: 200
 		});
 	});
 
-	it('cleans only an explicitly covered final physical window', async () => {
+	it('rebuilds exact aggregates and latest across more than 10,001 compact rows under transaction limits', async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(new Date('2026-08-15T00:00:00Z'));
-		const t = convexTest(schema, modules);
-		const aliceConnection = await seedConnection(t, 'user-a');
-		const bobConnection = await seedConnection(t, 'user-b');
-		const windowStart = Date.parse('2026-08-14T10:00:00Z');
-		const windowEnd = Date.parse('2026-08-14T12:00:00Z');
-		await t.run(async (ctx) => {
-			for (const [connectionId, userId, value, recordKey, timestamp] of [
-				[aliceConnection, 'user-a', 10, 'alice-stale-inside', windowStart + 1_000],
-				[aliceConnection, 'user-a', 20, 'alice-outside', windowEnd + 1_000],
-				[bobConnection, 'user-b', 30, 'bob-inside', windowStart + 1_000]
-			] as const) {
-				await ctx.db.insert('healthDataPoints', {
-					connectionId,
-					userId,
-					...point({ recordKey, timestamp, value }),
-					lastSeenSyncId: 'older-sync'
-				});
-			}
-			await ctx.db.insert('healthDataPoints', {
-				connectionId: aliceConnection,
-				userId: 'user-a',
-				...point({
-					recordKey: 'alice-other-type-inside',
-					timestamp: windowStart + 1_000,
-					value: 55,
-					dataType: 'distance'
-				}),
-				lastSeenSyncId: 'older-sync'
-			});
-		});
-
-		await t.mutation(applyReconciledPage, {
-			connectionId: aliceConnection,
-			expectedGeneration: 1,
-			dataType: 'steps',
-			points: [
-				point({ recordKey: 'alice-current-inside', timestamp: windowStart + 2_000, value: 40 })
-			],
-			syncId: 'final-sync',
-			coveredRange: { kind: 'physical', startMs: windowStart, endMsExclusive: windowEnd }
-		});
-		await t.finishAllScheduledFunctions(vi.runAllTimers);
-
-		const keys = await t.run(async (ctx) => ({
-			alice: (
-				await ctx.db
-					.query('healthDataPoints')
-					.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
-						q.eq('userId', 'user-a').eq('dataType', 'steps')
-					)
-					.take(10)
-			).map((row) => row.recordKey),
-			bob: (
-				await ctx.db
-					.query('healthDataPoints')
-					.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
-						q.eq('userId', 'user-b').eq('dataType', 'steps')
-					)
-					.take(10)
-			).map((row) => row.recordKey),
-			otherType: await ctx.db
-				.query('healthDataPoints')
-				.withIndex('by_userId_and_recordKey', (q) =>
-					q.eq('userId', 'user-a').eq('recordKey', 'alice-other-type-inside')
-				)
-				.unique(),
-			summary: await ctx.db
-				.query('healthDailySummaries')
-				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
-					q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
-				)
-				.unique()
-		}));
-		expect(keys.alice).toEqual(['alice-current-inside', 'alice-outside']);
-		expect(keys.bob).toEqual(['bob-inside']);
-		expect(keys.otherType).not.toBeNull();
-		expect(keys.summary).toMatchObject({
-			count: 2,
-			sum: 60,
-			average: 30,
-			min: 20,
-			max: 40,
-			latestValue: 20
-		});
-	});
-
-	it('never cleans a non-final page even when a caller supplies a range', async () => {
-		vi.useFakeTimers();
-		const t = convexTest(schema, modules);
-		const connectionId = await seedConnection(t, 'user-a');
-		const timestamp = Date.parse('2026-08-14T10:00:00Z');
-		await t.run(async (ctx) => {
-			await ctx.db.insert('healthDataPoints', {
-				connectionId,
-				userId: 'user-a',
-				...point({ recordKey: 'must-remain', timestamp, value: 10 }),
-				lastSeenSyncId: 'older-sync'
-			});
-		});
-
-		await expect(
-			t.mutation(applyReconciledPage, {
-				connectionId,
-				expectedGeneration: 1,
-				dataType: 'steps',
-				points: [],
-				syncId: 'partial-sync',
-				nextPageToken: 'next-page',
-				coveredRange: {
-					kind: 'physical',
-					startMs: timestamp - 1_000,
-					endMsExclusive: timestamp + 1_000
-				}
-			})
-		).rejects.toThrow('covered range requires a final page');
-		vi.runAllTimers();
-		await t.finishInProgressScheduledFunctions();
-		const remaining = await t.run(async (ctx) =>
-			ctx.db
-				.query('healthDataPoints')
-				.withIndex('by_userId_and_recordKey', (q) =>
-					q.eq('userId', 'user-a').eq('recordKey', 'must-remain')
-				)
-				.unique()
-		);
-		expect(remaining).not.toBeNull();
-	});
-
-	it('pages fully covered cleanup without retaining stale rows past the first batch', async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(new Date('2026-08-15T00:00:00Z'));
-		const t = convexTest(schema, modules);
+		const t = testBackend();
 		const connectionId = await seedConnection(t, 'user-a');
 		const start = Date.parse('2026-08-14T00:00:00Z');
-		await t.run(async (ctx) => {
-			for (let index = 0; index < 300; index += 1) {
-				await ctx.db.insert('healthDataPoints', {
-					connectionId,
-					userId: 'user-a',
-					...point({
-						recordKey: `stale-${index}`,
-						timestamp: start + index * 1000,
-						value: index
-					}),
-					lastSeenSyncId: 'old-sync'
-				});
-			}
-		});
-
-		await t.mutation(applyReconciledPage, {
-			connectionId,
-			expectedGeneration: 1,
-			dataType: 'steps',
-			points: [],
-			syncId: 'new-sync',
-			coveredRange: {
-				kind: 'physical',
-				startMs: start,
-				endMsExclusive: start + 300_000
-			}
-		});
-		await t.finishAllScheduledFunctions(vi.runAllTimers);
-
-		const remaining = await t.run(async (ctx) =>
-			ctx.db
-				.query('healthDataPoints')
-				.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
-					q.eq('userId', 'user-a').eq('dataType', 'steps')
-				)
-				.take(1)
-		);
-		expect(remaining).toEqual([]);
-	});
-
-	it('bounds days above 10k rows to count and latest without approximate aggregates', () => {
-		const rows = Array.from({ length: 10_001 }, (_, index) => ({
-			recordTimestamp: index,
-			primaryValue: index + 1
-		}));
-
-		expect(summarizeHealthRows(rows)).toEqual({
-			count: 10_001,
-			latestValue: 10_001,
-			latestTimestamp: 10_000
-		});
-	});
-
-	it('looks up exact latest timestamp when creation order falls outside the 10,001-row sentinel', async () => {
-		const t = convexTest(schema, modules);
-		const connectionId = await seedConnection(t, 'user-a');
-		const start = Date.parse('2026-08-14T00:00:00Z');
-		for (let batchStart = 0; batchStart < 10_001; batchStart += 500) {
+		const fixtures = [
+			point({ recordKey: 'created-first-latest', timestamp: start + 1_000_000, value: 777 })
+		];
+		for (let index = 1; index <= 10_000; index += 1)
+			fixtures.push(point({ recordKey: `dense-${index}`, timestamp: start + index, value: index }));
+		for (let offset = 0; offset < fixtures.length; offset += 100) {
 			await t.run(async (ctx) => {
-				for (let index = batchStart; index < Math.min(batchStart + 500, 10_001); index += 1) {
-					await ctx.db.insert('healthDataPoints', {
+				for (const item of fixtures.slice(offset, offset + 100)) {
+					const dataPointId = await ctx.db.insert('healthDataPoints', {
 						connectionId,
 						userId: 'user-a',
-						...point({
-							recordKey: `dense-${index}`,
-							timestamp: start + index,
-							value: index
-						}),
-						lastSeenSyncId: 'old-sync'
+						...item,
+						lastSeenSyncId: 'old',
+						seenEpoch: 1
+					});
+					await ctx.db.insert('healthDataPointContributions', {
+						connectionId,
+						dataPointId,
+						userId: 'user-a',
+						recordKey: item.recordKey,
+						dataType: 'steps',
+						category: 'activity',
+						localDate: item.localDate,
+						recordTimestamp: item.recordTimestamp,
+						primaryValue: item.primaryValue,
+						durationSeconds: 60,
+						physicalCoverageTime: item.physicalCoverageTime,
+						seenEpoch: 1
 					});
 				}
 			});
 		}
-		const exactLatestTimestamp = start + 1_000_000;
-		await t.run(async (ctx) => {
-			await ctx.db.insert('healthDataPoints', {
-				connectionId,
-				userId: 'user-a',
-				...point({
-					recordKey: 'created-last-and-latest',
-					timestamp: exactLatestTimestamp,
-					value: 777
-				}),
-				lastSeenSyncId: 'old-sync'
-			});
-		});
-
-		await t.mutation(applyReconciledPage, {
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
 			connectionId,
 			expectedGeneration: 1,
 			dataType: 'steps',
-			points: [
-				{
-					...point({ recordKey: 'dense-0', timestamp: start, value: -1 }),
-					payloadDigest: 'corrected-dense-zero'
-				}
-			],
-			syncId: 'new-sync'
+			points: [{ ...fixtures[1], primaryValue: -5, payloadDigest: 'corrected-low-timestamp' }],
+			syncId: 'new',
+			seenEpoch: 2
 		});
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
 		const summary = await t.run(async (ctx) =>
 			ctx.db
 				.query('healthDailySummaries')
@@ -411,12 +269,116 @@ describe('Google Health reconciled record application', () => {
 		);
 		expect(summary).toMatchObject({
 			count: 10_001,
+			sum: 50_005_771,
+			average: 50_005_771 / 10_001,
+			min: -5,
+			max: 10_000,
 			latestValue: 777,
-			latestTimestamp: exactLatestTimestamp
+			latestTimestamp: start + 1_000_000,
+			durationSeconds: 10_001 * 60
 		});
-		expect(summary).not.toHaveProperty('sum');
-		expect(summary).not.toHaveProperty('average');
-		expect(summary).not.toHaveProperty('min');
-		expect(summary).not.toHaveProperty('max');
 	}, 30_000);
+
+	it('pages run-owned cleanup and an older epoch cannot delete newer or out-of-scope records', async () => {
+		vi.useFakeTimers();
+		const t = testBackend();
+		const alice = await seedConnection(t, 'user-a');
+		const bob = await seedConnection(t, 'user-b');
+		const start = Date.parse('2026-08-14T10:00:00Z');
+		const end = Date.parse('2026-08-14T12:00:00Z');
+		const protectedPoint = point({ recordKey: 'newer-inside', timestamp: start + 1, value: 1 });
+		for (let offset = 0; offset < 140; offset += 20) {
+			await Promise.all(
+				Array.from({ length: Math.min(20, 140 - offset) }, (_, index) =>
+					seedRecord(t, {
+						connectionId: alice,
+						userId: 'user-a',
+						point: point({
+							recordKey: `stale-${offset + index}`,
+							timestamp: start + 100 + offset + index,
+							value: offset + index
+						}),
+						epoch: 1
+					})
+				)
+			);
+		}
+		await seedRecord(t, { connectionId: alice, userId: 'user-a', point: protectedPoint, epoch: 1 });
+		await seedRecord(t, {
+			connectionId: alice,
+			userId: 'user-a',
+			point: point({ recordKey: 'outside', timestamp: end + 1, value: 9 }),
+			epoch: 1
+		});
+		await seedRecord(t, {
+			connectionId: bob,
+			userId: 'user-b',
+			point: point({ recordKey: 'bob-inside', timestamp: start + 2, value: 8 }),
+			epoch: 1
+		});
+		const { cursorId, runId } = await seedOwnedRun(t, alice, 2);
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId: alice,
+			expectedGeneration: 1,
+			dataType: 'steps',
+			points: [{ ...protectedPoint, primaryValue: 2, payloadDigest: 'newer' }],
+			syncId: 'newer',
+			seenEpoch: 2
+		});
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId: alice,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				points: [{ ...protectedPoint, primaryValue: 999, payloadDigest: 'late-old-page' }],
+				syncId: 'older-arrived-late',
+				seenEpoch: 1
+			})
+		).toEqual({ inserted: 0, updated: 0, skipped: 1 });
+		expect(
+			await t.mutation(internal.googleHealth.records.beginCleanup, {
+				connectionId: alice,
+				cursorId,
+				runId,
+				expectedGeneration: 1,
+				dataType: 'steps',
+				cleanupEpoch: 2,
+				coveredRange: { kind: 'physical', startMs: start, endMsExclusive: end },
+				completion: {
+					trigger: 'reconciliation',
+					counts: { fetched: 1, inserted: 0, updated: 1, skipped: 0 },
+					finish: true
+				}
+			})
+		).toBe(true);
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const stored = await t.run(async (ctx) => ({
+			aliceRows: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', alice))
+				.take(200),
+			alice: (
+				await ctx.db
+					.query('healthDataPoints')
+					.withIndex('by_connectionId', (q) => q.eq('connectionId', alice))
+					.take(200)
+			)
+				.map((row) => row.recordKey)
+				.sort(),
+			bob: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', bob))
+				.take(10),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			run: await ctx.db.get('googleHealthSyncRuns', runId)
+		}));
+		expect(stored.alice).toEqual(['newer-inside', 'outside']);
+		expect(stored.aliceRows.find((row) => row.recordKey === 'newer-inside')).toMatchObject({
+			primaryValue: 2,
+			seenEpoch: 2
+		});
+		expect(stored.bob.map((row) => row.recordKey)).toEqual(['bob-inside']);
+		expect(stored.cursor).toMatchObject({ status: 'complete' });
+		expect(stored.run).toMatchObject({ status: 'succeeded', deleted: 140 });
+	});
 });

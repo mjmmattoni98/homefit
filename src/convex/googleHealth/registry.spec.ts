@@ -227,6 +227,61 @@ describe('Google Health metric registry', () => {
 		).toBe(true);
 	});
 
+	it('owns the exact current-v4 filter field, axis, selector, and comparison strategy', () => {
+		expect(getMetricDefinition('heart-rate')?.filterStrategies).toEqual({
+			physical: {
+				axis: 'physical',
+				selector: 'sample',
+				field: 'heart_rate.sample_time.physical_time',
+				comparison: 'closedOpen'
+			},
+			civil: {
+				axis: 'civil',
+				selector: 'sample',
+				field: 'heart_rate.sample_time.civil_time',
+				comparison: 'closedOpen'
+			}
+		});
+		expect(getMetricDefinition('exercise')?.filterStrategies).toEqual({
+			civil: {
+				axis: 'civil',
+				selector: 'start',
+				field: 'exercise.interval.civil_start_time',
+				comparison: 'closedOpen'
+			}
+		});
+		expect(getMetricDefinition('sleep')?.filterStrategies).toEqual({
+			physical: {
+				axis: 'physical',
+				selector: 'end',
+				field: 'sleep.interval.end_time',
+				comparison: 'closedOpen'
+			},
+			civil: {
+				axis: 'civil',
+				selector: 'end',
+				field: 'sleep.interval.civil_end_time',
+				comparison: 'closedOpen'
+			}
+		});
+		expect(getMetricDefinition('electrocardiogram')?.filterStrategies).toEqual({
+			physical: {
+				axis: 'physical',
+				selector: 'start',
+				field: 'electrocardiogram.interval.start_time',
+				comparison: 'lowerBoundOnly'
+			}
+		});
+		expect(getMetricDefinition('daily-resting-heart-rate')?.filterStrategies).toEqual({
+			civil: {
+				axis: 'civil',
+				selector: 'date',
+				field: 'daily_resting_heart_rate.date',
+				comparison: 'closedOpen'
+			}
+		});
+	});
+
 	it('returns immutable definitions by exact data-type lookup', () => {
 		const steps = METRIC_DEFINITIONS.find((definition) => definition.dataType === 'steps');
 

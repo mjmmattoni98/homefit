@@ -1,28 +1,30 @@
 /// <reference types="vite/client" />
 
-import { type FunctionReference, makeFunctionReference } from 'convex/server';
 import { convexTest } from 'convex-test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { internal } from '../_generated/api';
 import type { Id } from '../_generated/dataModel';
 import schema from '../schema';
 import { createTokenKeyring, decryptRefreshToken, encryptRefreshToken } from './crypto';
 import { GOOGLE_HEALTH_READ_SCOPES, getMetricDefinition } from './registry';
-import { computeRetryDelayMs } from './sync';
-import type { SyncTrigger } from './validators';
+import { chunkNormalizedPoints, computeRetryDelayMs } from './sync';
 
 const modules = import.meta.glob('/src/convex/**/*.*s');
 const ACTIVE_KEY = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 const PREVIOUS_KEY = 'Hh8cHRobGBkWFxQVEhMQEQ4PDA0KCwgJBgUEAwIBAAA=';
 
-type RunCursorArgs = {
-	cursorId: Id<'googleHealthSyncCursors'>;
-	generation: number;
-	trigger: SyncTrigger;
-};
+function boundedConvexTest() {
+	return convexTest({ schema, modules, transactionLimits: true });
+}
 
-const runCursor = makeFunctionReference<'action', RunCursorArgs, null>(
-	'googleHealth/sync:runCursor'
-) as unknown as FunctionReference<'action', 'internal', RunCursorArgs, null>;
+async function pumpReady(t: ReturnType<typeof convexTest>, times = 1): Promise<void> {
+	for (let index = 0; index < times; index += 1) {
+		vi.advanceTimersByTime(0);
+		await t.finishInProgressScheduledFunctions();
+	}
+}
+
+const runCursor = internal.googleHealth.sync.runCursor;
 
 function jsonResponse(value: unknown, status = 200): Response {
 	return new Response(JSON.stringify(value), {
@@ -57,6 +59,9 @@ async function seedCursor(
 		mode?: 'backfill' | 'incremental';
 		windowStart?: string;
 		windowEnd?: string;
+		pageToken?: string;
+		backfillTotalTypes?: number;
+		backfillCompletedTypes?: number;
 	}
 ): Promise<{
 	connectionId: Id<'googleHealthConnections'>;
@@ -78,8 +83,8 @@ async function seedCursor(
 			...envelope,
 			grantedScopes: [getMetricDefinition(args.dataType)?.scope ?? GOOGLE_HEALTH_READ_SCOPES[0]],
 			generation,
-			backfillTotalTypes: 1,
-			backfillCompletedTypes: 0
+			backfillTotalTypes: args.backfillTotalTypes ?? 1,
+			backfillCompletedTypes: args.backfillCompletedTypes ?? 0
 		});
 		const cursorId = await ctx.db.insert('googleHealthSyncCursors', {
 			connectionId,
@@ -87,6 +92,7 @@ async function seedCursor(
 			dataType: args.dataType,
 			mode: args.mode ?? 'backfill',
 			status: 'queued',
+			...(args.pageToken === undefined ? {} : { pageToken: args.pageToken }),
 			...(args.windowStart === undefined ? {} : { windowStart: args.windowStart }),
 			...(args.windowEnd === undefined ? {} : { windowEnd: args.windowEnd }),
 			syncId: `backfill:${generation}:${args.dataType}`,
@@ -122,7 +128,7 @@ describe('Google Health bounded cursor worker', () => {
 	it('fetches one reconcile page per invocation and schedules one generated continuation', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
-		const t = convexTest(schema, modules);
+		const t = boundedConvexTest();
 		const { cursorId } = await seedCursor(t, { dataType: 'heart-rate' });
 		let page = 0;
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -173,10 +179,14 @@ describe('Google Health bounded cursor worker', () => {
 		}));
 		expect(afterFirst.cursor).toMatchObject({ status: 'queued', pageToken: 'page-2' });
 		expect(afterFirst.points).toHaveLength(1);
-		expect(afterFirst.scheduled).toHaveLength(1);
-		expect(afterFirst.scheduled[0].name).toBe('googleHealth/sync:runCursor');
+		expect(
+			afterFirst.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+		).toHaveLength(1);
+		expect(
+			afterFirst.scheduled.some((job) => job.name === 'googleHealth/sync:recoverStaleRun')
+		).toBe(true);
 
-		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		await pumpReady(t);
 		expect(page).toBe(2);
 		const afterSecond = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -197,7 +207,7 @@ describe('Google Health bounded cursor worker', () => {
 		['steps', 1000],
 		['food', 1000]
 	] as const)('caps %s backfill page size at %i', async (dataType, pageSize) => {
-		const t = convexTest(schema, modules);
+		const t = boundedConvexTest();
 		const { cursorId } = await seedCursor(t, { dataType });
 		const urls: string[] = [];
 		vi.stubGlobal(
@@ -218,12 +228,68 @@ describe('Google Health bounded cursor worker', () => {
 		expect(request.pathname.endsWith(':reconcile')).toBe(dataType !== 'food');
 	});
 
+	it('splits by cumulative UTF-8 bytes and point count before bounded record mutations', async () => {
+		const small = (index: number) => ({
+			provider: 'google_health' as const,
+			recordKey: `key-${index}`,
+			dataType: 'steps',
+			category: 'activity' as const,
+			recordTimestamp: index,
+			localDate: '2026-08-14',
+			primaryValue: index,
+			payloadDigest: `digest-${index}`,
+			payloadJson: '{}'
+		});
+		expect(
+			chunkNormalizedPoints(Array.from({ length: 17 }, (_, index) => small(index))).map(
+				(chunk) => chunk.length
+			)
+		).toEqual([16, 1]);
+		const large = [
+			{ ...small(1), payloadJson: 'é'.repeat(380_000) },
+			{ ...small(2), payloadJson: 'é'.repeat(380_000) }
+		];
+		expect(chunkNormalizedPoints(large).map((chunk) => chunk.length)).toEqual([1, 1]);
+
+		const t = boundedConvexTest();
+		const { cursorId } = await seedCursor(t, { dataType: 'steps' });
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse()
+					: jsonResponse({
+							dataPoints: Array.from({ length: 17 }, (_, index) => {
+								const start = new Date(Date.parse('2026-08-14T10:00:00Z') + index * 60_000);
+								const end = new Date(start.getTime() + 30_000);
+								return {
+									steps: {
+										interval: { startTime: start.toISOString(), endTime: end.toISOString() },
+										count: index + 1
+									}
+								};
+							})
+						})
+			)
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		const rows = await t.run(async (ctx) =>
+			ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
+					q.eq('userId', 'user-a').eq('dataType', 'steps')
+				)
+				.take(20)
+		);
+		expect(rows).toHaveLength(17);
+	});
+
 	it.each(['calories-in-heart-rate-zone', 'total-calories'] as const)(
 		'walks %s daily rollups in one 14-day window starting at 2000-01-01',
 		async (dataType) => {
 			vi.useFakeTimers();
 			vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
-			const t = convexTest(schema, modules);
+			const t = boundedConvexTest();
 			const { cursorId } = await seedCursor(t, { dataType });
 			let rollupBody: unknown;
 			vi.stubGlobal(
@@ -236,6 +302,7 @@ describe('Google Health bounded cursor worker', () => {
 			);
 
 			await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+			await pumpReady(t, 2);
 			expect(rollupBody).toEqual({
 				range: {
 					start: { date: { year: 2000, month: 1, day: 1 } },
@@ -253,7 +320,9 @@ describe('Google Health bounded cursor worker', () => {
 				windowStart: '2000-01-15',
 				windowEnd: '2000-01-29'
 			});
-			expect(stored.scheduled).toHaveLength(1);
+			expect(
+				stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+			).toHaveLength(1);
 		}
 	);
 
@@ -264,12 +333,19 @@ describe('Google Health bounded cursor worker', () => {
 			'2026-08-14T11:00:00Z',
 			'heart_rate.sample_time.physical_time'
 		],
-		['daily-resting-heart-rate', '2026-08-14', '2026-08-15', 'daily_resting_heart_rate.date']
+		['daily-resting-heart-rate', '2026-08-14', '2026-08-15', 'daily_resting_heart_rate.date'],
+		[
+			'exercise',
+			'2026-08-14T10:00:00',
+			'2026-08-14T11:00:00',
+			'exercise.interval.civil_start_time'
+		],
+		['sleep', '2026-08-14T10:00:00Z', '2026-08-14T11:00:00Z', 'sleep.interval.end_time']
 	] as const)(
 		'uses a closed-open %s incremental filter owned by the registry record kind',
 		async (dataType, windowStart, windowEnd, filterField) => {
 			vi.useFakeTimers();
-			const t = convexTest(schema, modules);
+			const t = boundedConvexTest();
 			const { cursorId } = await seedCursor(t, {
 				dataType,
 				mode: 'incremental',
@@ -293,8 +369,62 @@ describe('Google Health bounded cursor worker', () => {
 		}
 	);
 
+	it('uses the registry ECG one-sided physical-start filter without inventing an upper bound', async () => {
+		const t = boundedConvexTest();
+		const { cursorId } = await seedCursor(t, {
+			dataType: 'electrocardiogram',
+			mode: 'incremental',
+			status: 'active',
+			windowStart: '2026-08-14T10:00:00Z',
+			windowEnd: '2026-08-14T11:00:00Z'
+		});
+		let healthUrl = '';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) === 'https://oauth2.googleapis.com/token') return tokenResponse();
+				healthUrl = String(input);
+				return jsonResponse({ dataPoints: [] });
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		expect(new URL(healthUrl).searchParams.get('filter')).toBe(
+			'electrocardiogram.interval.start_time >= "2026-08-14T10:00:00Z"'
+		);
+	});
+
+	it('falls back to an unbounded no-cleanup request when cursor bounds use an unsupported clock', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'exercise',
+			mode: 'incremental',
+			status: 'active',
+			windowStart: '2026-08-14T10:00:00Z',
+			windowEnd: '2026-08-14T11:00:00Z'
+		});
+		let healthUrl = '';
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) === 'https://oauth2.googleapis.com/token') return tokenResponse();
+				healthUrl = String(input);
+				return jsonResponse({ dataPoints: [] });
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		expect(new URL(healthUrl).searchParams.has('filter')).toBe(false);
+		expect(
+			(await t.run(async (ctx) => ctx.db.system.query('_scheduled_functions').take(10))).some(
+				(job) => job.name === 'googleHealth/records:cleanupCoveredRange'
+			)
+		).toBe(false);
+		expect(
+			(await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId)))?.status
+		).toBe('backfilling');
+	});
+
 	it('rotates an old envelope and atomically persists a replacement refresh token', async () => {
-		const t = convexTest(schema, modules);
+		const t = boundedConvexTest();
 		const { connectionId, cursorId } = await seedCursor(t, {
 			dataType: 'steps',
 			key: PREVIOUS_KEY,
@@ -334,13 +464,38 @@ describe('Google Health bounded cursor worker', () => {
 		expect(decrypted.refreshToken).toBe('replacement-refresh-token');
 	});
 
+	it('CAS-persists the refreshed granted-scope set even without a replacement refresh token', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const stepsScope = getMetricDefinition('steps')!.scope;
+		const sleepScope = getMetricDefinition('sleep')!.scope;
+		await t.run(async (ctx) =>
+			ctx.db.patch('googleHealthConnections', connectionId, {
+				grantedScopes: [stepsScope, sleepScope]
+			})
+		);
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse({ scope: stepsScope })
+					: jsonResponse({ dataPoints: [] })
+			)
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		expect(
+			(await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId)))
+				?.grantedScopes
+		).toEqual([stepsScope]);
+	});
+
 	it('guards stale generations and inactive connections before any network request', async () => {
 		const cases = [
 			{ generation: 2, invocationGeneration: 1, status: 'backfilling' as const },
 			{ generation: 1, invocationGeneration: 1, status: 'disconnected' as const }
 		];
 		for (const testCase of cases) {
-			const t = convexTest(schema, modules);
+			const t = boundedConvexTest();
 			const { cursorId } = await seedCursor(t, {
 				dataType: 'steps',
 				generation: testCase.generation,
@@ -370,7 +525,7 @@ describe('Google Health bounded cursor worker', () => {
 		] as const) {
 			vi.useFakeTimers();
 			vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
-			const t = convexTest(schema, modules);
+			const t = boundedConvexTest();
 			const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
 			vi.stubGlobal(
 				'fetch',
@@ -386,9 +541,13 @@ describe('Google Health bounded cursor worker', () => {
 			if (expectedStatus === 'delayed') {
 				expect(stored.cursor?.status).toBe('retry');
 				expect(stored.connection?.nextRetryAt).toEqual(expect.any(Number));
-				expect(stored.scheduled).toHaveLength(1);
+				expect(
+					stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+				).toHaveLength(1);
 			} else {
-				expect(stored.scheduled).toEqual([]);
+				expect(
+					stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+				).toEqual([]);
 			}
 			vi.useRealTimers();
 			vi.unstubAllGlobals();
@@ -397,7 +556,7 @@ describe('Google Health bounded cursor worker', () => {
 
 	it('classifies a network interruption as retryable without exposing token material', async () => {
 		vi.useFakeTimers();
-		const t = convexTest(schema, modules);
+		const t = boundedConvexTest();
 		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
 		const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		vi.stubGlobal(
@@ -421,5 +580,362 @@ describe('Google Health bounded cursor worker', () => {
 		expect(stored.runs[0]).toMatchObject({ status: 'failed', errorCode: 'network_error' });
 		expect(JSON.stringify(stored)).not.toContain('stored-refresh-token');
 		expect(consoleSpy).not.toHaveBeenCalled();
+	});
+
+	it('passes daily-rollup page tokens in the body and reconciles missing civil days before advancing', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'total-calories',
+			pageToken: 'rollup-page-2',
+			windowStart: '2000-01-01',
+			windowEnd: '2000-01-15'
+		});
+		const staleId = await t.run(async (ctx) => {
+			const dataPointId = await ctx.db.insert('healthDataPoints', {
+				connectionId,
+				userId: 'user-a',
+				provider: 'google_health',
+				recordKey: 'missing-rollup-day',
+				dataType: 'total-calories',
+				category: 'activity',
+				recordTimestamp: Date.parse('2000-01-02T00:00:00Z'),
+				localDate: '2000-01-02',
+				civilCoverageTime: '2000-01-02',
+				primaryValue: 50,
+				primaryUnit: 'kcal',
+				payloadDigest: 'old',
+				payloadJson: '{}',
+				lastSeenSyncId: 'old',
+				seenEpoch: 0
+			});
+			await ctx.db.insert('healthDataPointContributions', {
+				connectionId,
+				dataPointId,
+				userId: 'user-a',
+				recordKey: 'missing-rollup-day',
+				dataType: 'total-calories',
+				category: 'activity',
+				localDate: '2000-01-02',
+				recordTimestamp: Date.parse('2000-01-02T00:00:00Z'),
+				civilCoverageTime: '2000-01-02',
+				primaryValue: 50,
+				seenEpoch: 0
+			});
+			return dataPointId;
+		});
+		let body: Record<string, unknown> = {};
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (String(input) === 'https://oauth2.googleapis.com/token') return tokenResponse();
+				body = JSON.parse(String(init?.body));
+				return jsonResponse({ rollupDataPoints: [] });
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		expect(body).toMatchObject({ pageToken: 'rollup-page-2' });
+		expect(
+			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
+		).toBe('running');
+		await pumpReady(t, 2);
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			stale: await ctx.db.get('healthDataPoints', staleId)
+		}));
+		expect(stored.stale).toBeNull();
+		expect(stored.cursor).toMatchObject({
+			status: 'queued',
+			windowStart: '2000-01-15',
+			windowEnd: '2000-01-29'
+		});
+	});
+
+	it('keeps incremental continuations backfilling until every backfill type completes', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'heart-rate',
+			mode: 'incremental',
+			status: 'active',
+			windowStart: '2026-08-14T10:00:00Z',
+			windowEnd: '2026-08-14T11:00:00Z',
+			backfillTotalTypes: 2,
+			backfillCompletedTypes: 0
+		});
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse()
+					: jsonResponse({ dataPoints: [], nextPageToken: 'next' })
+			)
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		const stored = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId)
+		}));
+		expect(stored.connection).toMatchObject({
+			status: 'backfilling',
+			backfillCompletedTypes: 0,
+			backfillTotalTypes: 2
+		});
+		expect(stored.cursor).toMatchObject({ status: 'queued', pageToken: 'next' });
+	});
+
+	it('closes and same-generation requeues a run when token-envelope CAS is lost', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) !== 'https://oauth2.googleapis.com/token')
+					throw new Error('health request must not start');
+				await t.run(async (ctx) =>
+					ctx.db.patch('googleHealthConnections', connectionId, {
+						encryptedRefreshToken: 'raced-ciphertext'
+					})
+				);
+				return tokenResponse();
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_connectionId_and_startedAt', (q) => q.eq('connectionId', connectionId))
+				.take(10),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(10)
+		}));
+		expect(stored.cursor).toMatchObject({ status: 'queued' });
+		expect(stored.runs[0]).toMatchObject({ status: 'failed', errorCode: 'token_cas_lost' });
+		expect(
+			stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+		).toHaveLength(1);
+	});
+
+	it('abandons but never requeues work after its connection generation becomes stale', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) !== 'https://oauth2.googleapis.com/token') {
+					throw new Error('health request must not start');
+				}
+				await t.run(async (ctx) =>
+					ctx.db.patch('googleHealthConnections', connectionId, { generation: 2 })
+				);
+				return tokenResponse();
+			})
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_connectionId_and_startedAt', (q) => q.eq('connectionId', connectionId))
+				.take(10),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(10)
+		}));
+		expect(stored.cursor).toMatchObject({ status: 'retry', generation: 1 });
+		expect(stored.cursor).not.toHaveProperty('activeRunId');
+		expect(stored.runs[0]).toMatchObject({ status: 'failed', errorCode: 'token_cas_lost' });
+		expect(stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')).toEqual(
+			[]
+		);
+	});
+
+	it('guards and recovers a stale running lease without requeueing a different generation', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'oauth'
+		});
+		if (work === null) throw new Error('expected leased work');
+		const scheduled = await t.run(async (ctx) =>
+			ctx.db.system.query('_scheduled_functions').take(10)
+		);
+		expect(scheduled.some((job) => job.name === 'googleHealth/sync:recoverStaleRun')).toBe(true);
+		vi.advanceTimersByTime(5 * 60 * 1000);
+		await t.finishInProgressScheduledFunctions();
+		const recovered = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			run: await ctx.db.get('googleHealthSyncRuns', work.runId)
+		}));
+		expect(recovered.cursor).toMatchObject({ status: 'queued' });
+		expect(recovered.run).toMatchObject({ status: 'failed', errorCode: 'stale_run_lease' });
+		await t.run(async (ctx) =>
+			ctx.db.patch('googleHealthConnections', connectionId, { generation: 2 })
+		);
+		expect(
+			await t.mutation(internal.googleHealth.sync.recoverStaleRun, {
+				cursorId,
+				generation: 1,
+				runId: work.runId,
+				leaseExpiresAt: Date.parse('2026-08-14T12:05:00Z')
+			})
+		).toBe(false);
+	});
+
+	it('assigns reconciliation epochs monotonically across cursors on the same connection', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId: backfillCursorId } = await seedCursor(t, {
+			dataType: 'steps'
+		});
+		const incrementalCursorId = await t.run(async (ctx) =>
+			ctx.db.insert('googleHealthSyncCursors', {
+				connectionId,
+				userId: 'user-a',
+				dataType: 'steps',
+				mode: 'incremental',
+				status: 'queued',
+				syncId: 'incremental-1',
+				attempt: 0,
+				generation: 1,
+				updatedAt: Date.now()
+			})
+		);
+		const first = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId: backfillCursorId,
+			generation: 1,
+			trigger: 'oauth'
+		});
+		const second = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId: incrementalCursorId,
+			generation: 1,
+			trigger: 'webhook'
+		});
+		expect(first?.reconciliationEpoch).toBe(1);
+		expect(second?.reconciliationEpoch).toBe(2);
+		expect(
+			(await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId)))
+				?.reconciliationEpoch
+		).toBe(2);
+	});
+
+	it('closes an active old-generation run when cursor initialization replaces its generation', async () => {
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'oauth'
+		});
+		if (work === null) throw new Error('expected active old-generation run');
+		await t.run(async (ctx) =>
+			ctx.db.patch('googleHealthConnections', connectionId, { generation: 2 })
+		);
+		await t.mutation(internal.googleHealth.model.initializeCursors, { connectionId });
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			run: await ctx.db.get('googleHealthSyncRuns', work.runId)
+		}));
+		expect(stored.cursor).toMatchObject({ status: 'queued', generation: 2 });
+		expect(stored.cursor).not.toHaveProperty('activeRunId');
+		expect(stored.run).toMatchObject({ status: 'failed', errorCode: 'stale_generation' });
+	});
+
+	it('schedules a retry for a non-retryable malformed success page instead of stranding the cursor', async () => {
+		vi.useFakeTimers();
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse()
+					: jsonResponse({ dataPoints: {} })
+			)
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		const stored = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(10)
+		}));
+		expect(stored.connection).toMatchObject({
+			status: 'delayed',
+			lastErrorCode: 'invalid_response'
+		});
+		expect(stored.cursor).toMatchObject({ status: 'retry', attempt: 1 });
+		expect(
+			stored.scheduled.filter((job) => job.name === 'googleHealth/sync:runCursor')
+		).toHaveLength(1);
+	});
+
+	it('imports valid siblings and suppresses omission cleanup when one response point is malformed', async () => {
+		vi.useFakeTimers();
+		const t = boundedConvexTest();
+		const start = '2026-08-14T10:00:00Z';
+		const end = '2026-08-14T11:00:00Z';
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'steps',
+			mode: 'incremental',
+			status: 'active',
+			windowStart: start,
+			windowEnd: end
+		});
+		await t.run(async (ctx) => {
+			await ctx.db.insert('healthDataPoints', {
+				connectionId,
+				userId: 'user-a',
+				provider: 'google_health',
+				recordKey: 'stale-but-protected',
+				dataType: 'steps',
+				category: 'activity',
+				recordTimestamp: Date.parse(start) + 1,
+				startTime: Date.parse(start) + 1,
+				endTime: Date.parse(start) + 1000,
+				localDate: '2026-08-14',
+				primaryValue: 5,
+				primaryUnit: 'steps',
+				payloadDigest: 'old-digest',
+				payloadJson: '{"steps":{"count":5}}',
+				lastSeenSyncId: 'older-sync'
+			});
+		});
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse()
+					: jsonResponse({
+							dataPoints: [
+								{
+									steps: {
+										interval: { startTime: start, endTime: end },
+										count: 42
+									}
+								},
+								{ steps: { count: 99 } }
+							]
+						})
+			)
+		);
+
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const stored = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			points: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.take(10),
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_connectionId_and_startedAt', (q) => q.eq('connectionId', connectionId))
+				.take(10)
+		}));
+		expect(stored.cursor).toMatchObject({ status: 'complete' });
+		expect(stored.points).toHaveLength(2);
+		expect(stored.points.map((row) => row.recordKey)).toContain('stale-but-protected');
+		expect(stored.runs[0]).toMatchObject({ status: 'succeeded', fetched: 2, skipped: 1 });
 	});
 });

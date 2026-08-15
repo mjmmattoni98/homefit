@@ -120,6 +120,8 @@ describe('Google Health point normalization', () => {
 			recordTimestamp: Date.parse('2026-08-14T22:30:00Z'),
 			startTime: Date.parse('2026-08-14T22:30:00Z'),
 			endTime: Date.parse('2026-08-15T06:30:00Z'),
+			physicalCoverageTime: Date.parse('2026-08-15T06:30:00Z'),
+			civilCoverageTime: '2026-08-15T08:30:00',
 			localDate: '2026-08-15',
 			primaryUnit: 'min',
 			sourceFamily: 'users/me/dataSourceFamilies/all-sources',
@@ -162,6 +164,8 @@ describe('Google Health point normalization', () => {
 
 		expect(first).toMatchObject({
 			recordTimestamp: Date.parse('2026-08-14T10:00:00Z'),
+			physicalCoverageTime: Date.parse('2026-08-14T10:00:00Z'),
+			civilCoverageTime: '2026-08-14T12:00:00',
 			localDate: '2026-08-14',
 			primaryValue: 61,
 			primaryUnit: 'bpm',
@@ -274,12 +278,38 @@ describe('Google Health point normalization', () => {
 
 		expect(point).toMatchObject({
 			recordTimestamp: Date.parse('2026-08-14T08:00:00Z'),
+			physicalCoverageTime: Date.parse('2026-08-14T08:00:00Z'),
 			startTime: Date.parse('2026-08-14T08:00:00Z'),
 			endTime: Date.parse('2026-08-14T08:15:00Z'),
 			localDate: '2026-08-14',
 			primaryValue: 1200,
 			primaryUnit: 'steps'
 		});
+	});
+
+	it('stores session coverage on the same registry clock used by fetch filters', () => {
+		const exercise = normalizeGooglePoint(metric('exercise'), {
+			exercise: {
+				interval: {
+					startTime: '2026-08-14T08:00:00Z',
+					endTime: '2026-08-14T09:00:00Z',
+					civilStartTime: civilDateTime(2026, 8, 14, 10),
+					civilEndTime: civilDateTime(2026, 8, 14, 11)
+				},
+				exerciseType: 'WALKING'
+			}
+		});
+		const ecg = normalizeGooglePoint(metric('electrocardiogram'), {
+			name: 'users/me/dataTypes/electrocardiogram/dataPoints/ecg-1',
+			electrocardiogram: {
+				interval: { startTime: '2026-08-14T08:00:00Z', endTime: '2026-08-14T08:01:00Z' }
+			}
+		});
+
+		expect(exercise).toMatchObject({ civilCoverageTime: '2026-08-14T10:00:00' });
+		expect(exercise).not.toHaveProperty('physicalCoverageTime');
+		expect(ecg).toMatchObject({ physicalCoverageTime: Date.parse('2026-08-14T08:00:00Z') });
+		expect(ecg).not.toHaveProperty('civilCoverageTime');
 	});
 
 	it('normalizes a daily record', () => {
@@ -292,6 +322,7 @@ describe('Google Health point normalization', () => {
 
 		expect(point).toMatchObject({
 			recordTimestamp: Date.UTC(2026, 7, 14),
+			civilCoverageTime: '2026-08-14T00:00:00',
 			localDate: '2026-08-14',
 			primaryValue: 54,
 			primaryUnit: 'bpm'
@@ -307,6 +338,7 @@ describe('Google Health point normalization', () => {
 
 		expect(point).toMatchObject({
 			recordTimestamp: Date.UTC(2026, 7, 14),
+			civilCoverageTime: '2026-08-14T00:00:00',
 			startTime: Date.UTC(2026, 7, 14),
 			endTime: Date.UTC(2026, 7, 15),
 			localDate: '2026-08-14',

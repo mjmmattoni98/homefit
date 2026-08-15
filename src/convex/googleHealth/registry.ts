@@ -20,6 +20,13 @@ export type MetricRecordKind = 'sample' | 'interval' | 'daily' | 'session' | 're
 export type MetricReadMode = 'list' | 'reconcile' | 'rollUp' | 'dailyRollUp';
 export type MetricAggregation = 'sum' | 'average' | 'latest' | 'duration';
 
+export interface MetricFilterStrategy {
+	readonly field: string;
+	readonly axis: 'physical' | 'civil';
+	readonly selector: 'start' | 'end' | 'sample' | 'date';
+	readonly comparison: 'closedOpen' | 'lowerBoundOnly';
+}
+
 export type MetricPrimaryValueStrategy =
 	| {
 			readonly kind: 'direct';
@@ -67,6 +74,10 @@ export interface MetricDefinition {
 	readonly identityStrategy: MetricIdentityStrategy;
 	readonly primaryValueStrategy?: MetricPrimaryValueStrategy;
 	readonly payloadLifecycleTimestamps: boolean;
+	readonly filterStrategies: Readonly<{
+		physical?: MetricFilterStrategy;
+		civil?: MetricFilterStrategy;
+	}>;
 	readonly maxWindowDays?: number;
 }
 
@@ -316,6 +327,51 @@ function getMaxWindowDays(readMode: MetricReadMode): number | undefined {
 	return undefined;
 }
 
+function getFilterStrategies(
+	dataType: string,
+	recordKind: MetricRecordKind
+): MetricDefinition['filterStrategies'] {
+	const prefix = dataType.replaceAll('-', '_');
+	const make = (
+		axis: 'physical' | 'civil',
+		selector: MetricFilterStrategy['selector'],
+		field: string,
+		comparison: MetricFilterStrategy['comparison'] = 'closedOpen'
+	): MetricFilterStrategy => Object.freeze({ axis, selector, field, comparison });
+	if (recordKind === 'sample') {
+		return Object.freeze({
+			physical: make('physical', 'sample', `${prefix}.sample_time.physical_time`),
+			civil: make('civil', 'sample', `${prefix}.sample_time.civil_time`)
+		});
+	}
+	if (recordKind === 'interval') {
+		return Object.freeze({
+			physical: make('physical', 'start', `${prefix}.interval.start_time`),
+			civil: make('civil', 'start', `${prefix}.interval.civil_start_time`)
+		});
+	}
+	if (recordKind === 'daily') {
+		return Object.freeze({ civil: make('civil', 'date', `${prefix}.date`) });
+	}
+	if (recordKind === 'session' && dataType === 'sleep') {
+		return Object.freeze({
+			physical: make('physical', 'end', 'sleep.interval.end_time'),
+			civil: make('civil', 'end', 'sleep.interval.civil_end_time')
+		});
+	}
+	if (recordKind === 'session' && dataType === 'electrocardiogram') {
+		return Object.freeze({
+			physical: make('physical', 'start', 'electrocardiogram.interval.start_time', 'lowerBoundOnly')
+		});
+	}
+	if (recordKind === 'session') {
+		return Object.freeze({
+			civil: make('civil', 'start', `${prefix}.interval.civil_start_time`)
+		});
+	}
+	return Object.freeze({});
+}
+
 export const METRIC_DEFINITIONS: readonly MetricDefinition[] = Object.freeze(
 	definitions.map(
 		([
@@ -343,6 +399,7 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = Object.freeze(
 				aggregation,
 				primaryUnit,
 				identityStrategy: getIdentityStrategy(dataType),
+				filterStrategies: getFilterStrategies(dataType, recordKind),
 				payloadLifecycleTimestamps: dataType === 'exercise' || dataType === 'sleep',
 				...(primaryValueStrategy === undefined ? {} : { primaryValueStrategy }),
 				...(maxWindowDays === undefined ? {} : { maxWindowDays })

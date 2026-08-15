@@ -698,6 +698,50 @@ function sourceMetadata(
 	};
 }
 
+function coverageMetadata(
+	definition: MetricDefinition,
+	payload: PlainObject,
+	raw: PlainObject
+): Pick<NormalizedHealthPoint, 'physicalCoverageTime' | 'civilCoverageTime'> {
+	const strategies = definition.filterStrategies;
+	if (strategies.physical === undefined && strategies.civil === undefined) return {};
+	if (definition.recordKind === 'daily') {
+		const civil =
+			parseDateOnly(payload.date) ??
+			parseDateOnly(raw.date) ??
+			parseCivilDateTime(payload.civilStartTime) ??
+			parseCivilDateTime(raw.civilStartTime);
+		return civil === undefined ? {} : { civilCoverageTime: civil.iso };
+	}
+
+	const time =
+		definition.recordKind === 'sample'
+			? isPlainObject(payload.sampleTime)
+				? payload.sampleTime
+				: undefined
+			: isPlainObject(payload.interval)
+				? payload.interval
+				: isPlainObject(payload.sessionTime)
+					? payload.sessionTime
+					: undefined;
+	if (time === undefined) return {};
+	const selector = strategies.physical?.selector ?? strategies.civil?.selector;
+	const physicalValue =
+		selector === 'end' ? time.endTime : selector === 'sample' ? time.physicalTime : time.startTime;
+	const civilValue =
+		selector === 'end'
+			? time.civilEndTime
+			: selector === 'sample'
+				? time.civilTime
+				: time.civilStartTime;
+	const physical = strategies.physical === undefined ? undefined : parseTimestamp(physicalValue);
+	const civil = strategies.civil === undefined ? undefined : parseCivilDateTime(civilValue);
+	return {
+		...(physical === undefined ? {} : { physicalCoverageTime: physical.epochMs }),
+		...(civil === undefined ? {} : { civilCoverageTime: civil.iso })
+	};
+}
+
 export function normalizeGooglePoint(
 	definition: MetricDefinition,
 	raw: unknown,
@@ -757,6 +801,7 @@ export function normalizeGooglePoint(
 		...(normalizedTime.startTime === undefined ? {} : { startTime: normalizedTime.startTime }),
 		...(normalizedTime.endTime === undefined ? {} : { endTime: normalizedTime.endTime }),
 		localDate: normalizedTime.localDate,
+		...coverageMetadata(definition, payload, raw),
 		...(primaryValue === undefined ? {} : { primaryValue }),
 		primaryUnit: definition.primaryUnit,
 		...sourceMetadata(definition, raw),

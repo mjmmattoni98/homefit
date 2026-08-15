@@ -22,12 +22,15 @@ import {
 } from './crypto';
 import { normalizeGooglePoint } from './normalize';
 import { getMetricDefinition, type MetricDefinition } from './registry';
-import { syncTriggerValidator } from './validators';
+import { type NormalizedHealthPoint, syncTriggerValidator, type SyncTrigger } from './validators';
 
 const FIRST_ROLLUP_DATE = '2000-01-01';
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+const RUN_LEASE_MS = 5 * 60 * 1000;
 const MAX_CURSOR_LOOKAHEAD = 100;
+const MAX_CHUNK_POINTS = 16;
+const MAX_CHUNK_UTF8_BYTES = 1_500_000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SYNCABLE_STATUSES = new Set(['backfilling', 'active', 'delayed']);
 
@@ -50,16 +53,11 @@ const cursorWorkValidator = v.object({
 	syncId: v.string(),
 	attempt: v.number(),
 	generation: v.number(),
-	runId: v.id('googleHealthSyncRuns')
+	runId: v.id('googleHealthSyncRuns'),
+	reconciliationEpoch: v.number()
 });
 
-type PageCounts = {
-	fetched: number;
-	inserted: number;
-	updated: number;
-	skipped: number;
-};
-
+type PageCounts = { fetched: number; inserted: number; updated: number; skipped: number };
 type CursorWork = {
 	connectionId: Id<'googleHealthConnections'>;
 	userId: string;
@@ -73,6 +71,16 @@ type CursorWork = {
 	attempt: number;
 	generation: number;
 	runId: Id<'googleHealthSyncRuns'>;
+	reconciliationEpoch: number;
+};
+
+type Completion = {
+	trigger: SyncTrigger;
+	counts: PageCounts;
+	nextPageToken?: string;
+	nextWindowStart?: string;
+	nextWindowEnd?: string;
+	finish: boolean;
 };
 
 function safeErrorCode(code: string): string {
@@ -85,6 +93,34 @@ function isValidDate(value: string): boolean {
 	return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+function isPhysical(value: string): boolean {
+	const match =
+		/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(
+			value
+		);
+	return (
+		match !== null &&
+		isValidDate(match[1]) &&
+		Number(match[2]) <= 23 &&
+		Number(match[3]) <= 59 &&
+		Number(match[4]) <= 59 &&
+		Number(match[5] ?? 0) <= 23 &&
+		Number(match[6] ?? 0) <= 59 &&
+		Number.isFinite(Date.parse(value))
+	);
+}
+
+function isCivil(value: string): boolean {
+	const match = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?)?$/.exec(value);
+	return (
+		match !== null &&
+		isValidDate(match[1]) &&
+		Number(match[2] ?? 0) <= 23 &&
+		Number(match[3] ?? 0) <= 59 &&
+		Number(match[4] ?? 0) <= 59
+	);
+}
+
 function addDays(value: string, days: number): string {
 	if (!isValidDate(value) || !Number.isInteger(days)) throw new Error('invalid civil date');
 	const date = new Date(`${value}T00:00:00Z`);
@@ -95,7 +131,6 @@ function addDays(value: string, days: number): string {
 function minDate(left: string, right: string): string {
 	return left < right ? left : right;
 }
-
 function currentExclusiveCivilDate(): string {
 	return addDays(new Date(Date.now()).toISOString().slice(0, 10), 1);
 }
@@ -115,20 +150,63 @@ function timeFilterFor(
 	work: CursorWork,
 	definition: MetricDefinition
 ): GoogleHealthTimeFilter | undefined {
-	if (
-		work.mode !== 'incremental' ||
-		work.windowStart === undefined ||
-		work.windowEnd === undefined
-	) {
+	if (work.mode !== 'incremental' || work.windowStart === undefined || work.windowEnd === undefined)
 		return undefined;
+	const physical = definition.filterStrategies.physical;
+	if (physical !== undefined && isPhysical(work.windowStart) && isPhysical(work.windowEnd)) {
+		return {
+			axis: 'physical',
+			field: physical.field,
+			comparison: physical.comparison,
+			start: work.windowStart,
+			...(physical.comparison === 'closedOpen' ? { end: work.windowEnd } : {})
+		};
 	}
-	if (definition.recordKind === 'reference') return undefined;
-	return {
-		kind: definition.recordKind === 'daily' ? 'civil' : 'physical',
-		recordKind: definition.recordKind,
-		start: work.windowStart,
-		end: work.windowEnd
-	};
+	const civil = definition.filterStrategies.civil;
+	if (civil !== undefined && isCivil(work.windowStart) && isCivil(work.windowEnd)) {
+		return {
+			axis: 'civil',
+			field: civil.field,
+			comparison: civil.comparison,
+			start: work.windowStart,
+			...(civil.comparison === 'closedOpen' ? { end: work.windowEnd } : {})
+		};
+	}
+	// Cursor bounds from a different clock must never be coerced into a filter.
+	return undefined;
+}
+
+export function chunkNormalizedPoints(
+	points: readonly NormalizedHealthPoint[]
+): NormalizedHealthPoint[][] {
+	const chunks: NormalizedHealthPoint[][] = [];
+	let current: NormalizedHealthPoint[] = [];
+	let bytes = 0;
+	for (const point of points) {
+		const pointBytes = new TextEncoder().encode(JSON.stringify(point)).byteLength + 16;
+		if (
+			current.length > 0 &&
+			(current.length >= MAX_CHUNK_POINTS || bytes + pointBytes > MAX_CHUNK_UTF8_BYTES)
+		) {
+			chunks.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(point);
+		bytes += pointBytes;
+	}
+	if (current.length > 0) chunks.push(current);
+	return chunks;
+}
+
+function runIsCurrent(
+	cursor: { status: string; generation: number; activeRunId?: Id<'googleHealthSyncRuns'> },
+	generation: number,
+	runId: Id<'googleHealthSyncRuns'>
+): boolean {
+	return (
+		cursor.status === 'running' && cursor.generation === generation && cursor.activeRunId === runId
+	);
 }
 
 export const markCursorRunning = internalMutation({
@@ -144,25 +222,29 @@ export const markCursorRunning = internalMutation({
 			!cursor ||
 			cursor.generation !== args.generation ||
 			(cursor.status !== 'queued' && cursor.status !== 'retry')
-		) {
+		)
 			return null;
-		}
 		const connection = await ctx.db.get('googleHealthConnections', cursor.connectionId);
 		if (
 			!connection ||
 			connection.generation !== args.generation ||
 			!SYNCABLE_STATUSES.has(connection.status)
-		) {
+		)
 			return null;
-		}
 		const now = Date.now();
-		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
-			status: 'running',
-			updatedAt: now
-		});
+		const continuingEpoch = cursor.pageToken !== undefined && cursor.activeEpoch !== undefined;
+		const reconciliationEpoch = continuingEpoch
+			? (cursor.activeEpoch ?? 0)
+			: (connection.reconciliationEpoch ?? 0) + 1;
+		if (!continuingEpoch) {
+			await ctx.db.patch('googleHealthConnections', connection._id, { reconciliationEpoch });
+		}
 		const runId = await ctx.db.insert('googleHealthSyncRuns', {
 			connectionId: connection._id,
 			userId: connection.userId,
+			cursorId: cursor._id,
+			generation: args.generation,
+			reconciliationEpoch,
 			trigger: args.trigger,
 			dataType: cursor.dataType,
 			...(cursor.windowStart === undefined ? {} : { rangeStart: cursor.windowStart }),
@@ -176,6 +258,21 @@ export const markCursorRunning = internalMutation({
 			skipped: 0,
 			status: 'running'
 		});
+		const leaseExpiresAt = now + RUN_LEASE_MS;
+		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+			status: 'running',
+			activeRunId: runId,
+			activeEpoch: reconciliationEpoch,
+			reconciliationEpoch,
+			leaseExpiresAt,
+			updatedAt: now
+		});
+		await ctx.scheduler.runAfter(RUN_LEASE_MS, internal.googleHealth.sync.recoverStaleRun, {
+			cursorId: cursor._id,
+			generation: args.generation,
+			runId,
+			leaseExpiresAt
+		});
 		return {
 			connectionId: connection._id,
 			userId: connection.userId,
@@ -188,7 +285,8 @@ export const markCursorRunning = internalMutation({
 			syncId: cursor.syncId,
 			attempt: cursor.attempt,
 			generation: cursor.generation,
-			runId
+			runId,
+			reconciliationEpoch
 		};
 	}
 });
@@ -219,6 +317,128 @@ async function completeRun(
 	});
 }
 
+async function completeCursorPageImpl(
+	ctx: MutationCtx,
+	args: {
+		cursorId: Id<'googleHealthSyncCursors'>;
+		generation: number;
+		trigger: SyncTrigger;
+		runId: Id<'googleHealthSyncRuns'>;
+		counts: PageCounts;
+		nextPageToken?: string;
+		nextWindowStart?: string;
+		nextWindowEnd?: string;
+	}
+): Promise<boolean> {
+	const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+	const connection = cursor
+		? await ctx.db.get('googleHealthConnections', cursor.connectionId)
+		: null;
+	if (
+		!cursor ||
+		!connection ||
+		!runIsCurrent(cursor, args.generation, args.runId) ||
+		connection.generation !== args.generation ||
+		!SYNCABLE_STATUSES.has(connection.status)
+	)
+		return false;
+	const hasPage = args.nextPageToken !== undefined;
+	const hasWindow = args.nextWindowStart !== undefined || args.nextWindowEnd !== undefined;
+	if (hasPage === hasWindow || (hasWindow && (!args.nextWindowStart || !args.nextWindowEnd)))
+		throw new Error('exactly one cursor continuation is required');
+	await completeRun(ctx, args.runId, args.counts, 'succeeded');
+	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+		status: 'queued',
+		activeRunId: undefined,
+		leaseExpiresAt: undefined,
+		pageToken: args.nextPageToken,
+		windowStart: args.nextWindowStart ?? cursor.windowStart,
+		windowEnd: args.nextWindowEnd ?? cursor.windowEnd,
+		...(hasWindow ? { activeEpoch: undefined } : {}),
+		attempt: 0,
+		updatedAt: Date.now()
+	});
+	const backfillPending = connection.backfillCompletedTypes < connection.backfillTotalTypes;
+	await ctx.db.patch('googleHealthConnections', connection._id, {
+		status: backfillPending ? 'backfilling' : 'active',
+		lastAttemptAt: Date.now(),
+		lastErrorCode: undefined,
+		lastErrorMessage: undefined,
+		nextRetryAt: undefined
+	});
+	await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+		cursorId: cursor._id,
+		generation: args.generation,
+		trigger: args.trigger
+	});
+	return true;
+}
+
+async function finishDataTypeImpl(
+	ctx: MutationCtx,
+	args: {
+		cursorId: Id<'googleHealthSyncCursors'>;
+		generation: number;
+		runId: Id<'googleHealthSyncRuns'>;
+		counts: PageCounts;
+	}
+): Promise<boolean> {
+	const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+	const connection = cursor
+		? await ctx.db.get('googleHealthConnections', cursor.connectionId)
+		: null;
+	if (
+		!cursor ||
+		!connection ||
+		!runIsCurrent(cursor, args.generation, args.runId) ||
+		connection.generation !== args.generation ||
+		!SYNCABLE_STATUSES.has(connection.status)
+	)
+		return false;
+	await completeRun(ctx, args.runId, args.counts, 'succeeded');
+	const now = Date.now();
+	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+		status: 'complete',
+		pageToken: undefined,
+		activeRunId: undefined,
+		activeEpoch: undefined,
+		leaseExpiresAt: undefined,
+		attempt: 0,
+		updatedAt: now
+	});
+	const completed =
+		cursor.mode === 'backfill'
+			? Math.min(connection.backfillTotalTypes, connection.backfillCompletedTypes + 1)
+			: connection.backfillCompletedTypes;
+	const nextCandidates = await ctx.db
+		.query('googleHealthSyncCursors')
+		.withIndex('by_userId', (q) => q.eq('userId', connection.userId))
+		.take(MAX_CURSOR_LOOKAHEAD);
+	const next = nextCandidates.find(
+		(candidate) =>
+			candidate.connectionId === connection._id &&
+			candidate.generation === args.generation &&
+			candidate.status === 'queued' &&
+			candidate._id !== cursor._id
+	);
+	await ctx.db.patch('googleHealthConnections', connection._id, {
+		status: completed >= connection.backfillTotalTypes ? 'active' : 'backfilling',
+		backfillCompletedTypes: completed,
+		lastAttemptAt: now,
+		lastSuccessfulSyncAt: now,
+		lastErrorCode: undefined,
+		lastErrorMessage: undefined,
+		nextRetryAt: undefined
+	});
+	if (next)
+		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+			cursorId: next._id,
+			generation: args.generation,
+			trigger: 'oauth'
+		});
+	return true;
+}
+
 export const completeCursorPage = internalMutation({
 	args: {
 		cursorId: v.id('googleHealthSyncCursors'),
@@ -231,49 +451,7 @@ export const completeCursorPage = internalMutation({
 		nextWindowEnd: v.optional(v.string())
 	},
 	returns: v.boolean(),
-	handler: async (ctx, args) => {
-		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
-		const connection = cursor
-			? await ctx.db.get('googleHealthConnections', cursor.connectionId)
-			: null;
-		if (
-			!cursor ||
-			!connection ||
-			cursor.status !== 'running' ||
-			cursor.generation !== args.generation ||
-			connection.generation !== args.generation ||
-			!SYNCABLE_STATUSES.has(connection.status)
-		) {
-			return false;
-		}
-		const hasPage = args.nextPageToken !== undefined;
-		const hasWindow = args.nextWindowStart !== undefined || args.nextWindowEnd !== undefined;
-		if (hasPage === hasWindow || (hasWindow && (!args.nextWindowStart || !args.nextWindowEnd))) {
-			throw new Error('exactly one cursor continuation is required');
-		}
-		await completeRun(ctx, args.runId, args.counts, 'succeeded');
-		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
-			status: 'queued',
-			pageToken: args.nextPageToken,
-			windowStart: args.nextWindowStart ?? cursor.windowStart,
-			windowEnd: args.nextWindowEnd ?? cursor.windowEnd,
-			attempt: 0,
-			updatedAt: Date.now()
-		});
-		await ctx.db.patch('googleHealthConnections', connection._id, {
-			status: cursor.mode === 'backfill' ? 'backfilling' : 'active',
-			lastAttemptAt: Date.now(),
-			lastErrorCode: undefined,
-			lastErrorMessage: undefined,
-			nextRetryAt: undefined
-		});
-		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-			cursorId: cursor._id,
-			generation: args.generation,
-			trigger: args.trigger
-		});
-		return true;
-	}
+	handler: completeCursorPageImpl
 });
 
 export const finishDataType = internalMutation({
@@ -284,64 +462,24 @@ export const finishDataType = internalMutation({
 		counts: pageCountsValidator
 	},
 	returns: v.boolean(),
-	handler: async (ctx, args) => {
-		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
-		const connection = cursor
-			? await ctx.db.get('googleHealthConnections', cursor.connectionId)
-			: null;
-		if (
-			!cursor ||
-			!connection ||
-			cursor.status !== 'running' ||
-			cursor.generation !== args.generation ||
-			connection.generation !== args.generation ||
-			!SYNCABLE_STATUSES.has(connection.status)
-		) {
-			return false;
-		}
-		await completeRun(ctx, args.runId, args.counts, 'succeeded');
-		const now = Date.now();
-		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
-			status: 'complete',
-			pageToken: undefined,
-			attempt: 0,
-			updatedAt: now
-		});
-		const completed =
-			cursor.mode === 'backfill'
-				? Math.min(connection.backfillTotalTypes, connection.backfillCompletedTypes + 1)
-				: connection.backfillCompletedTypes;
-		const nextCandidates = await ctx.db
-			.query('googleHealthSyncCursors')
-			.withIndex('by_userId', (q) => q.eq('userId', connection.userId))
-			.take(MAX_CURSOR_LOOKAHEAD);
-		const next = nextCandidates.find(
-			(candidate) =>
-				candidate.connectionId === connection._id &&
-				candidate.generation === args.generation &&
-				candidate.status === 'queued' &&
-				candidate._id !== cursor._id
-		);
-		const backfillComplete =
-			cursor.mode === 'incremental' || completed >= connection.backfillTotalTypes;
-		await ctx.db.patch('googleHealthConnections', connection._id, {
-			status: backfillComplete ? 'active' : 'backfilling',
-			backfillCompletedTypes: completed,
-			lastAttemptAt: now,
-			lastSuccessfulSyncAt: now,
-			lastErrorCode: undefined,
-			lastErrorMessage: undefined,
-			nextRetryAt: undefined
-		});
-		if (next) {
-			await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-				cursorId: next._id,
-				generation: args.generation,
-				trigger: 'oauth'
-			});
-		}
-		return true;
-	}
+	handler: finishDataTypeImpl
+});
+
+export const finalizeCleanup = internalMutation({
+	args: {
+		cursorId: v.id('googleHealthSyncCursors'),
+		generation: v.number(),
+		trigger: syncTriggerValidator,
+		runId: v.id('googleHealthSyncRuns'),
+		counts: pageCountsValidator,
+		nextPageToken: v.optional(v.string()),
+		nextWindowStart: v.optional(v.string()),
+		nextWindowEnd: v.optional(v.string()),
+		finish: v.boolean()
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) =>
+		args.finish ? await finishDataTypeImpl(ctx, args) : await completeCursorPageImpl(ctx, args)
 });
 
 export const scheduleCursorRetry = internalMutation({
@@ -361,18 +499,16 @@ export const scheduleCursorRetry = internalMutation({
 		if (
 			!cursor ||
 			!connection ||
-			cursor.status !== 'running' ||
-			cursor.generation !== args.generation ||
+			!runIsCurrent(cursor, args.generation, args.runId) ||
 			connection.generation !== args.generation ||
 			!SYNCABLE_STATUSES.has(connection.status) ||
 			!Number.isFinite(args.delayMs) ||
 			args.delayMs < 0 ||
 			args.delayMs > RETRY_MAX_MS * 1.2
-		) {
+		)
 			return false;
-		}
 		const errorCode = safeErrorCode(args.errorCode);
-		const nextRetryAt = Date.now() + args.delayMs;
+		const now = Date.now();
 		await completeRun(
 			ctx,
 			args.runId,
@@ -382,15 +518,17 @@ export const scheduleCursorRetry = internalMutation({
 		);
 		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 			status: 'retry',
+			activeRunId: undefined,
+			leaseExpiresAt: undefined,
 			attempt: cursor.attempt + 1,
-			updatedAt: Date.now()
+			updatedAt: now
 		});
 		await ctx.db.patch('googleHealthConnections', connection._id, {
 			status: 'delayed',
-			lastAttemptAt: Date.now(),
+			lastAttemptAt: now,
 			lastErrorCode: errorCode,
 			lastErrorMessage: 'Google Health is temporarily unavailable',
-			nextRetryAt
+			nextRetryAt: now + args.delayMs
 		});
 		await ctx.scheduler.runAfter(args.delayMs, internal.googleHealth.sync.runCursor, {
 			cursorId: cursor._id,
@@ -418,14 +556,13 @@ export const failCursor = internalMutation({
 		if (
 			!cursor ||
 			!connection ||
-			cursor.status !== 'running' ||
-			cursor.generation !== args.generation ||
+			!runIsCurrent(cursor, args.generation, args.runId) ||
 			connection.generation !== args.generation ||
 			!SYNCABLE_STATUSES.has(connection.status)
-		) {
+		)
 			return false;
-		}
 		const errorCode = safeErrorCode(args.errorCode);
+		const now = Date.now();
 		await completeRun(
 			ctx,
 			args.runId,
@@ -435,17 +572,125 @@ export const failCursor = internalMutation({
 		);
 		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 			status: 'retry',
-			updatedAt: Date.now()
+			activeRunId: undefined,
+			leaseExpiresAt: undefined,
+			attempt: cursor.attempt + 1,
+			updatedAt: now
 		});
 		await ctx.db.patch('googleHealthConnections', connection._id, {
 			status: args.actionRequired ? 'action_required' : 'delayed',
-			lastAttemptAt: Date.now(),
+			lastAttemptAt: now,
 			lastErrorCode: errorCode,
 			lastErrorMessage: args.actionRequired
 				? 'Google Health access needs to be renewed'
 				: 'Google Health synchronization failed',
-			nextRetryAt: undefined
+			nextRetryAt: args.actionRequired ? undefined : now + RETRY_BASE_MS
 		});
+		if (!args.actionRequired)
+			await ctx.scheduler.runAfter(RETRY_BASE_MS, internal.googleHealth.sync.runCursor, {
+				cursorId: cursor._id,
+				generation: args.generation,
+				trigger: 'retry'
+			});
+		return true;
+	}
+});
+
+export const abandonRun = internalMutation({
+	args: {
+		cursorId: v.id('googleHealthSyncCursors'),
+		generation: v.number(),
+		runId: v.id('googleHealthSyncRuns'),
+		errorCode: v.string()
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const run = await ctx.db.get('googleHealthSyncRuns', args.runId);
+		if (run?.status === 'running')
+			await ctx.db.patch('googleHealthSyncRuns', run._id, {
+				status: 'failed',
+				finishedAt: Date.now(),
+				errorCode: safeErrorCode(args.errorCode),
+				errorMessage: 'Google Health synchronization abandoned'
+			});
+		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+		const connection = cursor
+			? await ctx.db.get('googleHealthConnections', cursor.connectionId)
+			: null;
+		if (!cursor || !runIsCurrent(cursor, args.generation, args.runId)) return false;
+		if (
+			!connection ||
+			connection.generation !== args.generation ||
+			!SYNCABLE_STATUSES.has(connection.status)
+		) {
+			await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+				status: 'retry',
+				activeRunId: undefined,
+				leaseExpiresAt: undefined,
+				updatedAt: Date.now()
+			});
+			return false;
+		}
+		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+			status: 'queued',
+			activeRunId: undefined,
+			leaseExpiresAt: undefined,
+			updatedAt: Date.now()
+		});
+		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+			cursorId: cursor._id,
+			generation: args.generation,
+			trigger: 'retry'
+		});
+		return true;
+	}
+});
+
+export const recoverStaleRun = internalMutation({
+	args: {
+		cursorId: v.id('googleHealthSyncCursors'),
+		generation: v.number(),
+		runId: v.id('googleHealthSyncRuns'),
+		leaseExpiresAt: v.number()
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+		const connection = cursor
+			? await ctx.db.get('googleHealthConnections', cursor.connectionId)
+			: null;
+		if (
+			!cursor ||
+			!runIsCurrent(cursor, args.generation, args.runId) ||
+			cursor.leaseExpiresAt !== args.leaseExpiresAt ||
+			Date.now() < args.leaseExpiresAt
+		)
+			return false;
+		const canRequeue =
+			connection !== null &&
+			connection.generation === args.generation &&
+			SYNCABLE_STATUSES.has(connection.status);
+		const run = await ctx.db.get('googleHealthSyncRuns', args.runId);
+		if (run?.status === 'running')
+			await ctx.db.patch('googleHealthSyncRuns', run._id, {
+				status: 'failed',
+				finishedAt: Date.now(),
+				errorCode: 'stale_run_lease',
+				errorMessage: 'Google Health synchronization lease expired'
+			});
+		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+			status: canRequeue ? 'queued' : 'retry',
+			activeRunId: undefined,
+			leaseExpiresAt: undefined,
+			updatedAt: Date.now()
+		});
+		if (canRequeue) {
+			await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+				cursorId: cursor._id,
+				generation: args.generation,
+				trigger: 'retry'
+			});
+		}
 		return true;
 	}
 });
@@ -454,14 +699,39 @@ async function guardedReplaceEnvelope(
 	ctx: ActionCtx,
 	work: CursorWork,
 	expectedEnvelope: EncryptedTokenEnvelope,
-	replacementEnvelope: EncryptedTokenEnvelope
+	replacementEnvelope: EncryptedTokenEnvelope,
+	replacementGrantedScopes?: readonly string[]
 ): Promise<boolean> {
 	return await ctx.runMutation(internal.googleHealth.model.replaceTokenEnvelope, {
 		connectionId: work.connectionId,
 		expectedGeneration: work.generation,
 		expectedEnvelope,
-		replacementEnvelope
+		replacementEnvelope,
+		...(replacementGrantedScopes === undefined
+			? {}
+			: { replacementGrantedScopes: [...replacementGrantedScopes] })
 	});
+}
+
+function completionFor(
+	pageToken: string | undefined,
+	rollupRange: { start: string; end: string } | undefined,
+	counts: PageCounts,
+	trigger: SyncTrigger
+): Completion {
+	if (pageToken !== undefined) return { trigger, counts, nextPageToken: pageToken, finish: false };
+	if (rollupRange !== undefined) {
+		const terminal = currentExclusiveCivilDate();
+		if (rollupRange.end < terminal)
+			return {
+				trigger,
+				counts,
+				nextWindowStart: rollupRange.end,
+				nextWindowEnd: minDate(addDays(rollupRange.end, 14), terminal),
+				finish: false
+			};
+	}
+	return { trigger, counts, finish: true };
 }
 
 export const runCursor = internalAction({
@@ -477,6 +747,14 @@ export const runCursor = internalAction({
 			args
 		);
 		if (work === null) return null;
+		const abandon = async (code: string) => {
+			await ctx.runMutation(internal.googleHealth.sync.abandonRun, {
+				cursorId: work.cursorId,
+				generation: work.generation,
+				runId: work.runId,
+				errorCode: code
+			});
+		};
 		try {
 			const connection = await ctx.runQuery(internal.googleHealth.model.getConnectionForSync, {
 				connectionId: work.connectionId
@@ -486,30 +764,32 @@ export const runCursor = internalAction({
 				connection.generation !== work.generation ||
 				!SYNCABLE_STATUSES.has(connection.status)
 			) {
+				await abandon('stale_connection');
 				return null;
 			}
 			if (connection.tokenEnvelope === null) {
-				await ctx.runMutation(internal.googleHealth.sync.failCursor, {
+				const failed = await ctx.runMutation(internal.googleHealth.sync.failCursor, {
 					cursorId: work.cursorId,
 					generation: work.generation,
 					runId: work.runId,
 					errorCode: 'missing_token_envelope',
 					actionRequired: true
 				});
+				if (!failed) await abandon('failure_cas_lost');
 				return null;
 			}
 			const definition = getMetricDefinition(work.dataType);
 			if (definition === null || !connection.grantedScopes.includes(definition.scope)) {
-				await ctx.runMutation(internal.googleHealth.sync.failCursor, {
+				const failed = await ctx.runMutation(internal.googleHealth.sync.failCursor, {
 					cursorId: work.cursorId,
 					generation: work.generation,
 					runId: work.runId,
 					errorCode: 'scope_not_granted',
 					actionRequired: true
 				});
+				if (!failed) await abandon('failure_cas_lost');
 				return null;
 			}
-
 			const keyring = createTokenKeyring(
 				env.GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY,
 				env.GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION,
@@ -518,8 +798,10 @@ export const runCursor = internalAction({
 			let currentEnvelope = connection.tokenEnvelope;
 			const rotated = await rotateRefreshTokenEnvelope(currentEnvelope, work.userId, keyring);
 			if (rotated.reencrypted) {
-				const replaced = await guardedReplaceEnvelope(ctx, work, currentEnvelope, rotated.envelope);
-				if (!replaced) return null;
+				if (!(await guardedReplaceEnvelope(ctx, work, currentEnvelope, rotated.envelope))) {
+					await abandon('token_cas_lost');
+					return null;
+				}
 				currentEnvelope = rotated.envelope;
 			}
 			const tokens = await refreshAccessToken({
@@ -528,135 +810,182 @@ export const runCursor = internalAction({
 				clientSecret: env.GOOGLE_HEALTH_CLIENT_SECRET,
 				grantedScopes: connection.grantedScopes
 			});
-			if (tokens.refreshToken !== undefined) {
-				const replacementEnvelope = await encryptRefreshToken(
-					tokens.refreshToken,
-					work.userId,
-					keyring.activeKey,
-					keyring.activeVersion
-				);
-				const replaced = await guardedReplaceEnvelope(
+			const replacementEnvelope =
+				tokens.refreshToken === undefined
+					? currentEnvelope
+					: await encryptRefreshToken(
+							tokens.refreshToken,
+							work.userId,
+							keyring.activeKey,
+							keyring.activeVersion
+						);
+			if (
+				!(await guardedReplaceEnvelope(
 					ctx,
 					work,
 					currentEnvelope,
-					replacementEnvelope
-				);
-				if (!replaced) return null;
+					replacementEnvelope,
+					tokens.grantedScopes
+				))
+			) {
+				await abandon('token_cas_lost');
+				return null;
+			}
+			if (!tokens.grantedScopes.includes(definition.scope)) {
+				const failed = await ctx.runMutation(internal.googleHealth.sync.failCursor, {
+					cursorId: work.cursorId,
+					generation: work.generation,
+					runId: work.runId,
+					errorCode: 'scope_not_granted',
+					actionRequired: true
+				});
+				if (!failed) await abandon('failure_cas_lost');
+				return null;
 			}
 
-			const pageSize = pageSizeFor(definition.dataType);
 			let rollupRange: { start: string; end: string } | undefined;
 			if (definition.readMode === 'dailyRollUp') {
 				const terminal = currentExclusiveCivilDate();
 				const start = work.windowStart ?? FIRST_ROLLUP_DATE;
 				if (!isValidDate(start) || start >= terminal) {
-					await ctx.runMutation(internal.googleHealth.sync.finishDataType, {
+					const finished = await ctx.runMutation(internal.googleHealth.sync.finishDataType, {
 						cursorId: work.cursorId,
 						generation: work.generation,
 						runId: work.runId,
 						counts: { fetched: 0, inserted: 0, updated: 0, skipped: 0 }
 					});
+					if (!finished) await abandon('cursor_cas_lost');
 					return null;
 				}
 				rollupRange = { start, end: minDate(work.windowEnd ?? addDays(start, 14), terminal) };
 			}
-			const filter = timeFilterFor(work, definition);
-			if (definition.readMode === 'rollUp') {
+			if (definition.readMode === 'rollUp')
 				throw new GoogleHealthError('unsupported_read_mode', null, false);
-			}
+			const filter = timeFilterFor(work, definition);
 			const page = await fetchGoogleHealthDataPage({
 				accessToken: tokens.accessToken,
 				dataType: definition.dataType,
 				readMode: definition.readMode === 'dailyRollUp' ? 'dailyRollUp' : definition.readMode,
-				pageSize,
+				pageSize: pageSizeFor(definition.dataType),
 				pageToken: work.pageToken,
 				filter,
 				range: rollupRange
 			});
-			const points = page.points.map((raw) => normalizeGooglePoint(definition, raw));
-			const coveredRange =
+			const points: NormalizedHealthPoint[] = [];
+			let malformed = 0;
+			for (const raw of page.points) {
+				try {
+					points.push(normalizeGooglePoint(definition, raw));
+				} catch {
+					malformed += 1;
+				}
+			}
+			let inserted = 0;
+			let updated = 0;
+			let skipped = malformed;
+			for (const chunk of chunkNormalizedPoints(points)) {
+				const applied = await ctx.runMutation(internal.googleHealth.records.applyReconciledPage, {
+					connectionId: work.connectionId,
+					expectedGeneration: work.generation,
+					cursorId: work.cursorId,
+					runId: work.runId,
+					dataType: work.dataType,
+					points: chunk,
+					syncId: work.syncId,
+					seenEpoch: work.reconciliationEpoch
+				});
+				inserted += applied.inserted;
+				updated += applied.updated;
+				skipped += applied.skipped;
+			}
+			const counts: PageCounts = { fetched: page.points.length, inserted, updated, skipped };
+			const completion = completionFor(page.nextPageToken, rollupRange, counts, args.trigger);
+			let coveredRange:
+				| { kind: 'physical'; startMs: number; endMsExclusive: number }
+				| { kind: 'civil'; startDate: string; endDateExclusive: string }
+				| undefined;
+			if (malformed === 0 && page.nextPageToken === undefined && rollupRange !== undefined) {
+				coveredRange = {
+					kind: 'civil',
+					startDate: rollupRange.start,
+					endDateExclusive: rollupRange.end
+				};
+			} else if (
+				malformed === 0 &&
+				page.nextPageToken === undefined &&
 				work.mode === 'incremental' &&
 				definition.readMode === 'reconcile' &&
-				page.nextPageToken === undefined &&
-				filter !== undefined
-					? filter.kind === 'civil'
+				filter?.comparison === 'closedOpen' &&
+				filter.end !== undefined
+			) {
+				coveredRange =
+					filter.axis === 'physical'
 						? {
-								kind: 'civil' as const,
-								startDate: filter.start,
-								endDateExclusive: filter.end
-							}
-						: {
-								kind: 'physical' as const,
+								kind: 'physical',
 								startMs: Date.parse(filter.start),
 								endMsExclusive: Date.parse(filter.end)
 							}
-					: undefined;
-			const applied = await ctx.runMutation(internal.googleHealth.records.applyReconciledPage, {
-				connectionId: work.connectionId,
-				expectedGeneration: work.generation,
-				dataType: work.dataType,
-				points,
-				syncId: work.syncId,
-				...(page.nextPageToken === undefined ? {} : { nextPageToken: page.nextPageToken }),
-				...(coveredRange === undefined ? {} : { coveredRange })
-			});
-			const counts: PageCounts = {
-				fetched: points.length,
-				inserted: applied.inserted,
-				updated: applied.updated,
-				skipped: applied.skipped
-			};
-			if (page.nextPageToken !== undefined) {
-				await ctx.runMutation(internal.googleHealth.sync.completeCursorPage, {
+						: { kind: 'civil', startDate: filter.start, endDateExclusive: filter.end };
+			}
+			if (coveredRange !== undefined) {
+				const started = await ctx.runMutation(internal.googleHealth.records.beginCleanup, {
+					connectionId: work.connectionId,
 					cursorId: work.cursorId,
-					generation: work.generation,
-					trigger: args.trigger,
 					runId: work.runId,
-					counts,
-					nextPageToken: page.nextPageToken
+					expectedGeneration: work.generation,
+					dataType: work.dataType,
+					cleanupEpoch: work.reconciliationEpoch,
+					coveredRange,
+					completion
 				});
+				if (!started) await abandon('cleanup_cas_lost');
 				return null;
 			}
-			if (rollupRange !== undefined) {
-				const terminal = currentExclusiveCivilDate();
-				if (rollupRange.end < terminal) {
-					await ctx.runMutation(internal.googleHealth.sync.completeCursorPage, {
+			const finalized = completion.finish
+				? await ctx.runMutation(internal.googleHealth.sync.finishDataType, {
 						cursorId: work.cursorId,
 						generation: work.generation,
-						trigger: args.trigger,
 						runId: work.runId,
+						counts
+					})
+				: await ctx.runMutation(internal.googleHealth.sync.completeCursorPage, {
+						cursorId: work.cursorId,
+						generation: work.generation,
+						runId: work.runId,
+						trigger: completion.trigger,
 						counts,
-						nextWindowStart: rollupRange.end,
-						nextWindowEnd: minDate(addDays(rollupRange.end, 14), terminal)
+						...(completion.nextPageToken === undefined
+							? {}
+							: { nextPageToken: completion.nextPageToken }),
+						...(completion.nextWindowStart === undefined
+							? {}
+							: {
+									nextWindowStart: completion.nextWindowStart,
+									nextWindowEnd: completion.nextWindowEnd
+								})
 					});
-					return null;
-				}
-			}
-			await ctx.runMutation(internal.googleHealth.sync.finishDataType, {
-				cursorId: work.cursorId,
-				generation: work.generation,
-				runId: work.runId,
-				counts
-			});
+			if (!finalized) await abandon('cursor_cas_lost');
 			return null;
 		} catch (error) {
 			if (error instanceof GoogleHealthError && error.retryable) {
-				await ctx.runMutation(internal.googleHealth.sync.scheduleCursorRetry, {
+				const scheduled = await ctx.runMutation(internal.googleHealth.sync.scheduleCursorRetry, {
 					cursorId: work.cursorId,
 					generation: work.generation,
 					runId: work.runId,
 					errorCode: error.code,
 					delayMs: computeRetryDelayMs(work.attempt)
 				});
+				if (!scheduled) await abandon('retry_cas_lost');
 				return null;
 			}
-			await ctx.runMutation(internal.googleHealth.sync.failCursor, {
+			const failed = await ctx.runMutation(internal.googleHealth.sync.failCursor, {
 				cursorId: work.cursorId,
 				generation: work.generation,
 				runId: work.runId,
 				errorCode: error instanceof GoogleHealthError ? error.code : 'sync_error',
 				actionRequired: error instanceof GoogleHealthError && error.code === 'invalid_grant'
 			});
+			if (!failed) await abandon('failure_cas_lost');
 			return null;
 		}
 	}

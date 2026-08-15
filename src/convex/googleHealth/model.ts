@@ -233,8 +233,22 @@ export const initializeCursors = internalMutation({
 			if (existing) {
 				firstCursorId ??= existing._id;
 				if (existing.generation !== connection.generation) {
+					if (existing.activeRunId !== undefined) {
+						const staleRun = await ctx.db.get('googleHealthSyncRuns', existing.activeRunId);
+						if (staleRun?.status === 'running') {
+							await ctx.db.patch('googleHealthSyncRuns', staleRun._id, {
+								status: 'failed',
+								finishedAt: updatedAt,
+								errorCode: 'stale_generation',
+								errorMessage: 'Google Health connection generation changed'
+							});
+						}
+					}
 					await ctx.db.patch('googleHealthSyncCursors', existing._id, {
 						status: 'queued',
+						activeRunId: undefined,
+						activeEpoch: undefined,
+						leaseExpiresAt: undefined,
 						pageToken: undefined,
 						windowStart: undefined,
 						windowEnd: undefined,
@@ -308,7 +322,8 @@ export const replaceTokenEnvelope = internalMutation({
 		connectionId: v.id('googleHealthConnections'),
 		expectedGeneration: v.number(),
 		expectedEnvelope: tokenEnvelopeValidator,
-		replacementEnvelope: tokenEnvelopeValidator
+		replacementEnvelope: tokenEnvelopeValidator,
+		replacementGrantedScopes: v.optional(v.array(v.string()))
 	},
 	returns: v.boolean(),
 	handler: async (ctx, args) => {
@@ -325,7 +340,12 @@ export const replaceTokenEnvelope = internalMutation({
 			return false;
 		}
 
-		await ctx.db.patch('googleHealthConnections', connection._id, args.replacementEnvelope);
+		await ctx.db.patch('googleHealthConnections', connection._id, {
+			...args.replacementEnvelope,
+			...(args.replacementGrantedScopes === undefined
+				? {}
+				: { grantedScopes: [...new Set(args.replacementGrantedScopes)] })
+		});
 		return true;
 	}
 });

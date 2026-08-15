@@ -39,6 +39,8 @@ export const normalizedHealthPointValidator = v.object({
 	startTime: v.optional(v.number()),
 	endTime: v.optional(v.number()),
 	localDate: v.string(),
+	physicalCoverageTime: v.optional(v.number()),
+	civilCoverageTime: v.optional(v.string()),
 	primaryValue: v.optional(v.number()),
 	primaryUnit: v.optional(v.string()),
 	sourcePlatform: v.optional(v.string()),

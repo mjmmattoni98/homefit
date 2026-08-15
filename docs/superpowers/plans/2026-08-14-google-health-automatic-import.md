@@ -585,22 +585,29 @@ git commit -m "feat: add Google Health OAuth flow"
 - Create: `src/convex/googleHealth/sync.ts`
 - Create: `src/convex/googleHealth/sync.spec.ts`
 - Modify: `src/convex/googleHealth/apiClient.ts`
+- Modify: `src/convex/googleHealth/apiClient.spec.ts`
 - Modify: `src/convex/googleHealth/oauth.ts`
 - Modify: `src/convex/googleHealth/oauth.spec.ts`
+- Modify: `src/convex/googleHealth/model.ts`
+- Modify: `src/convex/googleHealth/normalize.ts`
+- Modify: `src/convex/googleHealth/normalize.spec.ts`
+- Modify: `src/convex/googleHealth/registry.ts`
+- Modify: `src/convex/googleHealth/registry.spec.ts`
+- Modify: `src/convex/googleHealth/validators.ts`
 - Modify: `src/convex/schema.ts`
 
 **Interfaces:**
-- Produces internal mutation `applyReconciledPage({ connectionId, dataType, points, syncId, nextPageToken, coveredRange? })`, where the optional physical/civil exclusive range is supplied only for a final fully covered reconciliation unit.
+- Produces bounded internal mutation `applyReconciledPage({ connectionId, cursorId, runId, dataType, points, syncId, seenEpoch })` for one byte- and count-capped local chunk.
 - Produces internal action `runCursor({ cursorId, generation, trigger })`.
-- Produces internal mutations `markCursorRunning`, `completeCursorPage`, `scheduleCursorRetry`, and `finishDataType`.
+- Produces internal mutations `markCursorRunning`, `completeCursorPage`, `scheduleCursorRetry`, `finishDataType`, cleanup/finalization mutations, and a leased-run recovery mutation.
 
 - [ ] **Step 1: Write failing idempotency and summary tests**
 
-Use convex-test to seed a connection and apply the same named and unnamed pages twice. Assert no duplicate points, changed payload replaces the same `recordKey`, records absent from a fully covered reconciliation window are deleted, other users and out-of-window points remain, and affected daily summary count/sum/average/min/max/latest values are rebuilt.
+Use convex-test with transaction-limit enforcement to seed a connection and apply the same named and unnamed pages twice. Assert no duplicate points, changed payload replaces the same `recordKey`, records absent from a fully covered reconciliation window are deleted, other users and out-of-window points remain, and affected daily summary count/sum/average/min/max/latest values are rebuilt exactly through compact, paginated contribution rows rather than payload-bearing records.
 
 - [ ] **Step 2: Write failing bounded-worker tests**
 
-Mock one page with a continuation token and one final page. Assert OAuth completion schedules the real generated `internal.googleHealth.sync.runCursor` reference, and each `runCursor` invocation fetches only one page, commits it, and schedules exactly one continuation. Cover sleep/exercise `pageSize=25`, other list/reconcile types `pageSize=1000`, dailyRollUp starting at `2000-01-01`, 14-day windows for the two rollup-only types, and retryable 429/5xx errors.
+Mock one page with a continuation token and one final page. Assert OAuth completion schedules the real generated `internal.googleHealth.sync.runCursor` reference, and each `runCursor` invocation fetches only one Google page, applies conservative byte- and point-capped local chunks, and schedules exactly one network continuation. Cover malformed-record isolation, sleep/exercise `pageSize=25`, other list/reconcile types `pageSize=1000`, dailyRollUp starting at `2000-01-01`, 14-day windows for the two rollup-only types, registry-owned physical/civil/session/ECG filters, retryable 429/5xx errors, token CAS loss, and stale-run lease recovery.
 
 - [ ] **Step 3: Run focused tests and verify failure**
 
@@ -612,17 +619,19 @@ Expected: FAIL because records and sync modules are missing.
 
 - [ ] **Step 4: Implement Google page fetching**
 
-For `reconcile`, call `GET /users/me/dataTypes/{dataType}/dataPoints:reconcile`; for `list`, call `GET /users/me/dataTypes/{dataType}/dataPoints`; both pass `pageToken` and capped `pageSize`, and both consume the current-v4 `dataPoints` response field. Backfill list/reconcile cursors omit a lower filter so Google returns all recorded history. Incremental requests construct a closed-open AIP-160 physical or civil filter from validated webhook intervals using registry-owned field names; values are escaped or rejected so input cannot alter filter syntax.
+For `reconcile`, call `GET /users/me/dataTypes/{dataType}/dataPoints:reconcile`; for `list`, call `GET /users/me/dataTypes/{dataType}/dataPoints`; both pass `pageToken` and capped `pageSize`, and both consume the current-v4 `dataPoints` response field. Backfill list/reconcile cursors omit a lower filter so Google returns all recorded history. Incremental requests construct the exact registry-owned AIP-160 filter supported by the data type: sample/interval physical or civil time, non-sleep session civil start, sleep physical/civil end, daily date, and ECG physical start with a lower bound only. Values are validated and escaped so input cannot alter filter syntax; an unsupported cursor clock safely falls back without claiming a covered cleanup range.
 
-For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRollUp` with structured `CivilDateTime` objects at `range.start` and exclusive `range.end`, `windowSizeDays: 1`, and the capped page size. Walk 14-day windows from `2000-01-01` through the current civil date. Normalize list/reconcile `dataPoints` and daily-rollup `rollupDataPoints` into the same input shape.
+For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRollUp` with structured `CivilDateTime` objects at `range.start` and exclusive `range.end`, `windowSizeDays: 1`, the capped page size, and `pageToken` for continuations. Walk 14-day windows from `2000-01-01` through the current civil date. Normalize list/reconcile `dataPoints` and daily-rollup `rollupDataPoints` into the same input shape.
 
 - [ ] **Step 5: Implement transactional page application**
 
-`applyReconciledPage` queries each key through `by_userId_and_recordKey`, inserts new records, patches changed digests, stamps every seen row with `lastSeenSyncId`, and records affected `(dataType, localDate)` pairs. After the final page for a fully covered window, schedule an indexed cleanup that pages through that connection/user/type/time window and deletes rows whose `lastSeenSyncId` differs from the cursor `syncId`; this avoids storing an unbounded in-memory key set. Rebuild each affected summary with `.take(10001)`. If a day reaches 10,001 rows, store count/latest only and use the Google daily rollup for exact aggregate fields when that metric supports it. Add `by_userId_and_dataType_and_localDate_and_recordTimestamp` so latest remains exact and bounded even when creation order differs from event time.
+`applyReconciledPage` queries each key through `by_userId_and_recordKey`, inserts new records, patches changed digests, and stamps the record plus its compact summary/coverage contribution with the connection-global reconciliation epoch. Queue each affected `(dataType, localDate)` for a versioned paginated summary rebuild; each rebuild page reads only compact contribution rows and accumulates exact count/sum/average/min/max/latest/duration fields within Convex limits.
+
+For a final fully covered window with no malformed records, keep the cursor/run open while indexed cleanup pages through the registry-aligned physical or civil coverage key. Delete only rows whose `seenEpoch` is older than the cleanup epoch, so a newer overlapping reconciliation cannot be erased. Each cleanup batch updates the run's deleted count and queues affected summaries; only the final cleanup batch schedules guarded cursor/run finalization. Daily rollup windows use the same omission cleanup.
 
 - [ ] **Step 6: Implement the cursor worker**
 
-Wire OAuth completion to the generated `internal.googleHealth.sync.runCursor` reference now that the action exists. The action loads the connection/cursor internally, rejects stale generation or inactive status, decrypts the token through `rotateRefreshTokenEnvelope`, and persists any old-key replacement through the generation-and-envelope-guarded `replaceTokenEnvelope` before refreshing the access token. If Google returns a replacement refresh token, encrypt and persist it through the same guarded envelope comparison. It then fetches one page/window, normalizes up to the page cap, applies the page, updates the run record, and schedules the next page with `ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, ...)`. Every connection error write carries the expected generation. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
+Wire OAuth completion to the generated `internal.googleHealth.sync.runCursor` reference now that the action exists. The action loads and leases the connection/cursor internally, rejects stale generation or inactive status, decrypts the token through `rotateRefreshTokenEnvelope`, and persists old-key or Google-issued refresh-token replacements through the generation-and-envelope-guarded comparison. Every post-lease CAS loss closes the run and safely requeues only same-generation work; a scheduled lease watchdog recovers interrupted workers. Normalize records independently, skip malformed siblings without omission cleanup, split valid points by conservative serialized-byte and count budgets, then advance the cursor only after every local chunk succeeds. Preserve `backfilling` until all backfill types finish. Every connection error write carries the expected generation. On 429/5xx/network failure, compute `base = min(6 hours, 30 seconds * 2^attempt)` and schedule `floor(base * (0.8 + random() * 0.4))`; inject the random source in tests. On `invalid_grant`, set `action_required` and schedule no retry.
 
 - [ ] **Step 7: Run import tests and type checking**
 
@@ -636,7 +645,7 @@ Expected: PASS with deterministic scheduled-function tests.
 - [ ] **Step 8: Commit the import engine**
 
 ```bash
-git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts src/convex/schema.ts
+git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/model.ts src/convex/googleHealth/normalize.ts src/convex/googleHealth/normalize.spec.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/registry.ts src/convex/googleHealth/registry.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts src/convex/googleHealth/validators.ts src/convex/schema.ts
 git commit -m "feat: import Google Health history"
 ```
 

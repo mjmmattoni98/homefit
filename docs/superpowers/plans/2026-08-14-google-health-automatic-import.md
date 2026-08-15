@@ -587,9 +587,10 @@ git commit -m "feat: add Google Health OAuth flow"
 - Modify: `src/convex/googleHealth/apiClient.ts`
 - Modify: `src/convex/googleHealth/oauth.ts`
 - Modify: `src/convex/googleHealth/oauth.spec.ts`
+- Modify: `src/convex/schema.ts`
 
 **Interfaces:**
-- Produces internal mutation `applyReconciledPage({ connectionId, dataType, points, syncId, nextPageToken })`.
+- Produces internal mutation `applyReconciledPage({ connectionId, dataType, points, syncId, nextPageToken, coveredRange? })`, where the optional physical/civil exclusive range is supplied only for a final fully covered reconciliation unit.
 - Produces internal action `runCursor({ cursorId, generation, trigger })`.
 - Produces internal mutations `markCursorRunning`, `completeCursorPage`, `scheduleCursorRetry`, and `finishDataType`.
 
@@ -611,13 +612,13 @@ Expected: FAIL because records and sync modules are missing.
 
 - [ ] **Step 4: Implement Google page fetching**
 
-For `reconcile`, call `GET /users/me/dataTypes/{dataType}/dataPoints:reconcile`; for `list`, call `GET /users/me/dataTypes/{dataType}/dataPoints`; both pass `pageToken` and capped `pageSize`. Backfill list/reconcile cursors omit a lower filter so Google returns all recorded history. Incremental requests construct a closed-open physical or civil filter from webhook intervals using the registry record kind.
+For `reconcile`, call `GET /users/me/dataTypes/{dataType}/dataPoints:reconcile`; for `list`, call `GET /users/me/dataTypes/{dataType}/dataPoints`; both pass `pageToken` and capped `pageSize`, and both consume the current-v4 `dataPoints` response field. Backfill list/reconcile cursors omit a lower filter so Google returns all recorded history. Incremental requests construct a closed-open AIP-160 physical or civil filter from validated webhook intervals using registry-owned field names; values are escaped or rejected so input cannot alter filter syntax.
 
-For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRollUp` with civil `range.start`, exclusive `range.end`, and `windowSizeDays: 1`. Walk 14-day windows from `2000-01-01` through the current civil date. Normalize `dataPoints`, `reconciledDataPoints`, and `dailyRollupDataPoints` into the same input shape.
+For `dailyRollUp`, call `POST /users/me/dataTypes/{dataType}/dataPoints:dailyRollUp` with structured `CivilDateTime` objects at `range.start` and exclusive `range.end`, `windowSizeDays: 1`, and the capped page size. Walk 14-day windows from `2000-01-01` through the current civil date. Normalize list/reconcile `dataPoints` and daily-rollup `rollupDataPoints` into the same input shape.
 
 - [ ] **Step 5: Implement transactional page application**
 
-`applyReconciledPage` queries each key through `by_userId_and_recordKey`, inserts new records, patches changed digests, stamps every seen row with `lastSeenSyncId`, and records affected `(dataType, localDate)` pairs. After the final page for a fully covered window, schedule an indexed cleanup that pages through that user/type/time window and deletes rows whose `lastSeenSyncId` differs from the cursor `syncId`; this avoids storing an unbounded in-memory key set. Rebuild each affected summary with `.take(10001)`. If a day reaches 10,001 rows, store count/latest only and use the Google daily rollup for exact aggregate fields when that metric supports it.
+`applyReconciledPage` queries each key through `by_userId_and_recordKey`, inserts new records, patches changed digests, stamps every seen row with `lastSeenSyncId`, and records affected `(dataType, localDate)` pairs. After the final page for a fully covered window, schedule an indexed cleanup that pages through that connection/user/type/time window and deletes rows whose `lastSeenSyncId` differs from the cursor `syncId`; this avoids storing an unbounded in-memory key set. Rebuild each affected summary with `.take(10001)`. If a day reaches 10,001 rows, store count/latest only and use the Google daily rollup for exact aggregate fields when that metric supports it. Add `by_userId_and_dataType_and_localDate_and_recordTimestamp` so latest remains exact and bounded even when creation order differs from event time.
 
 - [ ] **Step 6: Implement the cursor worker**
 
@@ -635,7 +636,7 @@ Expected: PASS with deterministic scheduled-function tests.
 - [ ] **Step 8: Commit the import engine**
 
 ```bash
-git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts
+git add src/convex/googleHealth/apiClient.ts src/convex/googleHealth/apiClient.spec.ts src/convex/googleHealth/records.ts src/convex/googleHealth/records.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts src/convex/schema.ts
 git commit -m "feat: import Google Health history"
 ```
 

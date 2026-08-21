@@ -5,6 +5,9 @@ import { internalMutation, type MutationCtx } from '../_generated/server';
 
 const CONNECTION_BATCH_SIZE = 50;
 const CLEANUP_BATCH_SIZE = 100;
+// Delivery rows may contain a 256 KiB raw body or 99 normalized notifications.
+// Keep their read batch comfortably below Convex's 16 MiB transaction limit.
+const DELIVERY_CLEANUP_BATCH_SIZE = 24;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUCCEEDED_RUN_RETENTION_MS = 30 * DAY_MS;
 const FAILED_RUN_RETENTION_MS = 90 * DAY_MS;
@@ -208,15 +211,30 @@ async function terminalizeStaleDeliveries(
 	cursor: CleanupCursor,
 	anchorMs: number
 ): Promise<{ processed: number; complete: boolean }> {
-	const deliveries = await ctx.db
+	const legacyDeliveries = await ctx.db
 		.query('googleHealthWebhookDeliveries')
-		.withIndex('by_status_and_updatedAt', (q) =>
-			q.eq('status', status).lt('updatedAt', anchorMs - WEBHOOK_BACKLOG_HORIZON_MS)
+		.withIndex('by_status_and_acceptedAt', (q) =>
+			q.eq('status', status).eq('acceptedAt', undefined)
 		)
-		.take(CLEANUP_BATCH_SIZE);
+		.take(DELIVERY_CLEANUP_BATCH_SIZE);
+	const deliveries =
+		legacyDeliveries.length > 0
+			? legacyDeliveries
+			: await ctx.db
+					.query('googleHealthWebhookDeliveries')
+					.withIndex('by_status_and_acceptedAt', (q) =>
+						q.eq('status', status).lt('acceptedAt', anchorMs - WEBHOOK_BACKLOG_HORIZON_MS)
+					)
+					.take(DELIVERY_CLEANUP_BATCH_SIZE);
 	if (deliveries.length === 0) return await advanceCleanup(ctx, cursor.phase, anchorMs);
 	for (const delivery of deliveries) {
+		const acceptedAt = delivery.acceptedAt ?? delivery._creationTime;
+		if (acceptedAt >= anchorMs - WEBHOOK_BACKLOG_HORIZON_MS) {
+			await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, { acceptedAt });
+			continue;
+		}
 		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			acceptedAt,
 			status: 'rejected',
 			rawBody: undefined,
 			signature: undefined,
@@ -243,7 +261,7 @@ async function cleanTerminalDeliveries(
 		.withIndex('by_status_and_updatedAt', (q) =>
 			q.eq('status', status).lt('updatedAt', anchorMs - TERMINAL_DELIVERY_RETENTION_MS)
 		)
-		.take(CLEANUP_BATCH_SIZE);
+		.take(DELIVERY_CLEANUP_BATCH_SIZE);
 	if (deliveries.length === 0) return await advanceCleanup(ctx, cursor.phase, anchorMs);
 	for (const delivery of deliveries) await ctx.db.delete(delivery._id);
 	await scheduleCleanupContinuation(ctx, cursor, anchorMs);

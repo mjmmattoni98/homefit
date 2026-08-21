@@ -660,6 +660,7 @@ export const acceptDelivery = internalMutation({
 		const now = Date.now();
 		const deliveryId = await ctx.db.insert('googleHealthWebhookDeliveries', {
 			deliveryDigest,
+			acceptedAt: now,
 			status: 'queued',
 			rawBody: args.rawBody,
 			signature: args.signature,

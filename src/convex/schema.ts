@@ -99,6 +99,7 @@ export default defineSchema({
 
 	googleHealthWebhookDeliveries: defineTable({
 		deliveryDigest: v.string(),
+		acceptedAt: v.optional(v.number()),
 		status: v.union(
 			v.literal('queued'),
 			v.literal('verifying'),
@@ -130,6 +131,7 @@ export default defineSchema({
 		updatedAt: v.number()
 	})
 		.index('by_deliveryDigest', ['deliveryDigest'])
+		.index('by_status_and_acceptedAt', ['status', 'acceptedAt'])
 		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
 
 	googleHealthSyncCursors: defineTable({

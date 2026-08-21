@@ -273,6 +273,7 @@ describe('Google Health webhook HTTP contract', () => {
 		expect(await response.text()).toBe('');
 		expect(fetch).not.toHaveBeenCalled();
 		expect(accepted.delivery).toMatchObject({ status: 'queued', attempt: 0 });
+		expect(accepted.delivery?.acceptedAt).toBe(accepted.delivery?.updatedAt);
 		expect(accepted.delivery).not.toHaveProperty('authorization');
 		expect(accepted.cursors).toEqual([]);
 		expect(accepted.scheduled.map((job) => job.name)).toEqual([

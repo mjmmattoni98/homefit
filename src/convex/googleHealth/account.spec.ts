@@ -26,6 +26,27 @@ const deleteImportedData = makeFunctionReference<
 	{ confirmation: string },
 	{ status: 'deleting' }
 >('googleHealth/account:deleteImportedData');
+const beginDeleteImportedData = makeFunctionReference<'mutation', { userId: string }, unknown>(
+	'googleHealth/account:beginDeleteImportedData'
+);
+const deleteGoogleDataBatch = makeFunctionReference<
+	'mutation',
+	{ connectionId: Id<'googleHealthConnections'>; generation: number },
+	boolean
+>('googleHealth/account:deleteGoogleDataBatch');
+const saveConnection = makeFunctionReference<
+	'mutation',
+	{
+		userId: string;
+		healthUserId: string;
+		grantedScopes: string[];
+		encryptedRefreshToken: string;
+		tokenNonce: string;
+		tokenTag: string;
+		tokenKeyVersion: string;
+	},
+	{ connectionId: Id<'googleHealthConnections'>; generation: number }
+>('googleHealth/model:saveConnection');
 type ReconciliationCursor = { statusIndex: number; afterUserId?: string };
 const scheduleDailyReconciliation = makeFunctionReference<
 	'mutation',
@@ -580,6 +601,73 @@ describe('Google Health account lifecycle', () => {
 		expect(stored.workout).not.toBeNull();
 		expect(stored.sleep).not.toBeNull();
 	});
+
+	it('rejects OAuth reconnect during partial deletion, then permits a fresh row after deletion completes', async () => {
+		const t = backend();
+		const userId = 'clerk|alice';
+		const connectionId = await seedConnection(t, { userId });
+		await t.run(async (ctx) => {
+			for (let index = 0; index < 2; index += 1) {
+				await ctx.db.insert('healthDataPoints', {
+					connectionId,
+					userId,
+					provider: 'google_health',
+					recordKey: `large-point-${index}`,
+					dataType: 'steps',
+					category: 'activity',
+					recordTimestamp: NOW + index,
+					localDate: '2026-08-14',
+					primaryValue: index,
+					primaryUnit: 'steps',
+					payloadDigest: `digest-${index}`,
+					payloadJson: 'x'.repeat(749_000),
+					lastSeenSyncId: 'manual:1:steps'
+				});
+			}
+		});
+		await t.mutation(beginDeleteImportedData, { userId });
+		await expect(t.mutation(deleteGoogleDataBatch, { connectionId, generation: 2 })).resolves.toBe(
+			true
+		);
+		const replacement = await encryptRefreshToken('replacement-token', userId, ACTIVE_KEY, 'v1');
+
+		await expect(
+			t.mutation(saveConnection, {
+				userId,
+				healthUserId: 'replacement-health-user',
+				grantedScopes: [...GOOGLE_HEALTH_READ_SCOPES],
+				...replacement
+			})
+		).rejects.toThrow('Google Health data deletion is in progress');
+		const partial = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			points: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.take(2)
+		}));
+		expect(partial.connection).toMatchObject({ status: 'deleting', generation: 2 });
+		expect(partial.points).toHaveLength(1);
+
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const deleted = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			points: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.take(1)
+		}));
+		expect(deleted).toEqual({ connection: null, points: [] });
+
+		const fresh = await t.mutation(saveConnection, {
+			userId,
+			healthUserId: 'replacement-health-user',
+			grantedScopes: [...GOOGLE_HEALTH_READ_SCOPES],
+			...replacement
+		});
+		expect(fresh.generation).toBe(1);
+		expect(fresh.connectionId).not.toBe(connectionId);
+	});
 });
 
 describe('Google Health maintenance', () => {
@@ -749,6 +837,80 @@ describe('Google Health maintenance', () => {
 		expect(cursor?.pendingWindowStart).toBeUndefined();
 	});
 
+	it('revives and serializes an unscheduled backfill retry before incremental reconciliation', async () => {
+		const t = backend();
+		const stepsScope = getMetricDefinition('steps')?.scope;
+		if (stepsScope === undefined) throw new Error('steps metric missing');
+		const seeded = await t.run(async (ctx) => {
+			const connectionId = await ctx.db.insert('googleHealthConnections', {
+				userId: 'clerk|backfill-recovery',
+				healthUserId: 'health-backfill-recovery',
+				status: 'delayed',
+				grantedScopes: [stepsScope],
+				generation: 7,
+				backfillTotalTypes: 1,
+				backfillCompletedTypes: 0,
+				lastErrorCode: 'deterministic_failure',
+				lastErrorMessage: 'Google Health synchronization failed'
+			});
+			const backfillCursorId = await ctx.db.insert('googleHealthSyncCursors', {
+				connectionId,
+				userId: 'clerk|backfill-recovery',
+				dataType: 'steps',
+				mode: 'backfill',
+				status: 'retry',
+				syncId: 'backfill:7:steps',
+				attempt: 4,
+				generation: 7,
+				dispatchPending: false,
+				updatedAt: NOW - 1
+			});
+			return { connectionId, backfillCursorId };
+		});
+
+		await expect(
+			t.mutation(queueConnectionReconciliation, {
+				connectionId: seeded.connectionId,
+				generation: 7,
+				trigger: 'reconciliation',
+				anchorMs: NOW
+			})
+		).resolves.toEqual({
+			queued: METRIC_DEFINITIONS.filter((definition) => definition.scope === stepsScope).length,
+			dispatched: true
+		});
+		const stored = await t.run(async (ctx) => ({
+			backfill: await ctx.db.get('googleHealthSyncCursors', seeded.backfillCursorId),
+			incremental: await ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
+					q
+						.eq('connectionId', seeded.connectionId)
+						.eq('dataType', 'steps')
+						.eq('mode', 'incremental')
+				)
+				.unique(),
+			jobs: await ctx.db.system.query('_scheduled_functions').take(10)
+		}));
+		expect(stored.backfill).toMatchObject({
+			status: 'queued',
+			attempt: 0,
+			dispatchPending: true
+		});
+		expect(stored.incremental).toMatchObject({
+			status: 'queued',
+			queuedTrigger: 'reconciliation'
+		});
+		expect(stored.incremental?.dispatchPending).not.toBe(true);
+		expect(
+			stored.jobs.filter(
+				(job) =>
+					job.name === 'googleHealth/sync:runCursor' &&
+					job.args[0]?.cursorId === seeded.backfillCursorId
+			)
+		).toHaveLength(1);
+	});
+
 	it('cleans exact operational cutoffs, terminalizes seven-day raw deliveries, and removes stale tombstones', async () => {
 		const t = backend();
 		const day = 24 * 60 * 60 * 1000;
@@ -810,6 +972,7 @@ describe('Google Health maintenance', () => {
 			const staleRawId = await ctx.db.insert('googleHealthWebhookDeliveries', {
 				deliveryDigest: 'stale-raw',
 				status: 'verifying',
+				acceptedAt: NOW - 7 * day - 1,
 				rawBody: '{"secret":"raw"}',
 				signature: 'signature',
 				notifications: notification,
@@ -823,6 +986,7 @@ describe('Google Health maintenance', () => {
 			const recentRawId = await ctx.db.insert('googleHealthWebhookDeliveries', {
 				deliveryDigest: 'recent-raw',
 				status: 'retry',
+				acceptedAt: NOW - 7 * day,
 				rawBody: '{"recent":true}',
 				signature: 'recent-signature',
 				attempt: 1,
@@ -832,6 +996,7 @@ describe('Google Health maintenance', () => {
 			const oldCompleteId = await ctx.db.insert('googleHealthWebhookDeliveries', {
 				deliveryDigest: 'old-complete',
 				status: 'complete',
+				acceptedAt: NOW - 20 * day,
 				attempt: 0,
 				leaseVersion: 0,
 				updatedAt: NOW - 8 * day - 1
@@ -839,6 +1004,7 @@ describe('Google Health maintenance', () => {
 			const cutoffRejectedId = await ctx.db.insert('googleHealthWebhookDeliveries', {
 				deliveryDigest: 'cutoff-rejected',
 				status: 'rejected',
+				acceptedAt: NOW - 20 * day,
 				attempt: 0,
 				leaseVersion: 0,
 				updatedAt: NOW - 8 * day
@@ -922,6 +1088,124 @@ describe('Google Health maintenance', () => {
 		expect(stored.cutoffRejected).not.toBeNull();
 		expect(stored.staleTombstone).toBeNull();
 		expect(stored.currentTombstone).not.toBeNull();
+	});
+
+	it('bounds delivery cleanup by bytes and expires raw retries from immutable acceptance time', async () => {
+		const t = backend();
+		const day = 24 * 60 * 60 * 1000;
+		const rawBody = 'x'.repeat(256 * 1024);
+		const signature = 's'.repeat(4 * 1024);
+		const legacyAcceptedAt = NOW - 8 * day;
+		vi.setSystemTime(legacyAcceptedAt);
+		const legacyDeliveryId = await t.run(async (ctx) =>
+			ctx.db.insert('googleHealthWebhookDeliveries', {
+				deliveryDigest: 'legacy-delivery-without-accepted-at',
+				status: 'verifying',
+				rawBody,
+				signature,
+				attempt: 10,
+				leaseVersion: 10,
+				updatedAt: NOW - 1
+			})
+		);
+		vi.setSystemTime(NOW);
+		for (let start = 0; start < 65; start += 10) {
+			await t.run(async (ctx) => {
+				for (let index = start; index < Math.min(start + 10, 65); index += 1) {
+					await ctx.db.insert('googleHealthWebhookDeliveries', {
+						deliveryDigest: `max-raw-${index}`,
+						status: 'verifying',
+						acceptedAt: NOW - 7 * day - 1,
+						rawBody,
+						signature,
+						attempt: 3,
+						leaseVersion: 3,
+						leaseExpiresAt: NOW + day,
+						updatedAt: NOW - 7 * day - 1
+					});
+				}
+			});
+		}
+		const notification = {
+			healthUserId: 'h'.repeat(63),
+			dataType: 'steps',
+			operation: 'UPSERT' as const,
+			windowStart: '2026-08-01T00:00:00.000000000Z',
+			windowEnd: '2026-08-02T00:00:00.000000000Z',
+			recordId: 'r'.repeat(1024)
+		};
+		for (let start = 0; start < 33; start += 10) {
+			await t.run(async (ctx) => {
+				for (let index = start; index < Math.min(start + 10, 33); index += 1) {
+					await ctx.db.insert('googleHealthWebhookDeliveries', {
+						deliveryDigest: `max-notifications-${index}`,
+						status: 'applying',
+						acceptedAt: NOW - 7 * day - 1,
+						notifications: Array.from({ length: 99 }, () => notification),
+						nextNotificationIndex: 0,
+						attempt: 1,
+						leaseVersion: 1,
+						updatedAt: NOW - 7 * day - 1
+					});
+				}
+			});
+		}
+		const recentlyRetriedId = await t.run(async (ctx) =>
+			ctx.db.insert('googleHealthWebhookDeliveries', {
+				deliveryDigest: 'old-acceptance-recent-retry',
+				status: 'retry',
+				acceptedAt: NOW - 7 * day - 1,
+				rawBody,
+				signature,
+				attempt: 20,
+				leaseVersion: 20,
+				nextAttemptAt: NOW + day,
+				updatedAt: NOW - 1
+			})
+		);
+		await expect(
+			t.mutation(cleanupOperationalData, {
+				cursor: { phase: 'stale_verifying_deliveries' },
+				anchorMs: NOW
+			})
+		).resolves.toEqual({ processed: 1, complete: false });
+		await expect(
+			t.mutation(cleanupOperationalData, {
+				cursor: { phase: 'stale_verifying_deliveries' },
+				anchorMs: NOW
+			})
+		).resolves.toEqual({ processed: 24, complete: false });
+		await t.finishAllScheduledFunctions(vi.runAllTimers);
+		const stored = await t.run(async (ctx) => ({
+			verifying: await ctx.db
+				.query('googleHealthWebhookDeliveries')
+				.withIndex('by_status_and_updatedAt', (q) => q.eq('status', 'verifying'))
+				.take(1),
+			applying: await ctx.db
+				.query('googleHealthWebhookDeliveries')
+				.withIndex('by_status_and_updatedAt', (q) => q.eq('status', 'applying'))
+				.take(1),
+			recentlyRetried: await ctx.db.get('googleHealthWebhookDeliveries', recentlyRetriedId),
+			legacy: await ctx.db.get('googleHealthWebhookDeliveries', legacyDeliveryId)
+		}));
+		expect(stored.verifying).toEqual([]);
+		expect(stored.applying).toEqual([]);
+		expect(stored.recentlyRetried).toMatchObject({
+			status: 'rejected',
+			acceptedAt: NOW - 7 * day - 1,
+			updatedAt: NOW,
+			lastErrorCode: 'delivery_retention_expired'
+		});
+		expect(stored.recentlyRetried?.rawBody).toBeUndefined();
+		expect(stored.recentlyRetried?.signature).toBeUndefined();
+		expect(stored.legacy).toMatchObject({
+			status: 'rejected',
+			acceptedAt: legacyAcceptedAt,
+			updatedAt: NOW,
+			lastErrorCode: 'delivery_retention_expired'
+		});
+		expect(stored.legacy?.rawBody).toBeUndefined();
+		expect(stored.legacy?.signature).toBeUndefined();
 	});
 
 	it('registers only internal maintenance targets at the approved UTC times', () => {

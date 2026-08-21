@@ -402,8 +402,8 @@ Deletion is a separate destructive action requiring typed confirmation. It:
 1. performs the disconnect sequence;
 2. marks the connection `deleting` so no new work can start;
 3. deletes summary dependencies, compact point contributions, summary rebuild
-   state, OAuth states, data points, summaries, record tombstones, cursors, and
-   sync runs in bounded indexed batches; and
+   state, data points, summaries, record tombstones, cursors, sync runs, and OAuth
+   states in bounded indexed batches; and
 4. deletes the connection after all owned Google records are gone.
 
 Hevy and Sleep Cycle CSV data are outside this deletion scope.
@@ -412,9 +412,9 @@ Hevy and Sleep Cycle CSV data are outside this deletion scope.
 
 Expired OAuth states are removed in batches of 100. Successful sync runs are
 retained for 30 days and failed runs for 90 days. A nonterminal webhook delivery
-that is still queued, verifying, retrying, or applying after Google's seven-day
-backlog horizon is terminalized as rejected and has its raw body, signature, and
-normalized notifications erased. Terminal delivery digests remain for eight
+that is still queued, verifying, retrying, or applying seven days after its
+immutable acceptance time is terminalized as rejected and has its raw body,
+signature, and normalized notifications erased. Terminal delivery digests remain for eight
 additional days—one day beyond the retry horizon—before deletion, preserving a
 deduplication safety margin. Old record tombstones are deleted only when their
 owning connection is gone or their generation is stale; current-generation

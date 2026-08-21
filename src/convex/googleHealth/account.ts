@@ -265,6 +265,21 @@ async function queueConnection(
 			q.eq('connectionId', args.connection._id)
 		)
 		.take(100);
+	const revivableBackfill = candidates.find(
+		(cursor) =>
+			cursor.generation === args.connection.generation &&
+			cursor.mode === 'backfill' &&
+			cursor.status === 'retry' &&
+			cursor.dispatchPending !== true &&
+			currentConnection.nextRetryAt === undefined
+	);
+	if (revivableBackfill !== undefined) {
+		await ctx.db.patch('googleHealthSyncCursors', revivableBackfill._id, {
+			status: 'queued',
+			attempt: 0,
+			updatedAt: Date.now()
+		});
+	}
 	if (
 		candidates.some(
 			(cursor) =>
@@ -275,12 +290,14 @@ async function queueConnection(
 	) {
 		return { queued: definitions.length, dispatched: false };
 	}
-	const next = candidates.find(
+	const queuedCandidates = candidates.filter(
 		(cursor) =>
 			cursor.generation === args.connection.generation &&
-			cursor.status === 'queued' &&
+			(cursor.status === 'queued' || cursor._id === revivableBackfill?._id) &&
 			cursor.dispatchPending !== true
 	);
+	const next =
+		queuedCandidates.find((cursor) => cursor.mode === 'backfill') ?? queuedCandidates.at(0);
 	const dispatched =
 		next === undefined
 			? false

@@ -143,6 +143,9 @@ export const saveConnection = internalMutation({
 			.query('googleHealthConnections')
 			.withIndex('by_userId', (q) => q.eq('userId', args.userId))
 			.unique();
+		if (existing?.status === 'deleting') {
+			throw new Error('Google Health data deletion is in progress');
+		}
 		const grantedScopes = [...new Set(args.grantedScopes)];
 		const grantedScopeSet = new Set(grantedScopes);
 		const backfillTotalTypes = METRIC_DEFINITIONS.filter((definition) =>

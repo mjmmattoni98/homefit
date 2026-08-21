@@ -661,13 +661,15 @@ async function finishDataTypeImpl(
 		.query('googleHealthSyncCursors')
 		.withIndex('by_userId', (q) => q.eq('userId', connection.userId))
 		.take(MAX_CURSOR_LOOKAHEAD);
-	const next = nextCandidates.find(
+	const queuedCandidates = nextCandidates.filter(
 		(candidate) =>
 			candidate.connectionId === connection._id &&
 			candidate.generation === args.generation &&
 			candidate.status === 'queued' &&
 			candidate._id !== cursor._id
 	);
+	const next =
+		queuedCandidates.find((candidate) => candidate.mode === 'backfill') ?? queuedCandidates.at(0);
 	await ctx.db.patch('googleHealthConnections', connection._id, {
 		activeSyncCursorId: undefined,
 		activeSyncRunId: undefined,

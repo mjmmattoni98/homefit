@@ -1141,6 +1141,36 @@ describe('Google Health read APIs', () => {
 		]);
 	});
 
+	it('keeps the overview range inside the supported calendar at the earliest valid anchor', async () => {
+		const t = testBackend();
+		const userId = 'clerk|earliest-overview';
+		const connectionId = await seedReadConnection(t, userId);
+		await seedReadSummary(t, {
+			connectionId,
+			userId,
+			dataType: 'steps',
+			category: 'activity',
+			localDate: '0001-01-01',
+			latestValue: 321
+		});
+
+		const overview = await t
+			.withIdentity({ tokenIdentifier: userId })
+			.query(api.googleHealth.records.getOverview, { days: 365 });
+		expect(overview).toMatchObject({
+			anchorDate: '0001-01-01',
+			fromDate: '0001-01-01',
+			toDate: '0001-01-01',
+			metrics: [
+				{
+					dataType: 'steps',
+					latestSummary: { localDate: '0001-01-01', latestValue: 321 },
+					trend: [{ localDate: '0001-01-01', latestValue: 321 }]
+				}
+			]
+		});
+	});
+
 	it('returns inclusive bounded trends with strict calendar and data-type validation', async () => {
 		const t = testBackend();
 		const aliceId = 'clerk|trend-alice';

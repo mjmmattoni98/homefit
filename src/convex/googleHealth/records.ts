@@ -22,6 +22,7 @@ const RUN_LEASE_MS = 5 * 60 * 1000;
 const MAX_PUBLIC_METRIC_TYPES = 96;
 const MAX_TREND_SUMMARIES = 366;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MIN_LOCAL_DATE_EPOCH_MS = -62_135_596_800_000;
 const MAX_DETAIL_PAYLOAD_BYTES = 128 * 1024;
 const MAX_DETAIL_PAYLOAD_DEPTH = 8;
 const MAX_DETAIL_PAYLOAD_FIELDS = 128;
@@ -385,7 +386,9 @@ export const getOverview = query({
 		);
 		const anchorEpoch = parseLocalDate(anchorDate);
 		if (anchorEpoch === null) throw new Error('Invalid stored Google Health summary date');
-		const fromDate = formatLocalDate(anchorEpoch - (args.days - 1) * DAY_MS);
+		const fromDate = formatLocalDate(
+			Math.max(MIN_LOCAL_DATE_EPOCH_MS, anchorEpoch - (args.days - 1) * DAY_MS)
+		);
 		const priority = new Map([
 			['steps', 0],
 			['sleep', 1],

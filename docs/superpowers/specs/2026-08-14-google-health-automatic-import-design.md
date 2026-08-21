@@ -330,9 +330,16 @@ the notified end remains eligible.
 
 ### Daily Reconciliation
 
-A daily cron scans active connections through a bounded, indexed page and schedules reconciliation work. Reconciliation revisits a safe overlap window for each data type so delayed updates, missed notifications, and corrections are recovered. Watermarks advance only after a page commits successfully.
+A daily cron scans active, backfilling, and delayed connections through stable
+indexed pages of 50. It schedules one small child mutation per connection; that
+mutation coalesces an exact seven-day overlap for every granted metric, queues
+all affected cursors, and dispatches only one. Cursor completion chains the next
+queued type with its stored trigger, so daily, manual, and webhook work do not
+start competing actions for the same connection. Watermarks advance only after
+a page commits successfully.
 
-The user may also select **Sync now**. Manual sync uses the same coordinator, leases, cursors, and idempotent write path.
+The user may also select **Sync now**. Manual sync uses the same coordinator,
+leases, cursors, and idempotent write path.
 
 ## User Interface
 
@@ -395,11 +402,23 @@ Deletion is a separate destructive action requiring typed confirmation. It:
 1. performs the disconnect sequence;
 2. marks the connection `deleting` so no new work can start;
 3. deletes summary dependencies, compact point contributions, summary rebuild
-   state, OAuth states, data points, summaries, cursors, and sync runs in
-   bounded indexed batches; and
+   state, OAuth states, data points, summaries, record tombstones, cursors, and
+   sync runs in bounded indexed batches; and
 4. deletes the connection after all owned Google records are gone.
 
 Hevy and Sleep Cycle CSV data are outside this deletion scope.
+
+### Operational Retention
+
+Expired OAuth states are removed in batches of 100. Successful sync runs are
+retained for 30 days and failed runs for 90 days. A nonterminal webhook delivery
+that is still queued, verifying, retrying, or applying after Google's seven-day
+backlog horizon is terminalized as rejected and has its raw body, signature, and
+normalized notifications erased. Terminal delivery digests remain for eight
+additional days—one day beyond the retry horizon—before deletion, preserving a
+deduplication safety margin. Old record tombstones are deleted only when their
+owning connection is gone or their generation is stale; current-generation
+tombstones remain until normal reconciliation consumes them.
 
 ## Error Handling and Observability
 

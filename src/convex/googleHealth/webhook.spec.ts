@@ -549,12 +549,15 @@ describe('Google Health webhook queue coalescing', () => {
 			windowStart: '2026-08-14T08:00:00.000000000Z',
 			windowEnd: '2026-08-14T09:00:00.000000000Z',
 			pendingWindowStart: '2026-08-14T10:00:00.000000000Z',
-			pendingWindowEnd: '2026-08-14T12:00:00.000000000Z'
+			pendingWindowEnd: '2026-08-14T12:00:00.000000000Z',
+			pendingTrigger: 'webhook'
 		});
 		expect(afterFinish.cursor).toMatchObject({
 			status: 'queued',
 			windowStart: '2026-08-14T10:00:00.000000000Z',
-			windowEnd: '2026-08-14T12:00:00.000000000Z'
+			windowEnd: '2026-08-14T12:00:00.000000000Z',
+			queuedTrigger: 'webhook',
+			dispatchPending: true
 		});
 		expect(afterFinish.cursor).not.toHaveProperty('pendingWindowStart');
 		expect(afterFinish.scheduled.map((job) => job.name)).toContain(
@@ -628,7 +631,11 @@ describe('Google Health webhook queue coalescing', () => {
 		expect(response.status).toBe(204);
 		expect(stored.connection).not.toHaveProperty('activeSyncCursorId');
 		expect(stored.connection).not.toHaveProperty('activeSyncRunId');
-		expect(stored.cursor).toMatchObject({ status: 'queued', generation: 2 });
+		expect(stored.cursor).toMatchObject({
+			status: 'queued',
+			generation: 2,
+			queuedTrigger: 'webhook'
+		});
 		expect(stored.run).toMatchObject({ status: 'failed', errorCode: 'stale_generation' });
 		expect(stored.scheduled.map((job) => job.name)).toContain(
 			'googleHealth/sync:ensureCursorDispatched'

@@ -231,7 +231,7 @@ function connectionRunIsCurrent(
 	);
 }
 
-async function scheduleCursorWithWatchdog(
+export async function scheduleCursorWithWatchdog(
 	ctx: MutationCtx,
 	args: {
 		cursorId: Id<'googleHealthSyncCursors'>;
@@ -243,7 +243,10 @@ async function scheduleCursorWithWatchdog(
 	const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
 	if (!cursor || cursor.generation !== args.generation) return false;
 	const dispatchVersion = (cursor.dispatchVersion ?? 0) + 1;
-	await ctx.db.patch('googleHealthSyncCursors', cursor._id, { dispatchVersion });
+	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
+		dispatchVersion,
+		dispatchPending: true
+	});
 	const dispatchArgs = { ...args, expectedDispatchVersion: dispatchVersion };
 	await ctx.scheduler.runAfter(delayMs, internal.googleHealth.sync.runCursor, dispatchArgs);
 	await ctx.scheduler.runAfter(
@@ -283,6 +286,7 @@ export const ensureCursorDispatched = internalMutation({
 				? Math.max(now, connection.nextRetryAt)
 				: now;
 		if (args.expectedDispatchVersion === undefined) {
+			if (cursor.dispatchPending === true) return true;
 			return await scheduleCursorWithWatchdog(
 				ctx,
 				{
@@ -407,6 +411,7 @@ export const markCursorRunning = internalMutation({
 		});
 		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 			status: 'running',
+			dispatchPending: false,
 			activeRunId: runId,
 			activeEpoch: reconciliationEpoch,
 			reconciliationEpoch,
@@ -619,7 +624,10 @@ async function finishDataTypeImpl(
 	const hasPendingStart = cursor.pendingWindowStart !== undefined;
 	const hasPendingEnd = cursor.pendingWindowEnd !== undefined;
 	if (hasPendingStart !== hasPendingEnd) throw new Error('incomplete pending webhook window');
-	const promotesPending = cursor.mode === 'incremental' && hasPendingStart && hasPendingEnd;
+	const hasPendingUnbounded = cursor.pendingUnbounded === true;
+	if (hasPendingUnbounded && hasPendingStart) throw new Error('ambiguous pending incremental work');
+	const promotesPending =
+		cursor.mode === 'incremental' && (hasPendingUnbounded || (hasPendingStart && hasPendingEnd));
 	await completeRun(ctx, args.runId, args.counts, 'succeeded', undefined, args.hadMalformed);
 	const now = Date.now();
 	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
@@ -629,11 +637,14 @@ async function finishDataTypeImpl(
 			? {
 					windowStart: cursor.pendingWindowStart,
 					windowEnd: cursor.pendingWindowEnd,
-					syncId: `webhook:${args.generation}:${cursor.dataType}:${now}`
+					queuedTrigger: cursor.pendingTrigger ?? 'webhook',
+					syncId: `${cursor.pendingTrigger ?? 'webhook'}:${args.generation}:${cursor.dataType}:${now}`
 				}
-			: {}),
+			: { queuedTrigger: undefined }),
 		pendingWindowStart: undefined,
 		pendingWindowEnd: undefined,
+		pendingUnbounded: undefined,
+		pendingTrigger: undefined,
 		activeRunId: undefined,
 		activeEpoch: undefined,
 		leaseExpiresAt: undefined,
@@ -675,7 +686,7 @@ async function finishDataTypeImpl(
 			{
 				cursorId: cursor._id,
 				generation: args.generation,
-				trigger: 'webhook'
+				trigger: cursor.pendingTrigger ?? 'webhook'
 			},
 			0
 		);
@@ -685,7 +696,7 @@ async function finishDataTypeImpl(
 			{
 				cursorId: next._id,
 				generation: args.generation,
-				trigger: next.mode === 'backfill' ? 'oauth' : 'webhook'
+				trigger: next.mode === 'backfill' ? 'oauth' : (next.queuedTrigger ?? 'webhook')
 			},
 			0
 		);

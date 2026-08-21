@@ -441,6 +441,7 @@ async function queueIncrementalCursor(
 			status: 'queued',
 			windowStart: args.windowStart,
 			windowEnd: args.windowEnd,
+			queuedTrigger: 'webhook',
 			syncId: `webhook:${args.connection.generation}:${args.dataType}:${now}`,
 			attempt: 0,
 			generation: args.connection.generation,
@@ -474,10 +475,14 @@ async function queueIncrementalCursor(
 			windowEnd: args.windowEnd,
 			pendingWindowStart: undefined,
 			pendingWindowEnd: undefined,
+			pendingUnbounded: undefined,
+			queuedTrigger: 'webhook',
+			pendingTrigger: undefined,
 			activeRunId: undefined,
 			activeEpoch: undefined,
 			leaseExpiresAt: undefined,
 			leaseVersion: undefined,
+			dispatchPending: false,
 			hadMalformed: false,
 			syncId: `webhook:${args.connection.generation}:${args.dataType}:${now}`,
 			attempt: 0,
@@ -504,6 +509,8 @@ async function queueIncrementalCursor(
 		await ctx.db.patch('googleHealthSyncCursors', existing._id, {
 			pendingWindowStart: pending.start,
 			pendingWindowEnd: pending.end,
+			pendingUnbounded: undefined,
+			pendingTrigger: 'webhook',
 			updatedAt: now
 		});
 		return existing._id;
@@ -520,6 +527,9 @@ async function queueIncrementalCursor(
 		windowEnd: window.end,
 		pendingWindowStart: undefined,
 		pendingWindowEnd: undefined,
+		pendingUnbounded: undefined,
+		queuedTrigger: 'webhook',
+		pendingTrigger: undefined,
 		syncId: `webhook:${args.connection.generation}:${args.dataType}:${now}`,
 		attempt: 0,
 		updatedAt: now

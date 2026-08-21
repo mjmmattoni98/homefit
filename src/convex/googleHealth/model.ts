@@ -305,9 +305,13 @@ export const initializeCursors = internalMutation({
 						windowEnd: undefined,
 						pendingWindowStart: undefined,
 						pendingWindowEnd: undefined,
+						pendingUnbounded: undefined,
+						queuedTrigger: undefined,
+						pendingTrigger: undefined,
 						watermark: undefined,
 						syncId: `backfill:${connection.generation}:${definition.dataType}`,
 						attempt: 0,
+						dispatchPending: false,
 						generation: connection.generation,
 						updatedAt
 					});

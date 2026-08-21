@@ -9,7 +9,10 @@
  */
 
 import type * as googleHealth_apiClient from "../googleHealth/apiClient.js";
+import type * as googleHealth_account from "../googleHealth/account.js";
+import type * as googleHealth_accountNode from "../googleHealth/accountNode.js";
 import type * as googleHealth_crypto from "../googleHealth/crypto.js";
+import type * as googleHealth_maintenance from "../googleHealth/maintenance.js";
 import type * as googleHealth_model from "../googleHealth/model.js";
 import type * as googleHealth_normalize from "../googleHealth/normalize.js";
 import type * as googleHealth_oauth from "../googleHealth/oauth.js";
@@ -32,7 +35,10 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "googleHealth/apiClient": typeof googleHealth_apiClient;
+  "googleHealth/account": typeof googleHealth_account;
+  "googleHealth/accountNode": typeof googleHealth_accountNode;
   "googleHealth/crypto": typeof googleHealth_crypto;
+  "googleHealth/maintenance": typeof googleHealth_maintenance;
   "googleHealth/model": typeof googleHealth_model;
   "googleHealth/normalize": typeof googleHealth_normalize;
   "googleHealth/oauth": typeof googleHealth_oauth;

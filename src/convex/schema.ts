@@ -94,7 +94,8 @@ export default defineSchema({
 	})
 		.index('by_userId', ['userId'])
 		.index('by_healthUserId', ['healthUserId'])
-		.index('by_status', ['status']),
+		.index('by_status', ['status'])
+		.index('by_status_and_userId', ['status', 'userId']),
 
 	googleHealthWebhookDeliveries: defineTable({
 		deliveryDigest: v.string(),
@@ -147,6 +148,9 @@ export default defineSchema({
 		windowEnd: v.optional(v.string()),
 		pendingWindowStart: v.optional(v.string()),
 		pendingWindowEnd: v.optional(v.string()),
+		pendingUnbounded: v.optional(v.boolean()),
+		queuedTrigger: v.optional(syncTriggerValidator),
+		pendingTrigger: v.optional(syncTriggerValidator),
 		watermark: v.optional(v.string()),
 		syncId: v.string(),
 		attempt: v.number(),
@@ -155,6 +159,7 @@ export default defineSchema({
 		leaseExpiresAt: v.optional(v.number()),
 		leaseVersion: v.optional(v.number()),
 		dispatchVersion: v.optional(v.number()),
+		dispatchPending: v.optional(v.boolean()),
 		hadMalformed: v.optional(v.boolean()),
 		reconciliationEpoch: v.optional(v.number()),
 		activeEpoch: v.optional(v.number()),
@@ -172,11 +177,13 @@ export default defineSchema({
 		recordKey: v.string(),
 		blockedThroughEpoch: v.number(),
 		updatedAt: v.number()
-	}).index('by_connectionId_and_generation_and_recordKey', [
-		'connectionId',
-		'generation',
-		'recordKey'
-	]),
+	})
+		.index('by_connectionId_and_generation_and_recordKey', [
+			'connectionId',
+			'generation',
+			'recordKey'
+		])
+		.index('by_updatedAt', ['updatedAt']),
 
 	healthDataPoints: defineTable({
 		connectionId: v.id('googleHealthConnections'),
@@ -249,6 +256,7 @@ export default defineSchema({
 		updatedAt: v.number()
 	})
 		.index('by_userId_and_dataType_and_localDate', ['userId', 'dataType', 'localDate'])
+		.index('by_connectionId', ['connectionId'])
 		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
 
 	healthSummaryDependencies: defineTable({
@@ -261,6 +269,7 @@ export default defineSchema({
 		localDate: v.string(),
 		targetVersion: v.number()
 	})
+		.index('by_connectionId', ['connectionId'])
 		.index('by_runId', ['runId'])
 		.index('by_rebuildId', ['rebuildId'])
 		.index('by_rebuildId_and_targetVersion', ['rebuildId', 'targetVersion'])

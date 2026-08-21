@@ -746,7 +746,7 @@ Expected: FAIL because account and maintenance functions are absent.
 
 - [ ] **Step 4: Implement lifecycle actions**
 
-`syncNow` requires an active/backfilling connection and coalesces existing queued work. `disconnect` decrypts the token in a Node action, best-effort POSTs to Google revoke, and always invokes an internal mutation that increments generation, clears token fields, clears retry fields, and sets `disconnected`. `deleteImportedData` validates the exact confirmation, disconnects, sets `deleting`, and schedules indexed batches in this order: summary dependencies, compact point contributions, summary rebuild state, points, summaries, cursors, sync runs, OAuth states, connection. Operational cleanup also removes terminal webhook delivery rows after their retention window; accepted deliveries clear raw bodies, signatures, and normalized notifications as soon as processing reaches a terminal state.
+`syncNow` requires an active/backfilling connection and coalesces existing queued work. `disconnect` decrypts the token in a Node action, best-effort POSTs to Google revoke, and always invokes an internal mutation that increments generation, clears token fields, clears retry fields, and sets `disconnected`. `deleteImportedData` validates the exact confirmation, disconnects, sets `deleting`, and schedules indexed batches in this order: summary dependencies, compact point contributions, summary rebuild state, points, summaries, record tombstones, cursors, sync runs, OAuth states, connection. Operational cleanup terminalizes nonterminal webhook deliveries at Google's seven-day backlog horizon and erases raw bodies, signatures, and notifications; terminal delivery digests are retained for eight additional days before deletion. Old tombstones are removed only for missing or stale-generation connections.
 
 - [ ] **Step 5: Implement cron coordinators**
 
@@ -754,12 +754,14 @@ Create only internal cron targets:
 
 ```ts
 const crons = cronJobs();
-crons.daily("reconcile Google Health", { hourUTC: 3, minuteUTC: 15 },
+crons.cron("reconcile Google Health", "15 3 * * *",
   internal.googleHealth.maintenance.scheduleDailyReconciliation, {});
-crons.daily("clean Google Health operational data", { hourUTC: 4, minuteUTC: 15 },
+crons.cron("clean Google Health operational data", "15 4 * * *",
   internal.googleHealth.maintenance.cleanupOperationalData, {});
 export default crons;
 ```
+
+The raw cron form follows the current project Convex AI guideline, which forbids the older `daily` helper shown in earlier plan revisions.
 
 Both handlers use indexes, `.take(50|100)`, scheduler continuations, generation checks, and idempotent writes.
 

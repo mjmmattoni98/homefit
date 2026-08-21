@@ -12,6 +12,13 @@ function testBackend() {
 	return convexTest({ schema, modules, transactionLimits: true });
 }
 
+async function pumpReady(t: ReturnType<typeof testBackend>, times = 1): Promise<void> {
+	for (let index = 0; index < times; index += 1) {
+		vi.advanceTimersByTime(0);
+		await t.finishInProgressScheduledFunctions();
+	}
+}
+
 function physicalKey(timestamp: number, extraNanos = 0): string {
 	const date = new Date(timestamp);
 	const nanos = date.getUTCMilliseconds() * 1_000_000 + extraNanos;
@@ -228,6 +235,180 @@ describe('bounded Google Health record reconciliation', () => {
 			max: 200,
 			latestValue: 200
 		});
+	});
+
+	it("renews the same active run after a summary heartbeat advances the action's observed lease", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		const { cursorId, runId } = await seedOwnedRun(t, connectionId, 2);
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId,
+			expectedGeneration: 1,
+			cursorId,
+			runId,
+			dataType: 'steps',
+			points: [
+				point({
+					recordKey: 'heartbeat-race',
+					timestamp: Date.parse('2026-08-14T10:00:00Z'),
+					value: 1
+				})
+			],
+			syncId: 'race',
+			seenEpoch: 2
+		});
+		const rebuildId = await t.run(
+			async (ctx) =>
+				(
+					await ctx.db
+						.query('healthSummaryRebuilds')
+						.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+							q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+						)
+						.unique()
+				)?._id
+		);
+		if (rebuildId === undefined) throw new Error('expected summary rebuild');
+		await t.mutation(internal.googleHealth.records.rebuildSummaryBatch, { rebuildId });
+		const renewed = await t.mutation(internal.googleHealth.sync.renewRunLease, {
+			cursorId,
+			generation: 1,
+			runId,
+			expectedLeaseVersion: 1
+		});
+		expect(renewed).toMatchObject({ leaseVersion: 3 });
+		expect(await t.run(async (ctx) => ctx.db.get('googleHealthSyncRuns', runId))).toMatchObject({
+			status: 'running'
+		});
+	});
+
+	it('drains stale and current summary dependencies in bounded pages while heartbeating the live owner', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		const { cursorId, runId } = await seedOwnedRun(t, connectionId, 2);
+		const first = point({
+			recordKey: 'drain-first',
+			timestamp: Date.parse('2026-08-14T10:00:00Z'),
+			value: 1
+		});
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId,
+			expectedGeneration: 1,
+			dataType: 'steps',
+			points: [first],
+			syncId: 'direct-base',
+			seenEpoch: 2
+		});
+		const rebuildId = await t.run(async (ctx) => {
+			const rebuild = await ctx.db
+				.query('healthSummaryRebuilds')
+				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+					q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+				)
+				.unique();
+			if (!rebuild) throw new Error('expected summary rebuild');
+			const staleCursorId = await ctx.db.insert('googleHealthSyncCursors', {
+				connectionId,
+				userId: 'user-a',
+				dataType: 'steps',
+				mode: 'incremental',
+				status: 'retry',
+				syncId: 'stale-summary-owner',
+				attempt: 1,
+				generation: 1,
+				updatedAt: Date.now()
+			});
+			for (let index = 0; index < 40; index += 1) {
+				const staleRunId = await ctx.db.insert('googleHealthSyncRuns', {
+					connectionId,
+					userId: 'user-a',
+					cursorId: staleCursorId,
+					generation: 1,
+					reconciliationEpoch: 1,
+					trigger: 'reconciliation',
+					dataType: 'steps',
+					startedAt: Date.now() - 1_000 - index,
+					finishedAt: Date.now(),
+					pages: 1,
+					fetched: 0,
+					inserted: 0,
+					updated: 0,
+					deleted: 0,
+					skipped: 0,
+					status: 'failed',
+					errorCode: 'stale_summary_dependency',
+					errorMessage: 'Google Health synchronization abandoned'
+				});
+				await ctx.db.insert('healthSummaryDependencies', {
+					connectionId,
+					cursorId: staleCursorId,
+					runId: staleRunId,
+					rebuildId: rebuild._id,
+					userId: 'user-a',
+					dataType: 'steps',
+					localDate: '2026-08-14',
+					targetVersion: 2
+				});
+			}
+			return rebuild._id;
+		});
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId,
+			expectedGeneration: 1,
+			cursorId,
+			runId,
+			dataType: 'steps',
+			points: [
+				point({
+					recordKey: 'drain-second',
+					timestamp: Date.parse('2026-08-14T10:01:00Z'),
+					value: 2
+				})
+			],
+			syncId: 'owned-second',
+			seenEpoch: 2
+		});
+		await pumpReady(t);
+		expect(
+			await t.run(async (ctx) => ctx.db.get('healthSummaryRebuilds', rebuildId))
+		).toMatchObject({ status: 'running', workingVersion: 2 });
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId,
+			expectedGeneration: 1,
+			cursorId,
+			runId,
+			dataType: 'steps',
+			points: [
+				point({ recordKey: 'drain-third', timestamp: Date.parse('2026-08-14T10:02:00Z'), value: 3 })
+			],
+			syncId: 'owned-third',
+			seenEpoch: 2
+		});
+		await pumpReady(t, 5);
+		const stored = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			run: await ctx.db.get('googleHealthSyncRuns', runId),
+			rebuild: await ctx.db.get('healthSummaryRebuilds', rebuildId),
+			dependencies: await ctx.db
+				.query('healthSummaryDependencies')
+				.withIndex('by_rebuildId', (q) => q.eq('rebuildId', rebuildId))
+				.take(100),
+			summary: await ctx.db
+				.query('healthDailySummaries')
+				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+					q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+				)
+				.unique()
+		}));
+		expect(stored.dependencies).toHaveLength(0);
+		expect(stored.rebuild).toMatchObject({ status: 'complete', workingVersion: 3 });
+		expect(stored.summary).toMatchObject({ count: 3, sum: 6 });
+		expect(stored.connection?.syncLeaseVersion).toBeGreaterThan(1);
+		expect(stored.run).toMatchObject({ status: 'running' });
 	});
 
 	it('rebuilds exact aggregates and latest across more than 10,001 compact rows under transaction limits', async () => {

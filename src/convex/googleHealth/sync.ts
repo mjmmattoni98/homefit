@@ -360,11 +360,13 @@ export const renewRunLease = internalMutation({
 			run.generation !== args.generation ||
 			!runIsCurrent(cursor, args.generation, run._id) ||
 			!connectionRunIsCurrent(connection, cursor._id, args.generation, run._id) ||
-			cursor.leaseVersion !== args.expectedLeaseVersion ||
-			connection.syncLeaseVersion !== args.expectedLeaseVersion
+			cursor.leaseVersion === undefined ||
+			cursor.leaseVersion !== connection.syncLeaseVersion
 		)
 			return null;
-		const leaseVersion = args.expectedLeaseVersion + 1;
+		// The action may have observed an older version than a summary or cleanup
+		// heartbeat. Ownership, rather than the observer's version, is the CAS.
+		const leaseVersion = cursor.leaseVersion + 1;
 		const leaseExpiresAt = Date.now() + RUN_LEASE_MS;
 		await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 			leaseVersion,
@@ -391,7 +393,8 @@ async function completeRun(
 	runId: Id<'googleHealthSyncRuns'>,
 	counts: PageCounts,
 	status: 'succeeded' | 'failed',
-	errorCode?: string
+	errorCode?: string,
+	hadMalformed = false
 ): Promise<void> {
 	const run = await ctx.db.get('googleHealthSyncRuns', runId);
 	if (!run || run.status !== 'running') return;
@@ -404,7 +407,7 @@ async function completeRun(
 		skipped: counts.skipped,
 		status,
 		...(errorCode === undefined
-			? counts.skipped > 0
+			? hadMalformed
 				? {
 						errorCode: 'warning_skipped_records',
 						errorMessage: 'Some Google Health records could not be imported'
@@ -447,7 +450,7 @@ async function completeCursorPageImpl(
 	const hasWindow = args.nextWindowStart !== undefined || args.nextWindowEnd !== undefined;
 	if (hasPage === hasWindow || (hasWindow && (!args.nextWindowStart || !args.nextWindowEnd)))
 		throw new Error('exactly one cursor continuation is required');
-	await completeRun(ctx, args.runId, args.counts, 'succeeded');
+	await completeRun(ctx, args.runId, args.counts, 'succeeded', undefined, args.hadMalformed);
 	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 		status: 'queued',
 		activeRunId: undefined,
@@ -487,6 +490,7 @@ async function finishDataTypeImpl(
 		generation: number;
 		runId: Id<'googleHealthSyncRuns'>;
 		counts: PageCounts;
+		hadMalformed: boolean;
 	}
 ): Promise<boolean> {
 	const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
@@ -501,7 +505,7 @@ async function finishDataTypeImpl(
 		!SYNCABLE_STATUSES.has(connection.status)
 	)
 		return false;
-	await completeRun(ctx, args.runId, args.counts, 'succeeded');
+	await completeRun(ctx, args.runId, args.counts, 'succeeded', undefined, args.hadMalformed);
 	const now = Date.now();
 	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
 		status: 'complete',
@@ -659,7 +663,8 @@ export const tryFinalizeRun = internalMutation({
 				cursorId: run.cursorId,
 				generation: run.generation,
 				runId: run._id,
-				counts
+				counts,
+				hadMalformed: run.completionHadMalformed ?? false
 			});
 		return await completeCursorPageImpl(ctx, {
 			cursorId: run.cursorId,

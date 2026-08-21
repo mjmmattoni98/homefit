@@ -184,6 +184,8 @@ export default defineSchema({
 		workingVersion: v.optional(v.number()),
 		status: v.union(v.literal('queued'), v.literal('running'), v.literal('complete')),
 		paginationCursor: v.optional(v.string()),
+		dependencyCursor: v.optional(v.string()),
+		dependencyDrainVersion: v.optional(v.number()),
 		count: v.number(),
 		valueCount: v.number(),
 		sum: v.number(),
@@ -209,6 +211,7 @@ export default defineSchema({
 	})
 		.index('by_runId', ['runId'])
 		.index('by_rebuildId', ['rebuildId'])
+		.index('by_rebuildId_and_targetVersion', ['rebuildId', 'targetVersion'])
 		.index('by_runId_and_dataType_and_localDate', ['runId', 'dataType', 'localDate']),
 
 	healthDailySummaries: defineTable({

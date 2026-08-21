@@ -15,6 +15,7 @@ import {
 const MAX_MUTATION_POINTS = 16;
 const CLEANUP_PAGE_SIZE = 64;
 const SUMMARY_PAGE_SIZE = 128;
+const SUMMARY_DEPENDENCY_PAGE_SIZE = 32;
 const RUN_LEASE_MS = 5 * 60 * 1000;
 
 const coveredRangeValidator = v.union(
@@ -163,6 +164,27 @@ async function renewOwnedLease(
 	return true;
 }
 
+async function renewCurrentConnectionLease(
+	ctx: MutationCtx,
+	connectionId: Id<'googleHealthConnections'>
+): Promise<boolean> {
+	const connection = await ctx.db.get('googleHealthConnections', connectionId);
+	if (
+		!connection ||
+		connection.activeSyncCursorId === undefined ||
+		connection.activeSyncRunId === undefined
+	)
+		return false;
+	const run = await ctx.db.get('googleHealthSyncRuns', connection.activeSyncRunId);
+	if (run?.generation === undefined) return false;
+	return await renewOwnedLease(ctx, {
+		connectionId: connection._id,
+		cursorId: connection.activeSyncCursorId,
+		runId: connection.activeSyncRunId,
+		generation: run.generation
+	});
+}
+
 async function enqueueSummary(
 	ctx: MutationCtx,
 	args: {
@@ -192,6 +214,8 @@ async function enqueueSummary(
 		status: 'queued' as const,
 		workingVersion: undefined,
 		paginationCursor: undefined,
+		dependencyCursor: undefined,
+		dependencyDrainVersion: undefined,
 		count: 0,
 		valueCount: 0,
 		sum: 0,
@@ -257,12 +281,42 @@ export const rebuildSummaryBatch = internalMutation({
 	handler: async (ctx, args) => {
 		const rebuild = await ctx.db.get('healthSummaryRebuilds', args.rebuildId);
 		if (!rebuild || rebuild.status === 'complete') return null;
-		const dependency = await ctx.db
-			.query('healthSummaryDependencies')
-			.withIndex('by_rebuildId', (q) => q.eq('rebuildId', rebuild._id))
-			.first();
 		const restarting = rebuild.status === 'queued' || rebuild.workingVersion !== rebuild.version;
 		const workingVersion = rebuild.version;
+		await renewCurrentConnectionLease(ctx, rebuild.connectionId);
+		if (!restarting && rebuild.dependencyDrainVersion === workingVersion) {
+			const dependencyPage = await ctx.db
+				.query('healthSummaryDependencies')
+				.withIndex('by_rebuildId_and_targetVersion', (q) =>
+					q.eq('rebuildId', rebuild._id).lte('targetVersion', workingVersion)
+				)
+				.paginate({
+					numItems: SUMMARY_DEPENDENCY_PAGE_SIZE,
+					cursor: rebuild.dependencyCursor ?? null
+				});
+			const runs = new Set<Id<'googleHealthSyncRuns'>>();
+			for (const dependency of dependencyPage.page) {
+				runs.add(dependency.runId);
+				await ctx.db.delete('healthSummaryDependencies', dependency._id);
+			}
+			for (const runId of runs)
+				await ctx.scheduler.runAfter(0, internal.googleHealth.sync.tryFinalizeRun, { runId });
+			if (!dependencyPage.isDone) {
+				await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
+					dependencyCursor: dependencyPage.continueCursor,
+					updatedAt: Date.now()
+				});
+				await ctx.scheduler.runAfter(0, internal.googleHealth.records.rebuildSummaryBatch, args);
+				return null;
+			}
+			await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
+				status: 'complete',
+				dependencyCursor: undefined,
+				dependencyDrainVersion: undefined,
+				updatedAt: Date.now()
+			});
+			return null;
+		}
 		const paginationCursor = restarting ? null : (rebuild.paginationCursor ?? null);
 		const page = await ctx.db
 			.query('healthDataPointContributions')
@@ -295,21 +349,13 @@ export const rebuildSummaryBatch = internalMutation({
 			}
 			durationSeconds += row.durationSeconds ?? 0;
 		}
-		if (dependency) {
-			const run = await ctx.db.get('googleHealthSyncRuns', dependency.runId);
-			if (run?.generation !== undefined)
-				await renewOwnedLease(ctx, {
-					connectionId: dependency.connectionId,
-					cursorId: dependency.cursorId,
-					runId: dependency.runId,
-					generation: run.generation
-				});
-		}
 		if (!page.isDone) {
 			await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
 				status: 'running',
 				workingVersion,
 				paginationCursor: page.continueCursor,
+				dependencyCursor: undefined,
+				dependencyDrainVersion: undefined,
 				count,
 				valueCount,
 				sum,
@@ -353,9 +399,11 @@ export const rebuildSummaryBatch = internalMutation({
 			else await ctx.db.insert('healthDailySummaries', summary);
 		}
 		await ctx.db.patch('healthSummaryRebuilds', rebuild._id, {
-			status: 'complete',
+			status: 'running',
 			workingVersion,
 			paginationCursor: undefined,
+			dependencyCursor: undefined,
+			dependencyDrainVersion: workingVersion,
 			count,
 			valueCount,
 			sum,
@@ -366,19 +414,7 @@ export const rebuildSummaryBatch = internalMutation({
 			durationSeconds,
 			updatedAt: Date.now()
 		});
-		const dependencies = await ctx.db
-			.query('healthSummaryDependencies')
-			.withIndex('by_rebuildId', (q) => q.eq('rebuildId', rebuild._id))
-			.take(32);
-		const runs = new Set<Id<'googleHealthSyncRuns'>>();
-		for (const dependency of dependencies) {
-			if (dependency.targetVersion <= workingVersion) {
-				runs.add(dependency.runId);
-				await ctx.db.delete('healthSummaryDependencies', dependency._id);
-			}
-		}
-		for (const runId of runs)
-			await ctx.scheduler.runAfter(0, internal.googleHealth.sync.tryFinalizeRun, { runId });
+		await ctx.scheduler.runAfter(0, internal.googleHealth.records.rebuildSummaryBatch, args);
 		return null;
 	}
 });

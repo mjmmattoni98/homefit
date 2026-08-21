@@ -189,7 +189,7 @@ describe('Google Health bounded cursor worker', () => {
 			afterFirst.scheduled.some((job) => job.name === 'googleHealth/sync:recoverStaleRun')
 		).toBe(true);
 
-		await pumpReady(t, 5);
+		await pumpReady(t, 7);
 		expect(page).toBe(2);
 		const afterSecond = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -648,14 +648,14 @@ describe('Google Health bounded cursor worker', () => {
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
 		).toBe('running');
-		await pumpReady(t, 3);
+		await pumpReady(t, 4);
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			stale: await ctx.db.get('healthDataPoints', staleId)
 		}));
 		expect(stored.stale).toBeNull();
 		expect(stored.cursor).toMatchObject({
-			status: 'queued',
+			status: 'running',
 			windowStart: '2000-01-15',
 			windowEnd: '2000-01-29'
 		});
@@ -1053,6 +1053,47 @@ describe('Google Health bounded cursor worker', () => {
 		expect(stored.runs[0]).toMatchObject({ status: 'succeeded', fetched: 2, skipped: 1 });
 	});
 
+	it('does not emit malformed-record warning telemetry for an idempotent duplicate skip', async () => {
+		vi.useFakeTimers();
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, { dataType: 'steps' });
+		const duplicate = {
+			steps: {
+				interval: {
+					startTime: '2026-08-14T10:00:00Z',
+					endTime: '2026-08-14T10:01:00Z'
+				},
+				count: 10
+			}
+		};
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) =>
+				String(input) === 'https://oauth2.googleapis.com/token'
+					? tokenResponse()
+					: jsonResponse({ dataPoints: [duplicate, duplicate] })
+			)
+		);
+		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await pumpReady(t, 4);
+		const stored = await t.run(async (ctx) => ({
+			run: (
+				await ctx.db
+					.query('googleHealthSyncRuns')
+					.withIndex('by_connectionId_and_startedAt', (q) => q.eq('connectionId', connectionId))
+					.take(10)
+			)[0],
+			points: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.take(10)
+		}));
+		expect(stored.points).toHaveLength(1);
+		expect(stored.run).toMatchObject({ status: 'succeeded', skipped: 1 });
+		expect(stored.run?.errorCode).toBeUndefined();
+		expect(stored.run?.errorMessage).toBeUndefined();
+	});
+
 	it('carries malformed state across network pages and suppresses cleanup for the whole covered unit', async () => {
 		vi.useFakeTimers();
 		const t = boundedConvexTest();
@@ -1138,7 +1179,7 @@ describe('Google Health bounded cursor worker', () => {
 		expect(
 			await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId))
 		).toMatchObject({ status: 'running', hadMalformed: true });
-		await pumpReady(t, 2);
+		await pumpReady(t, 4);
 		expect(page).toBe(2);
 		const pendingCleanup = await t.run(async (ctx) =>
 			(await ctx.db.system.query('_scheduled_functions').take(50)).filter(
@@ -1146,7 +1187,7 @@ describe('Google Health bounded cursor worker', () => {
 			)
 		);
 		expect(pendingCleanup).toHaveLength(0);
-		await pumpReady(t, 2);
+		await pumpReady(t, 4);
 		const stored = await t.run(async (ctx) => ({
 			stale: await ctx.db.get('healthDataPoints', staleId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -1157,10 +1198,12 @@ describe('Google Health bounded cursor worker', () => {
 		}));
 		expect(stored.stale).not.toBeNull();
 		expect(stored.cursor).toMatchObject({ status: 'complete', hadMalformed: false });
-		expect(stored.runs[0]).toMatchObject({
-			status: 'succeeded',
-			errorCode: 'warning_skipped_records',
-			errorMessage: 'Some Google Health records could not be imported'
-		});
+		expect(stored.runs).toHaveLength(2);
+		for (const run of stored.runs)
+			expect(run).toMatchObject({
+				status: 'succeeded',
+				errorCode: 'warning_skipped_records',
+				errorMessage: 'Some Google Health records could not be imported'
+			});
 	});
 });

@@ -11,7 +11,7 @@ import {
 	encryptRefreshToken,
 	rotateRefreshTokenEnvelope
 } from './crypto';
-import { GOOGLE_HEALTH_READ_SCOPES, METRIC_DEFINITIONS } from './registry';
+import { GOOGLE_HEALTH_READ_SCOPES, getMetricDefinition, METRIC_DEFINITIONS } from './registry';
 
 const modules = import.meta.glob('/src/convex/**/*.*s');
 const NOW = new Date('2026-08-14T12:00:00.000Z').getTime();
@@ -69,6 +69,15 @@ const initializeCursors = internalMutation<
 	{ connectionId: Id<'googleHealthConnections'> },
 	{ created: number; total: number; firstCursorId: Id<'googleHealthSyncCursors'> | null }
 >('googleHealth/model:initializeCursors');
+const markCursorRunning = internalMutation<
+	{
+		cursorId: Id<'googleHealthSyncCursors'>;
+		generation: number;
+		trigger: 'oauth';
+		expectedDispatchVersion: number;
+	},
+	{ runId: Id<'googleHealthSyncRuns'> } | null
+>('googleHealth/sync:markCursorRunning');
 const setConnectionError = internalMutation<
 	{
 		connectionId: Id<'googleHealthConnections'>;
@@ -240,6 +249,100 @@ describe('Google Health connection model', () => {
 		expect(publicStatus).not.toHaveProperty('lastErrorMessage');
 		expect(publicStatus).not.toHaveProperty('nextRetryAt');
 		expect(retainedPointCount).toHaveLength(1);
+	});
+
+	it('invalidates excluded active work before a reduced-scope reconnect can claim new work', async () => {
+		const t = convexTest(schema, modules);
+		const { connectionId } = await t.mutation(saveConnection, connectionArgs());
+		await t.mutation(initializeCursors, { connectionId });
+		const { activeCursorId, activeRunId } = await t.run(async (ctx) => {
+			const activeCursor = await ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
+					q.eq('connectionId', connectionId).eq('dataType', 'steps').eq('mode', 'backfill')
+				)
+				.unique();
+			if (activeCursor === null) throw new Error('Missing excluded cursor fixture');
+			const activeRunId = await ctx.db.insert('googleHealthSyncRuns', {
+				connectionId,
+				userId: 'clerk|user-a',
+				cursorId: activeCursor._id,
+				generation: 1,
+				reconciliationEpoch: 1,
+				trigger: 'oauth',
+				dataType: 'steps',
+				startedAt: NOW,
+				pages: 0,
+				fetched: 0,
+				inserted: 0,
+				updated: 0,
+				deleted: 0,
+				skipped: 0,
+				status: 'running'
+			});
+			await ctx.db.patch('googleHealthSyncCursors', activeCursor._id, {
+				status: 'running',
+				activeRunId,
+				activeEpoch: 1,
+				reconciliationEpoch: 1,
+				leaseExpiresAt: NOW + 300_000,
+				leaseVersion: 9
+			});
+			await ctx.db.patch('googleHealthConnections', connectionId, {
+				reconciliationEpoch: 1,
+				activeSyncCursorId: activeCursor._id,
+				activeSyncRunId: activeRunId,
+				syncLeaseExpiresAt: NOW + 300_000,
+				syncLeaseVersion: 9
+			});
+			return { activeCursorId: activeCursor._id, activeRunId };
+		});
+
+		const sleepScope = getMetricDefinition('sleep')?.scope;
+		if (sleepScope === undefined) throw new Error('Missing sleep registry definition');
+		const reconnected = await t.mutation(
+			saveConnection,
+			connectionArgs({ grantedScopes: [sleepScope] })
+		);
+		const immediatelyInvalidated = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', activeCursorId),
+			run: await ctx.db.get('googleHealthSyncRuns', activeRunId)
+		}));
+		expect(reconnected.generation).toBe(2);
+		expect(immediatelyInvalidated.connection).toMatchObject({
+			generation: 2,
+			syncLeaseVersion: 10
+		});
+		expect(immediatelyInvalidated.connection).not.toHaveProperty('activeSyncCursorId');
+		expect(immediatelyInvalidated.connection).not.toHaveProperty('activeSyncRunId');
+		expect(immediatelyInvalidated.connection).not.toHaveProperty('syncLeaseExpiresAt');
+		expect(immediatelyInvalidated.cursor).toMatchObject({ status: 'retry', generation: 1 });
+		expect(immediatelyInvalidated.cursor).not.toHaveProperty('activeRunId');
+		expect(immediatelyInvalidated.run).toMatchObject({
+			status: 'failed',
+			errorCode: 'stale_generation',
+			finishedAt: NOW
+		});
+
+		await t.mutation(initializeCursors, { connectionId });
+		const grantedCursor = await t.run(async (ctx) =>
+			ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
+					q.eq('connectionId', connectionId).eq('dataType', 'sleep').eq('mode', 'backfill')
+				)
+				.unique()
+		);
+		if (grantedCursor === null) throw new Error('Missing granted cursor after reconnect');
+		expect(
+			await t.mutation(markCursorRunning, {
+				cursorId: grantedCursor._id,
+				generation: 2,
+				trigger: 'oauth',
+				expectedDispatchVersion: grantedCursor.dispatchVersion ?? 0
+			})
+		).not.toBeNull();
 	});
 
 	it('initializes scoped cursors and resets only stale-generation cursors on reconnect', async () => {

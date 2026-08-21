@@ -297,6 +297,27 @@ export async function deleteNamedGooglePoint(
 		googleDataPointNames: readonly string[];
 	}
 ): Promise<boolean> {
+	let blockedThroughEpoch = args.connection.reconciliationEpoch ?? 0;
+	if (
+		args.connection.activeSyncCursorId !== undefined &&
+		args.connection.activeSyncRunId !== undefined
+	) {
+		const activeCursor = await ctx.db.get(
+			'googleHealthSyncCursors',
+			args.connection.activeSyncCursorId
+		);
+		if (
+			activeCursor !== null &&
+			activeCursor.connectionId === args.connection._id &&
+			activeCursor.generation === args.connection.generation &&
+			activeCursor.activeRunId === args.connection.activeSyncRunId
+		) {
+			blockedThroughEpoch = Math.max(
+				blockedThroughEpoch,
+				activeCursor.activeEpoch ?? activeCursor.reconciliationEpoch ?? 0
+			);
+		}
+	}
 	for (const googleDataPointName of new Set(args.googleDataPointNames)) {
 		const recordKey = sha256Base64Url(
 			`${args.dataType}\n${canonicalJson({ kind: 'named', name: googleDataPointName })}`
@@ -310,7 +331,15 @@ export async function deleteNamedGooglePoint(
 					.eq('recordKey', recordKey)
 			)
 			.unique();
-		if (tombstone !== null) return true;
+		if (tombstone !== null) {
+			if (tombstone.blockedThroughEpoch < blockedThroughEpoch) {
+				await ctx.db.patch('googleHealthRecordTombstones', tombstone._id, {
+					blockedThroughEpoch,
+					updatedAt: Date.now()
+				});
+			}
+			return true;
+		}
 		const contribution = await ctx.db
 			.query('healthDataPointContributions')
 			.withIndex('by_userId_and_recordKey', (q) =>
@@ -332,6 +361,7 @@ export async function deleteNamedGooglePoint(
 			generation: args.connection.generation,
 			dataType: args.dataType,
 			recordKey,
+			blockedThroughEpoch,
 			updatedAt: Date.now()
 		});
 		await enqueueSummary(ctx, {
@@ -579,8 +609,11 @@ export const applyReconciledPage = internalMutation({
 				)
 				.unique();
 			if (tombstone !== null) {
-				skipped += 1;
-				continue;
+				if (seenEpoch <= tombstone.blockedThroughEpoch) {
+					skipped += 1;
+					continue;
+				}
+				await ctx.db.delete('googleHealthRecordTombstones', tombstone._id);
 			}
 			const existing = await ctx.db
 				.query('healthDataPoints')

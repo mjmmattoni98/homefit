@@ -170,6 +170,7 @@ export default defineSchema({
 		generation: v.number(),
 		dataType: v.string(),
 		recordKey: v.string(),
+		blockedThroughEpoch: v.number(),
 		updatedAt: v.number()
 	}).index('by_connectionId_and_generation_and_recordKey', [
 		'connectionId',

@@ -784,7 +784,7 @@ describe('Google Health webhook delivery variants', () => {
 		expect(stored.cursors).toEqual([]);
 	});
 
-	it('tombstones a named delete against an active page until a same-generation upsert', async () => {
+	it('bounds a named delete to its active epoch and proactively clears it for a named upsert', async () => {
 		const t = backend();
 		const connectionId = await seedConnection(t);
 		const recordId = 'step-record-active-run';
@@ -914,22 +914,75 @@ describe('Google Health webhook delivery variants', () => {
 			)
 		).toBeNull();
 
-		const upserted = await postSigned(t, fixture, notification({ operation: 'UPSERT', recordId }));
+		expect(
+			await t.mutation(internal.googleHealth.sync.finishDataType, {
+				cursorId,
+				generation: 1,
+				runId,
+				counts: { fetched: 0, inserted: 0, updated: 0, skipped: 1 }
+			})
+		).toBe(true);
+		const idLessUpsert = await postSigned(t, fixture, notification({ operation: 'UPSERT' }));
 		await pumpWebhookDelivery(t);
-		expect(upserted.status).toBe(204);
+		const dispatchVersion = await t.run(async (ctx) => {
+			const cursor = await ctx.db.get('googleHealthSyncCursors', cursorId);
+			if (cursor === null) throw new Error('Missing queued cursor');
+			return cursor.dispatchVersion ?? 0;
+		});
+		const newer = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'webhook',
+			expectedDispatchVersion: dispatchVersion
+		});
+		if (newer === null) throw new Error('Expected a newer reconciliation epoch');
+		expect(idLessUpsert.status).toBe(204);
+		expect(newer.reconciliationEpoch).toBe(2);
 		expect(
 			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
 				connectionId,
 				expectedGeneration: 1,
 				cursorId,
-				runId,
+				runId: newer.runId,
 				dataType: 'steps',
 				points: [pagePoint],
-				syncId: 'page-after-upsert',
-				seenEpoch: 1
+				syncId: 'new-epoch-after-id-less-upsert',
+				seenEpoch: newer.reconciliationEpoch
 			})
 		).toEqual({ inserted: 1, updated: 0, skipped: 0 });
 
+		await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
+		await pumpWebhookDelivery(t);
+		expect(
+			await t.run(async (ctx) =>
+				ctx.db
+					.query('healthDataPoints')
+					.withIndex('by_userId_and_recordKey', (q) =>
+						q.eq('userId', 'clerk|user-a').eq('recordKey', recordKey)
+					)
+					.unique()
+			)
+		).toBeNull();
+
+		const namedUpsert = await postSigned(
+			t,
+			fixture,
+			notification({ operation: 'UPSERT', recordId })
+		);
+		await pumpWebhookDelivery(t);
+		expect(namedUpsert.status).toBe(204);
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				cursorId,
+				runId: newer.runId,
+				dataType: 'steps',
+				points: [pagePoint],
+				syncId: 'same-epoch-after-named-upsert',
+				seenEpoch: newer.reconciliationEpoch
+			})
+		).toEqual({ inserted: 1, updated: 0, skipped: 0 });
 		await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
 		await pumpWebhookDelivery(t);
 		await t.run(async (ctx) =>
@@ -947,7 +1000,7 @@ describe('Google Health webhook delivery variants', () => {
 				dataType: 'steps',
 				points: [pagePoint],
 				syncId: 'new-generation-page',
-				seenEpoch: 2
+				seenEpoch: newer.reconciliationEpoch + 1
 			})
 		).toEqual({ inserted: 1, updated: 0, skipped: 0 });
 	});

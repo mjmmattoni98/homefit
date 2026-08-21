@@ -149,6 +149,7 @@ export const saveConnection = internalMutation({
 			grantedScopeSet.has(definition.scope)
 		).length;
 		const generation = (existing?.generation ?? 0) + 1;
+		const syncLeaseVersion = existing ? (existing.syncLeaseVersion ?? 0) + 1 : undefined;
 		const connection = {
 			healthUserId: args.healthUserId,
 			status: 'backfilling' as const,
@@ -160,6 +161,10 @@ export const saveConnection = internalMutation({
 			generation,
 			backfillTotalTypes,
 			backfillCompletedTypes: 0,
+			activeSyncCursorId: undefined,
+			activeSyncRunId: undefined,
+			syncLeaseExpiresAt: undefined,
+			...(syncLeaseVersion === undefined ? {} : { syncLeaseVersion }),
 			lastErrorCode: undefined,
 			lastErrorMessage: undefined,
 			nextRetryAt: undefined,
@@ -167,6 +172,43 @@ export const saveConnection = internalMutation({
 		};
 
 		if (existing) {
+			const now = Date.now();
+			const activeCursor =
+				existing.activeSyncCursorId === undefined
+					? null
+					: await ctx.db.get('googleHealthSyncCursors', existing.activeSyncCursorId);
+			const activeRun =
+				existing.activeSyncRunId === undefined
+					? null
+					: await ctx.db.get('googleHealthSyncRuns', existing.activeSyncRunId);
+			if (
+				activeRun !== null &&
+				activeRun.status === 'running' &&
+				activeRun.connectionId === existing._id &&
+				activeRun.generation === existing.generation
+			) {
+				await ctx.db.patch('googleHealthSyncRuns', activeRun._id, {
+					status: 'failed',
+					finishedAt: now,
+					errorCode: 'stale_generation',
+					errorMessage: 'Google Health connection generation changed'
+				});
+			}
+			if (
+				activeCursor !== null &&
+				activeCursor.connectionId === existing._id &&
+				activeCursor.generation === existing.generation
+			) {
+				await ctx.db.patch('googleHealthSyncCursors', activeCursor._id, {
+					status: activeCursor.status === 'running' ? 'retry' : activeCursor.status,
+					activeRunId: undefined,
+					activeEpoch: undefined,
+					leaseExpiresAt: undefined,
+					leaseVersion: undefined,
+					dispatchVersion: (activeCursor.dispatchVersion ?? 0) + 1,
+					updatedAt: now
+				});
+			}
 			await ctx.db.patch('googleHealthConnections', existing._id, connection);
 			return { connectionId: existing._id, generation };
 		}
@@ -261,6 +303,8 @@ export const initializeCursors = internalMutation({
 						pageToken: undefined,
 						windowStart: undefined,
 						windowEnd: undefined,
+						pendingWindowStart: undefined,
+						pendingWindowEnd: undefined,
 						watermark: undefined,
 						syncId: `backfill:${connection.generation}:${definition.dataType}`,
 						attempt: 0,

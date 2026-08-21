@@ -164,11 +164,11 @@ async function renewOwnedLease(
 	return true;
 }
 
-async function renewCurrentConnectionLease(
+async function renewDependentConnectionLease(
 	ctx: MutationCtx,
-	connectionId: Id<'googleHealthConnections'>
+	rebuild: Doc<'healthSummaryRebuilds'>
 ): Promise<boolean> {
-	const connection = await ctx.db.get('googleHealthConnections', connectionId);
+	const connection = await ctx.db.get('googleHealthConnections', rebuild.connectionId);
 	if (
 		!connection ||
 		connection.activeSyncCursorId === undefined ||
@@ -177,6 +177,20 @@ async function renewCurrentConnectionLease(
 		return false;
 	const run = await ctx.db.get('googleHealthSyncRuns', connection.activeSyncRunId);
 	if (run?.generation === undefined) return false;
+	const dependency = await ctx.db
+		.query('healthSummaryDependencies')
+		.withIndex('by_runId_and_dataType_and_localDate', (q) =>
+			q.eq('runId', run._id).eq('dataType', rebuild.dataType).eq('localDate', rebuild.localDate)
+		)
+		.unique();
+	if (
+		!dependency ||
+		dependency.connectionId !== connection._id ||
+		dependency.cursorId !== connection.activeSyncCursorId ||
+		dependency.rebuildId !== rebuild._id ||
+		dependency.targetVersion > rebuild.version
+	)
+		return false;
 	return await renewOwnedLease(ctx, {
 		connectionId: connection._id,
 		cursorId: connection.activeSyncCursorId,
@@ -283,7 +297,7 @@ export const rebuildSummaryBatch = internalMutation({
 		if (!rebuild || rebuild.status === 'complete') return null;
 		const restarting = rebuild.status === 'queued' || rebuild.workingVersion !== rebuild.version;
 		const workingVersion = rebuild.version;
-		await renewCurrentConnectionLease(ctx, rebuild.connectionId);
+		await renewDependentConnectionLease(ctx, rebuild);
 		if (!restarting && rebuild.dependencyDrainVersion === workingVersion) {
 			const dependencyPage = await ctx.db
 				.query('healthSummaryDependencies')

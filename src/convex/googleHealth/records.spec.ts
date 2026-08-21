@@ -284,6 +284,91 @@ describe('bounded Google Health record reconciliation', () => {
 		});
 	});
 
+	it('does not heartbeat an active run that has no dependency on the summary rebuild', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = testBackend();
+		const connectionId = await seedConnection(t, 'user-a');
+		await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+			connectionId,
+			expectedGeneration: 1,
+			dataType: 'steps',
+			points: [
+				point({
+					recordKey: 'unrelated-heartbeat',
+					timestamp: Date.parse('2026-08-14T10:00:00Z'),
+					value: 1
+				})
+			],
+			syncId: 'unrelated-heartbeat',
+			seenEpoch: 1
+		});
+		const { cursorId, runId } = await seedOwnedRun(t, connectionId, 2);
+		const rebuildId = await t.run(async (ctx) => {
+			const rebuild = await ctx.db
+				.query('healthSummaryRebuilds')
+				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+					q.eq('userId', 'user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+				)
+				.unique();
+			if (!rebuild) throw new Error('expected summary rebuild');
+			const staleCursorId = await ctx.db.insert('googleHealthSyncCursors', {
+				connectionId,
+				userId: 'user-a',
+				dataType: 'steps',
+				mode: 'incremental',
+				status: 'retry',
+				syncId: 'stale-summary-owner',
+				attempt: 1,
+				generation: 1,
+				updatedAt: Date.now()
+			});
+			for (let index = 0; index < 33; index += 1) {
+				const staleRunId = await ctx.db.insert('googleHealthSyncRuns', {
+					connectionId,
+					userId: 'user-a',
+					cursorId: staleCursorId,
+					generation: 1,
+					reconciliationEpoch: 1,
+					trigger: 'reconciliation',
+					dataType: 'steps',
+					startedAt: Date.now() - 1_000 - index,
+					finishedAt: Date.now(),
+					pages: 1,
+					fetched: 0,
+					inserted: 0,
+					updated: 0,
+					deleted: 0,
+					skipped: 0,
+					status: 'failed',
+					errorCode: 'stale_summary_dependency',
+					errorMessage: 'Google Health synchronization abandoned'
+				});
+				await ctx.db.insert('healthSummaryDependencies', {
+					connectionId,
+					cursorId: staleCursorId,
+					runId: staleRunId,
+					rebuildId: rebuild._id,
+					userId: 'user-a',
+					dataType: 'steps',
+					localDate: '2026-08-14',
+					targetVersion: rebuild.version
+				});
+			}
+			return rebuild._id;
+		});
+		await t.mutation(internal.googleHealth.records.rebuildSummaryBatch, { rebuildId });
+		await t.mutation(internal.googleHealth.records.rebuildSummaryBatch, { rebuildId });
+		const stored = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			run: await ctx.db.get('googleHealthSyncRuns', runId)
+		}));
+		expect(stored.connection).toMatchObject({ syncLeaseVersion: 1 });
+		expect(stored.cursor).toMatchObject({ leaseVersion: 1 });
+		expect(stored.run).toMatchObject({ status: 'running' });
+	});
+
 	it('drains stale and current summary dependencies in bounded pages while heartbeating the live owner', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));

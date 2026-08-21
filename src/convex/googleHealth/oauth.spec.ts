@@ -4,7 +4,7 @@ import { type FunctionReference, makeFunctionReference } from 'convex/server';
 import { convexTest } from 'convex-test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import schema from '../schema';
-import { GOOGLE_HEALTH_READ_SCOPES } from './registry';
+import { GOOGLE_HEALTH_READ_SCOPES, METRIC_DEFINITIONS } from './registry';
 
 const modules = import.meta.glob('/src/convex/**/*.*s');
 const APP_URL = 'https://homefit.example';
@@ -29,6 +29,11 @@ const beginConnection = actionReference<
 	{ returnPath: string },
 	{ authorizationUrl: string }
 >('googleHealth/oauth:beginConnection');
+const deleteImportedData = actionReference<
+	'public',
+	{ confirmation: string },
+	{ status: 'deleting' }
+>('googleHealth/account:deleteImportedData');
 
 function jsonResponse(value: unknown, status = 200): Response {
 	return new Response(JSON.stringify(value), {
@@ -70,6 +75,7 @@ describe('Google Health OAuth flow', () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
@@ -259,6 +265,147 @@ describe('Google Health OAuth flow', () => {
 		expect(stored.cursors).toHaveLength(40);
 		expect(stored.scheduled).toHaveLength(1);
 		expect(stored.scheduled[0].name).toBe('googleHealth/sync:ensureCursorDispatched');
+	});
+
+	it('cannot recreate a deleted connection from an OAuth callback already in flight', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = convexTest(schema, modules);
+		const userId = 'clerk|oauth-delete-race';
+		await t.run(async (ctx) => {
+			await ctx.db.insert('googleHealthConnections', {
+				userId,
+				healthUserId: 'old-google-health-user',
+				status: 'active',
+				grantedScopes: [],
+				generation: 4,
+				backfillTotalTypes: 0,
+				backfillCompletedTypes: 0
+			});
+		});
+		const { authorizationUrl } = await t
+			.withIdentity({ tokenIdentifier: userId })
+			.action(beginConnection, { returnPath: '/dashboard/import' });
+		const staleState = new URL(authorizationUrl).searchParams.get('state');
+		if (!staleState) throw new Error('Missing state fixture');
+
+		let releaseFirstTokenResponse: (response: Response) => void = () => undefined;
+		const firstTokenResponse = new Promise<Response>((resolve) => {
+			releaseFirstTokenResponse = resolve;
+		});
+		let markFirstTokenRequestStarted: () => void = () => undefined;
+		const firstTokenRequestStarted = new Promise<void>((resolve) => {
+			markFirstTokenRequestStarted = resolve;
+		});
+		let tokenRequests = 0;
+		const revocationRequests: string[] = [];
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://oauth2.googleapis.com/token') {
+				tokenRequests += 1;
+				if (tokenRequests === 1) {
+					markFirstTokenRequestStarted();
+					return await firstTokenResponse;
+				}
+				return jsonResponse({
+					access_token: 'fresh-access-token',
+					refresh_token: 'fresh-refresh-token',
+					expires_in: 3600,
+					scope: GOOGLE_HEALTH_READ_SCOPES[0],
+					token_type: 'Bearer'
+				});
+			}
+			if (url === 'https://health.googleapis.com/v4/users/me/identity') {
+				return jsonResponse({ healthUserId: 'new-google-health-user' });
+			}
+			if (url.startsWith('https://oauth2.googleapis.com/revoke?token=')) {
+				revocationRequests.push(url);
+				return new Response(null, { status: 200 });
+			}
+			throw new Error(`Unexpected test URL: ${url}`);
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const staleCallback = t.fetch(
+			`/google-health/oauth/callback?code=stale-code&state=${encodeURIComponent(staleState)}`
+		);
+		await firstTokenRequestStarted;
+		await expect(
+			t
+				.withIdentity({ tokenIdentifier: userId })
+				.action(deleteImportedData, { confirmation: 'DELETE GOOGLE DATA' })
+		).resolves.toEqual({ status: 'deleting' });
+		await t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(0));
+		await expect(
+			t.run(async (ctx) => ({
+				connection: await ctx.db
+					.query('googleHealthConnections')
+					.withIndex('by_userId', (q) => q.eq('userId', userId))
+					.unique(),
+				states: await ctx.db
+					.query('googleHealthOAuthStates')
+					.withIndex('by_userId', (q) => q.eq('userId', userId))
+					.take(1)
+			}))
+		).resolves.toEqual({ connection: null, states: [] });
+
+		releaseFirstTokenResponse(
+			jsonResponse({
+				access_token: 'stale-access-token',
+				refresh_token: 'stale-refresh-token-that-must-not-be-stored',
+				expires_in: 3600,
+				scope: GOOGLE_HEALTH_READ_SCOPES[0],
+				token_type: 'Bearer'
+			})
+		);
+		expectPrivateRedirect(await staleCallback, `${APP_URL}/dashboard/import?googleHealth=error`);
+		const afterStaleCallback = await t.run(async (ctx) => ({
+			connections: await ctx.db.query('googleHealthConnections').take(1),
+			cursors: await ctx.db.query('googleHealthSyncCursors').take(1),
+			states: await ctx.db.query('googleHealthOAuthStates').take(1)
+		}));
+		expect(afterStaleCallback).toEqual({ connections: [], cursors: [], states: [] });
+		expect(JSON.stringify(afterStaleCallback)).not.toContain(
+			'stale-refresh-token-that-must-not-be-stored'
+		);
+		expect(revocationRequests).toEqual([
+			'https://oauth2.googleapis.com/revoke?token=stale-refresh-token-that-must-not-be-stored'
+		]);
+
+		const freshAuthorization = await t
+			.withIdentity({ tokenIdentifier: userId })
+			.action(beginConnection, { returnPath: '/dashboard/import' });
+		const freshState = new URL(freshAuthorization.authorizationUrl).searchParams.get('state');
+		if (!freshState) throw new Error('Missing fresh state fixture');
+		const freshResponse = await t.fetch(
+			`/google-health/oauth/callback?code=fresh-code&state=${encodeURIComponent(freshState)}`
+		);
+		expectPrivateRedirect(freshResponse, `${APP_URL}/dashboard/import?googleHealth=connected`);
+		const reconnected = await t.run(async (ctx) => ({
+			connection: await ctx.db
+				.query('googleHealthConnections')
+				.withIndex('by_userId', (q) => q.eq('userId', userId))
+				.unique(),
+			cursors: await ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_userId', (q) => q.eq('userId', userId))
+				.take(METRIC_DEFINITIONS.length + 1),
+			states: await ctx.db
+				.query('googleHealthOAuthStates')
+				.withIndex('by_userId', (q) => q.eq('userId', userId))
+				.take(1)
+		}));
+		expect(reconnected.connection).toMatchObject({
+			status: 'backfilling',
+			generation: 1,
+			healthUserId: 'new-google-health-user'
+		});
+		expect(reconnected.connection?.encryptedRefreshToken).not.toBe('fresh-refresh-token');
+		expect(reconnected.cursors).toHaveLength(
+			METRIC_DEFINITIONS.filter((definition) => definition.scope === GOOGLE_HEALTH_READ_SCOPES[0])
+				.length
+		);
+		expect(reconnected.states).toEqual([]);
 	});
 
 	it('rejects a location-only grant before requesting a Health identity', async () => {

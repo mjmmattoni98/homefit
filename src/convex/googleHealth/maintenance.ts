@@ -211,26 +211,19 @@ async function terminalizeStaleDeliveries(
 	cursor: CleanupCursor,
 	anchorMs: number
 ): Promise<{ processed: number; complete: boolean }> {
-	const legacyDeliveries = await ctx.db
+	const page = await ctx.db
 		.query('googleHealthWebhookDeliveries')
-		.withIndex('by_status_and_acceptedAt', (q) =>
-			q.eq('status', status).eq('acceptedAt', undefined)
-		)
-		.take(DELIVERY_CLEANUP_BATCH_SIZE);
-	const deliveries =
-		legacyDeliveries.length > 0
-			? legacyDeliveries
-			: await ctx.db
-					.query('googleHealthWebhookDeliveries')
-					.withIndex('by_status_and_acceptedAt', (q) =>
-						q.eq('status', status).lt('acceptedAt', anchorMs - WEBHOOK_BACKLOG_HORIZON_MS)
-					)
-					.take(DELIVERY_CLEANUP_BATCH_SIZE);
-	if (deliveries.length === 0) return await advanceCleanup(ctx, cursor.phase, anchorMs);
-	for (const delivery of deliveries) {
+		.withIndex('by_status_and_updatedAt', (q) => q.eq('status', status))
+		.paginate({
+			numItems: DELIVERY_CLEANUP_BATCH_SIZE,
+			cursor: cursor.paginationCursor ?? null
+		});
+	for (const delivery of page.page) {
 		const acceptedAt = delivery.acceptedAt ?? delivery._creationTime;
 		if (acceptedAt >= anchorMs - WEBHOOK_BACKLOG_HORIZON_MS) {
-			await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, { acceptedAt });
+			if (delivery.acceptedAt === undefined) {
+				await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, { acceptedAt });
+			}
 			continue;
 		}
 		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
@@ -246,8 +239,16 @@ async function terminalizeStaleDeliveries(
 			updatedAt: anchorMs
 		});
 	}
-	await scheduleCleanupContinuation(ctx, cursor, anchorMs);
-	return { processed: deliveries.length, complete: false };
+	if (!page.isDone) {
+		await scheduleCleanupContinuation(
+			ctx,
+			{ phase: cursor.phase, paginationCursor: page.continueCursor },
+			anchorMs
+		);
+		return { processed: page.page.length, complete: false };
+	}
+	const advanced = await advanceCleanup(ctx, cursor.phase, anchorMs);
+	return { processed: page.page.length, complete: advanced.complete };
 }
 
 async function cleanTerminalDeliveries(

@@ -62,7 +62,11 @@ export default defineSchema({
 		stateDigest: v.string(),
 		expiresAt: v.number(),
 		returnPath: v.string(),
-		consumedAt: v.optional(v.number())
+		consumedAt: v.optional(v.number()),
+		lifecycleBindingVersion: v.optional(v.literal(1)),
+		expectedConnectionId: v.optional(v.id('googleHealthConnections')),
+		expectedConnectionGeneration: v.optional(v.number()),
+		expectedConnectionAbsent: v.optional(v.literal(true))
 	})
 		.index('by_stateDigest', ['stateDigest'])
 		.index('by_expiresAt', ['expiresAt'])
@@ -131,7 +135,6 @@ export default defineSchema({
 		updatedAt: v.number()
 	})
 		.index('by_deliveryDigest', ['deliveryDigest'])
-		.index('by_status_and_acceptedAt', ['status', 'acceptedAt'])
 		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
 
 	googleHealthSyncCursors: defineTable({

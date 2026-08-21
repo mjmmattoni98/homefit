@@ -2,7 +2,7 @@
 
 import type { Id } from '../_generated/dataModel';
 import { type FunctionReference, makeFunctionReference } from 'convex/server';
-import { convexTest } from 'convex-test';
+import { convexTest, type TestConvex } from 'convex-test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import schema from '../schema';
 import {
@@ -25,10 +25,14 @@ type EnvelopeArgs = {
 	tokenKeyVersion: string;
 };
 
-type SaveConnectionArgs = EnvelopeArgs & {
+type SaveConnectionInput = EnvelopeArgs & {
 	userId: string;
 	healthUserId: string;
 	grantedScopes: string[];
+};
+
+type SaveConnectionArgs = SaveConnectionInput & {
+	oauthStateId: Id<'googleHealthOAuthStates'>;
 };
 
 function internalMutation<Args extends Record<string, unknown>, Return>(
@@ -59,7 +63,7 @@ const createOAuthState = internalMutation<
 >('googleHealth/model:createOAuthState');
 const consumeOAuthState = internalMutation<
 	{ stateDigest: string },
-	{ userId: string; returnPath: string }
+	{ oauthStateId: Id<'googleHealthOAuthStates'>; userId: string; returnPath: string }
 >('googleHealth/model:consumeOAuthState');
 const saveConnection = internalMutation<
 	SaveConnectionArgs,
@@ -97,6 +101,10 @@ const replaceTokenEnvelope = internalMutation<
 	},
 	boolean
 >('googleHealth/model:replaceTokenEnvelope');
+const transitionToDisconnected = internalMutation<
+	{ userId: string },
+	{ status: 'disconnected'; tokenEnvelope: EnvelopeArgs | null }
+>('googleHealth/account:transitionToDisconnected');
 const getConnectionForSync = internalQuery<
 	{ connectionId: Id<'googleHealthConnections'> },
 	{
@@ -122,7 +130,7 @@ const FIRST_ENVELOPE: EnvelopeArgs = {
 	tokenKeyVersion: 'v1'
 };
 
-function connectionArgs(overrides: Partial<SaveConnectionArgs> = {}): SaveConnectionArgs {
+function connectionArgs(overrides: Partial<SaveConnectionInput> = {}): SaveConnectionInput {
 	return {
 		userId: 'clerk|user-a',
 		healthUserId: 'google-health-user-a',
@@ -130,6 +138,32 @@ function connectionArgs(overrides: Partial<SaveConnectionArgs> = {}): SaveConnec
 		...FIRST_ENVELOPE,
 		...overrides
 	};
+}
+
+let oauthStateCounter = 0;
+
+async function authorizeConnectionSave(
+	t: TestConvex<typeof schema>,
+	input: SaveConnectionInput
+): Promise<SaveConnectionArgs> {
+	const stateDigest = `authorized-save-${oauthStateCounter++}`;
+	await t.mutation(createOAuthState, {
+		userId: input.userId,
+		stateDigest,
+		returnPath: '/dashboard/import'
+	});
+	const { oauthStateId } = await t.mutation(consumeOAuthState, { stateDigest });
+	return { ...input, oauthStateId };
+}
+
+async function saveAuthorizedConnection(
+	t: TestConvex<typeof schema>,
+	overrides: Partial<SaveConnectionInput> = {}
+): Promise<{ connectionId: Id<'googleHealthConnections'>; generation: number }> {
+	return await t.mutation(
+		saveConnection,
+		await authorizeConnectionSave(t, connectionArgs(overrides))
+	);
 }
 
 describe('Google Health connection model', () => {
@@ -152,8 +186,21 @@ describe('Google Health connection model', () => {
 				returnPath: '/dashboard/import'
 			})
 		).resolves.toEqual({ expiresAt: NOW + 10 * 60 * 1000 });
+		const stored = await t.run(async (ctx) =>
+			ctx.db
+				.query('googleHealthOAuthStates')
+				.withIndex('by_stateDigest', (q) => q.eq('stateDigest', 'sha256-state-a'))
+				.unique()
+		);
+		expect(stored).toMatchObject({
+			lifecycleBindingVersion: 1,
+			expectedConnectionAbsent: true
+		});
+		expect(stored).not.toHaveProperty('expectedConnectionId');
+		expect(stored).not.toHaveProperty('expectedConnectionGeneration');
 		await expect(t.mutation(consumeOAuthState, { stateDigest: 'sha256-state-a' })).resolves.toEqual(
 			{
+				oauthStateId: expect.any(String),
 				userId: 'clerk|user-a',
 				returnPath: '/dashboard/import'
 			}
@@ -169,6 +216,17 @@ describe('Google Health connection model', () => {
 		await expect(t.mutation(consumeOAuthState, { stateDigest: 'missing' })).rejects.toThrow(
 			'Invalid or expired OAuth state'
 		);
+		await t.run(async (ctx) => {
+			await ctx.db.insert('googleHealthOAuthStates', {
+				userId: 'clerk|user-a',
+				stateDigest: 'legacy-unbound-state-at-consume',
+				expiresAt: NOW + 60_000,
+				returnPath: '/dashboard/import'
+			});
+		});
+		await expect(
+			t.mutation(consumeOAuthState, { stateDigest: 'legacy-unbound-state-at-consume' })
+		).rejects.toThrow('Invalid or expired OAuth state');
 		await t.mutation(createOAuthState, {
 			userId: 'clerk|user-a',
 			stateDigest: 'sha256-expiring-state',
@@ -181,9 +239,77 @@ describe('Google Health connection model', () => {
 		).rejects.toThrow('Invalid or expired OAuth state');
 	});
 
+	it('requires a bound consumed state and finalizes it atomically with a successful save', async () => {
+		const t = convexTest(schema, modules);
+		const firstInput = connectionArgs();
+		const firstAuthorization = await authorizeConnectionSave(t, firstInput);
+		const competingAuthorization = await authorizeConnectionSave(t, firstInput);
+		await t.mutation(createOAuthState, {
+			userId: firstInput.userId,
+			stateDigest: 'unconsumed-bound-state',
+			returnPath: '/dashboard/import'
+		});
+		const { legacyStateId, unconsumedStateId } = await t.run(async (ctx) => {
+			const legacyStateId = await ctx.db.insert('googleHealthOAuthStates', {
+				userId: firstInput.userId,
+				stateDigest: 'legacy-unbound-state',
+				expiresAt: NOW + 60_000,
+				returnPath: '/dashboard/import',
+				consumedAt: NOW
+			});
+			const unconsumed = await ctx.db
+				.query('googleHealthOAuthStates')
+				.withIndex('by_stateDigest', (q) => q.eq('stateDigest', 'unconsumed-bound-state'))
+				.unique();
+			if (unconsumed === null) throw new Error('Missing unconsumed state fixture');
+			return { legacyStateId, unconsumedStateId: unconsumed._id };
+		});
+
+		await expect(
+			t.mutation(saveConnection, { ...firstInput, oauthStateId: legacyStateId })
+		).rejects.toThrow('Invalid or expired OAuth state');
+		await expect(
+			t.mutation(saveConnection, { ...firstInput, oauthStateId: unconsumedStateId })
+		).rejects.toThrow('Invalid or expired OAuth state');
+		await expect(
+			t.mutation(saveConnection, { ...firstAuthorization, userId: 'clerk|different-user' })
+		).rejects.toThrow('Invalid or expired OAuth state');
+		const first = await t.mutation(saveConnection, firstAuthorization);
+		expect(first.generation).toBe(1);
+		await expect(
+			t.run(async (ctx) => ctx.db.get(firstAuthorization.oauthStateId))
+		).resolves.toBeNull();
+		await expect(t.mutation(saveConnection, firstAuthorization)).rejects.toThrow(
+			'Invalid or expired OAuth state'
+		);
+		await expect(t.mutation(saveConnection, competingAuthorization)).rejects.toThrow(
+			'Google Health connection changed during authorization'
+		);
+	});
+
+	it('rejects OAuth saves after another completion or disconnect changes the lifecycle snapshot', async () => {
+		const t = convexTest(schema, modules);
+		const first = await saveAuthorizedConnection(t);
+		const concurrentA = await authorizeConnectionSave(t, connectionArgs());
+		const concurrentB = await authorizeConnectionSave(t, connectionArgs());
+		const second = await t.mutation(saveConnection, concurrentA);
+		expect(second).toEqual({ connectionId: first.connectionId, generation: 2 });
+		await expect(t.mutation(saveConnection, concurrentB)).rejects.toThrow(
+			'Google Health connection changed during authorization'
+		);
+
+		const beforeDisconnect = await authorizeConnectionSave(t, connectionArgs());
+		await expect(
+			t.mutation(transitionToDisconnected, { userId: 'clerk|user-a' })
+		).resolves.toMatchObject({ status: 'disconnected' });
+		await expect(t.mutation(saveConnection, beforeDisconnect)).rejects.toThrow(
+			'Google Health connection changed during authorization'
+		);
+	});
+
 	it('upserts one connection, increments its generation, and retains imported points', async () => {
 		const t = convexTest(schema, modules);
-		const first = await t.mutation(saveConnection, connectionArgs());
+		const first = await saveAuthorizedConnection(t);
 
 		expect(first.generation).toBe(1);
 		await t.mutation(setConnectionError, {
@@ -209,17 +335,14 @@ describe('Google Health connection model', () => {
 			});
 		});
 
-		const second = await t.mutation(
-			saveConnection,
-			connectionArgs({
-				healthUserId: 'google-health-user-a-reconnected',
-				grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0]],
-				encryptedRefreshToken: 'ciphertext-v2',
-				tokenNonce: 'nonce-v2',
-				tokenTag: 'tag-v2',
-				tokenKeyVersion: 'v2'
-			})
-		);
+		const second = await saveAuthorizedConnection(t, {
+			healthUserId: 'google-health-user-a-reconnected',
+			grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[0]],
+			encryptedRefreshToken: 'ciphertext-v2',
+			tokenNonce: 'nonce-v2',
+			tokenTag: 'tag-v2',
+			tokenKeyVersion: 'v2'
+		});
 		const stored = await t.query(getConnectionForSync, { connectionId: second.connectionId });
 		const publicStatus = await t
 			.withIdentity({ tokenIdentifier: 'clerk|user-a' })
@@ -253,7 +376,7 @@ describe('Google Health connection model', () => {
 
 	it('invalidates excluded active work before a reduced-scope reconnect can claim new work', async () => {
 		const t = convexTest(schema, modules);
-		const { connectionId } = await t.mutation(saveConnection, connectionArgs());
+		const { connectionId } = await saveAuthorizedConnection(t);
 		await t.mutation(initializeCursors, { connectionId });
 		const { activeCursorId, activeRunId } = await t.run(async (ctx) => {
 			const activeCursor = await ctx.db
@@ -300,10 +423,7 @@ describe('Google Health connection model', () => {
 
 		const sleepScope = getMetricDefinition('sleep')?.scope;
 		if (sleepScope === undefined) throw new Error('Missing sleep registry definition');
-		const reconnected = await t.mutation(
-			saveConnection,
-			connectionArgs({ grantedScopes: [sleepScope] })
-		);
+		const reconnected = await saveAuthorizedConnection(t, { grantedScopes: [sleepScope] });
 		const immediatelyInvalidated = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', activeCursorId),
@@ -347,7 +467,7 @@ describe('Google Health connection model', () => {
 
 	it('initializes scoped cursors and resets only stale-generation cursors on reconnect', async () => {
 		const t = convexTest(schema, modules);
-		const { connectionId } = await t.mutation(saveConnection, connectionArgs());
+		const { connectionId } = await saveAuthorizedConnection(t);
 
 		const firstInitialization = await t.mutation(initializeCursors, { connectionId });
 		expect(firstInitialization).toEqual({
@@ -379,10 +499,9 @@ describe('Google Health connection model', () => {
 				});
 			}
 		});
-		const reconnected = await t.mutation(
-			saveConnection,
-			connectionArgs({ grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[6]] })
-		);
+		const reconnected = await saveAuthorizedConnection(t, {
+			grantedScopes: [GOOGLE_HEALTH_READ_SCOPES[6]]
+		});
 		vi.setSystemTime(NOW + 1_000);
 		await expect(
 			t.mutation(initializeCursors, { connectionId: reconnected.connectionId })
@@ -423,7 +542,7 @@ describe('Google Health connection model', () => {
 
 	it('keeps token material internal and exposes redacted retry status publicly', async () => {
 		const t = convexTest(schema, modules);
-		const { connectionId } = await t.mutation(saveConnection, connectionArgs());
+		const { connectionId } = await saveAuthorizedConnection(t);
 		const retryAt = NOW + 60_000;
 
 		await t.mutation(setConnectionError, {
@@ -458,8 +577,8 @@ describe('Google Health connection model', () => {
 
 	it('prevents stale workers and inactive connections from overwriting connection errors', async () => {
 		const t = convexTest(schema, modules);
-		const first = await t.mutation(saveConnection, connectionArgs());
-		const reconnected = await t.mutation(saveConnection, connectionArgs());
+		const first = await saveAuthorizedConnection(t);
+		const reconnected = await saveAuthorizedConnection(t);
 
 		await expect(
 			t.mutation(setConnectionError, {
@@ -499,17 +618,14 @@ describe('Google Health connection model', () => {
 
 	it('uses generation and the complete expected envelope as token replacement CAS guards', async () => {
 		const t = convexTest(schema, modules);
-		const first = await t.mutation(saveConnection, connectionArgs());
+		const first = await saveAuthorizedConnection(t);
 		const sameVersionReconnectEnvelope = {
 			encryptedRefreshToken: 'same-version-new-ciphertext',
 			tokenNonce: 'same-version-new-nonce',
 			tokenTag: 'same-version-new-tag',
 			tokenKeyVersion: 'v1'
 		};
-		const reconnected = await t.mutation(
-			saveConnection,
-			connectionArgs(sameVersionReconnectEnvelope)
-		);
+		const reconnected = await saveAuthorizedConnection(t, sameVersionReconnectEnvelope);
 		const rotatedEnvelope = {
 			encryptedRefreshToken: 'ciphertext-v2',
 			tokenNonce: 'nonce-v2',
@@ -611,7 +727,7 @@ describe('Google Health connection model', () => {
 		const t = convexTest(schema, modules);
 		const userId = 'clerk|user-a';
 		const oldEnvelope = await encryptRefreshToken('refresh-token', userId, PREVIOUS_KEY, 'v1');
-		const saved = await t.mutation(saveConnection, connectionArgs(oldEnvelope));
+		const saved = await saveAuthorizedConnection(t, oldEnvelope);
 		const beforeRotation = await t.query(getConnectionForSync, {
 			connectionId: saved.connectionId
 		});

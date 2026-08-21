@@ -34,9 +34,20 @@ const deleteGoogleDataBatch = makeFunctionReference<
 	{ connectionId: Id<'googleHealthConnections'>; generation: number },
 	boolean
 >('googleHealth/account:deleteGoogleDataBatch');
+const createOAuthState = makeFunctionReference<
+	'mutation',
+	{ userId: string; stateDigest: string; returnPath: string },
+	{ expiresAt: number }
+>('googleHealth/model:createOAuthState');
+const consumeOAuthState = makeFunctionReference<
+	'mutation',
+	{ stateDigest: string },
+	{ oauthStateId: Id<'googleHealthOAuthStates'>; userId: string; returnPath: string }
+>('googleHealth/model:consumeOAuthState');
 const saveConnection = makeFunctionReference<
 	'mutation',
 	{
+		oauthStateId: Id<'googleHealthOAuthStates'>;
 		userId: string;
 		healthUserId: string;
 		grantedScopes: string[];
@@ -122,6 +133,20 @@ async function seedConnection(
 			backfillCompletedTypes: METRIC_DEFINITIONS.length
 		})
 	);
+}
+
+async function createConsumedOAuthState(
+	t: ReturnType<typeof backend>,
+	userId: string,
+	stateDigest: string
+): Promise<Id<'googleHealthOAuthStates'>> {
+	await t.mutation(createOAuthState, {
+		userId,
+		stateDigest,
+		returnPath: '/dashboard/import'
+	});
+	const consumed = await t.mutation(consumeOAuthState, { stateDigest });
+	return consumed.oauthStateId;
 }
 
 describe('Google Health account lifecycle', () => {
@@ -606,6 +631,7 @@ describe('Google Health account lifecycle', () => {
 		const t = backend();
 		const userId = 'clerk|alice';
 		const connectionId = await seedConnection(t, { userId });
+		const staleOAuthStateId = await createConsumedOAuthState(t, userId, 'partial-deletion');
 		await t.run(async (ctx) => {
 			for (let index = 0; index < 2; index += 1) {
 				await ctx.db.insert('healthDataPoints', {
@@ -632,13 +658,21 @@ describe('Google Health account lifecycle', () => {
 		const replacement = await encryptRefreshToken('replacement-token', userId, ACTIVE_KEY, 'v1');
 
 		await expect(
+			t.mutation(createOAuthState, {
+				userId,
+				stateDigest: 'started-during-deletion',
+				returnPath: '/dashboard/import'
+			})
+		).rejects.toThrow('Google Health data deletion is in progress');
+		await expect(
 			t.mutation(saveConnection, {
+				oauthStateId: staleOAuthStateId,
 				userId,
 				healthUserId: 'replacement-health-user',
 				grantedScopes: [...GOOGLE_HEALTH_READ_SCOPES],
 				...replacement
 			})
-		).rejects.toThrow('Google Health data deletion is in progress');
+		).rejects.toThrow('Google Health connection changed during authorization');
 		const partial = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			points: await ctx.db
@@ -659,7 +693,9 @@ describe('Google Health account lifecycle', () => {
 		}));
 		expect(deleted).toEqual({ connection: null, points: [] });
 
+		const freshOAuthStateId = await createConsumedOAuthState(t, userId, 'after-deletion');
 		const fresh = await t.mutation(saveConnection, {
+			oauthStateId: freshOAuthStateId,
 			userId,
 			healthUserId: 'replacement-health-user',
 			grantedScopes: [...GOOGLE_HEALTH_READ_SCOPES],
@@ -1121,7 +1157,8 @@ describe('Google Health maintenance', () => {
 						attempt: 3,
 						leaseVersion: 3,
 						leaseExpiresAt: NOW + day,
-						updatedAt: NOW - 7 * day - 1
+						// Retry/lease writes may be recent even though acceptance is stale.
+						updatedAt: NOW - (65 - index)
 					});
 				}
 			});
@@ -1145,7 +1182,7 @@ describe('Google Health maintenance', () => {
 						nextNotificationIndex: 0,
 						attempt: 1,
 						leaseVersion: 1,
-						updatedAt: NOW - 7 * day - 1
+						updatedAt: NOW - (33 - index)
 					});
 				}
 			});
@@ -1163,12 +1200,6 @@ describe('Google Health maintenance', () => {
 				updatedAt: NOW - 1
 			})
 		);
-		await expect(
-			t.mutation(cleanupOperationalData, {
-				cursor: { phase: 'stale_verifying_deliveries' },
-				anchorMs: NOW
-			})
-		).resolves.toEqual({ processed: 1, complete: false });
 		await expect(
 			t.mutation(cleanupOperationalData, {
 				cursor: { phase: 'stale_verifying_deliveries' },

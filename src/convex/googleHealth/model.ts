@@ -90,12 +90,19 @@ export const createOAuthState = internalMutation({
 	},
 	returns: v.object({ expiresAt: v.number() }),
 	handler: async (ctx, args) => {
-		const existing = await ctx.db
+		const existingState = await ctx.db
 			.query('googleHealthOAuthStates')
 			.withIndex('by_stateDigest', (q) => q.eq('stateDigest', args.stateDigest))
 			.unique();
-		if (existing) {
+		if (existingState) {
 			throw new Error('OAuth state already exists');
+		}
+		const existingConnection = await ctx.db
+			.query('googleHealthConnections')
+			.withIndex('by_userId', (q) => q.eq('userId', args.userId))
+			.unique();
+		if (existingConnection?.status === 'deleting') {
+			throw new Error('Google Health data deletion is in progress');
 		}
 
 		const expiresAt = Date.now() + OAUTH_STATE_LIFETIME_MS;
@@ -103,7 +110,14 @@ export const createOAuthState = internalMutation({
 			userId: args.userId,
 			stateDigest: args.stateDigest,
 			expiresAt,
-			returnPath: args.returnPath
+			returnPath: args.returnPath,
+			lifecycleBindingVersion: 1,
+			...(existingConnection === null
+				? { expectedConnectionAbsent: true }
+				: {
+						expectedConnectionId: existingConnection._id,
+						expectedConnectionGeneration: existingConnection.generation
+					})
 		});
 		return { expiresAt };
 	}
@@ -111,24 +125,38 @@ export const createOAuthState = internalMutation({
 
 export const consumeOAuthState = internalMutation({
 	args: { stateDigest: v.string() },
-	returns: v.object({ userId: v.string(), returnPath: v.string() }),
+	returns: v.object({
+		oauthStateId: v.id('googleHealthOAuthStates'),
+		userId: v.string(),
+		returnPath: v.string()
+	}),
 	handler: async (ctx, args) => {
 		const oauthState = await ctx.db
 			.query('googleHealthOAuthStates')
 			.withIndex('by_stateDigest', (q) => q.eq('stateDigest', args.stateDigest))
 			.unique();
 		const now = Date.now();
-		if (!oauthState || oauthState.consumedAt !== undefined || oauthState.expiresAt <= now) {
+		if (
+			!oauthState ||
+			oauthState.lifecycleBindingVersion !== 1 ||
+			oauthState.consumedAt !== undefined ||
+			oauthState.expiresAt <= now
+		) {
 			throw new Error('Invalid or expired OAuth state');
 		}
 
 		await ctx.db.patch('googleHealthOAuthStates', oauthState._id, { consumedAt: now });
-		return { userId: oauthState.userId, returnPath: oauthState.returnPath };
+		return {
+			oauthStateId: oauthState._id,
+			userId: oauthState.userId,
+			returnPath: oauthState.returnPath
+		};
 	}
 });
 
 export const saveConnection = internalMutation({
 	args: {
+		oauthStateId: v.id('googleHealthOAuthStates'),
 		userId: v.string(),
 		healthUserId: v.string(),
 		grantedScopes: v.array(v.string()),
@@ -139,10 +167,39 @@ export const saveConnection = internalMutation({
 		generation: v.number()
 	}),
 	handler: async (ctx, args) => {
+		const oauthState = await ctx.db.get('googleHealthOAuthStates', args.oauthStateId);
+		const now = Date.now();
+		const boundToAbsentConnection =
+			oauthState?.expectedConnectionAbsent === true &&
+			oauthState.expectedConnectionId === undefined &&
+			oauthState.expectedConnectionGeneration === undefined;
+		const boundToExistingConnection =
+			oauthState?.expectedConnectionAbsent === undefined &&
+			oauthState?.expectedConnectionId !== undefined &&
+			oauthState.expectedConnectionGeneration !== undefined;
+		if (
+			oauthState === null ||
+			oauthState.lifecycleBindingVersion !== 1 ||
+			oauthState.userId !== args.userId ||
+			oauthState.consumedAt === undefined ||
+			oauthState.expiresAt <= now ||
+			(!boundToAbsentConnection && !boundToExistingConnection)
+		) {
+			throw new Error('Invalid or expired OAuth state');
+		}
 		const existing = await ctx.db
 			.query('googleHealthConnections')
 			.withIndex('by_userId', (q) => q.eq('userId', args.userId))
 			.unique();
+		if (
+			(boundToAbsentConnection && existing !== null) ||
+			(boundToExistingConnection &&
+				(existing === null ||
+					existing._id !== oauthState.expectedConnectionId ||
+					existing.generation !== oauthState.expectedConnectionGeneration))
+		) {
+			throw new Error('Google Health connection changed during authorization');
+		}
 		if (existing?.status === 'deleting') {
 			throw new Error('Google Health data deletion is in progress');
 		}
@@ -213,6 +270,7 @@ export const saveConnection = internalMutation({
 				});
 			}
 			await ctx.db.patch('googleHealthConnections', existing._id, connection);
+			await ctx.db.delete(oauthState._id);
 			return { connectionId: existing._id, generation };
 		}
 
@@ -220,6 +278,7 @@ export const saveConnection = internalMutation({
 			userId: args.userId,
 			...connection
 		});
+		await ctx.db.delete(oauthState._id);
 		return { connectionId, generation };
 	}
 });

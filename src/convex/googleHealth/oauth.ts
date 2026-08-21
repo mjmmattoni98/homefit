@@ -88,12 +88,27 @@ export const completeOAuth = internalAction({
 			keyring.activeKey,
 			keyring.activeVersion
 		);
-		const connection = await ctx.runMutation(internal.googleHealth.model.saveConnection, {
-			userId: oauthState.userId,
-			healthUserId,
-			grantedScopes: tokens.grantedScopes,
-			...tokenEnvelope
-		});
+		const connection = await (async () => {
+			try {
+				return await ctx.runMutation(internal.googleHealth.model.saveConnection, {
+					oauthStateId: oauthState.oauthStateId,
+					userId: oauthState.userId,
+					healthUserId,
+					grantedScopes: tokens.grantedScopes,
+					...tokenEnvelope
+				});
+			} catch {
+				try {
+					await ctx.runAction(internal.googleHealth.accountNode.revokeToken, {
+						userId: oauthState.userId,
+						...tokenEnvelope
+					});
+				} catch {
+					// Saving failed, so local state remains authoritative if remote revocation also fails.
+				}
+				throw oauthFlowError('connection_lifecycle_changed');
+			}
+		})();
 		try {
 			const initialized = await ctx.runMutation(internal.googleHealth.model.initializeCursors, {
 				connectionId: connection.connectionId

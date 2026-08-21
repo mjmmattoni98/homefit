@@ -96,6 +96,41 @@ export default defineSchema({
 		.index('by_healthUserId', ['healthUserId'])
 		.index('by_status', ['status']),
 
+	googleHealthWebhookDeliveries: defineTable({
+		deliveryDigest: v.string(),
+		status: v.union(
+			v.literal('queued'),
+			v.literal('verifying'),
+			v.literal('retry'),
+			v.literal('applying'),
+			v.literal('complete'),
+			v.literal('rejected')
+		),
+		rawBody: v.optional(v.string()),
+		signature: v.optional(v.string()),
+		notifications: v.optional(
+			v.array(
+				v.object({
+					healthUserId: v.string(),
+					dataType: v.string(),
+					operation: v.union(v.literal('UPSERT'), v.literal('DELETE')),
+					windowStart: v.string(),
+					windowEnd: v.string(),
+					recordId: v.optional(v.string())
+				})
+			)
+		),
+		nextNotificationIndex: v.optional(v.number()),
+		attempt: v.number(),
+		leaseVersion: v.number(),
+		leaseExpiresAt: v.optional(v.number()),
+		nextAttemptAt: v.optional(v.number()),
+		lastErrorCode: v.optional(v.string()),
+		updatedAt: v.number()
+	})
+		.index('by_deliveryDigest', ['deliveryDigest'])
+		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
+
 	googleHealthSyncCursors: defineTable({
 		connectionId: v.id('googleHealthConnections'),
 		userId: v.string(),
@@ -119,6 +154,7 @@ export default defineSchema({
 		activeRunId: v.optional(v.id('googleHealthSyncRuns')),
 		leaseExpiresAt: v.optional(v.number()),
 		leaseVersion: v.optional(v.number()),
+		dispatchVersion: v.optional(v.number()),
 		hadMalformed: v.optional(v.boolean()),
 		reconciliationEpoch: v.optional(v.number()),
 		activeEpoch: v.optional(v.number()),

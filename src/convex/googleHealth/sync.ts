@@ -35,6 +35,7 @@ const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 const RUN_LEASE_MS = 5 * 60 * 1000;
 const CONNECTION_BUSY_RETRY_MS = 5_000;
+const CURSOR_DISPATCH_WATCHDOG_MS = 30_000;
 const MAX_CURSOR_LOOKAHEAD = 100;
 const MAX_CHUNK_POINTS = 16;
 const MAX_CHUNK_UTF8_BYTES = 1_500_000;
@@ -230,6 +231,96 @@ function connectionRunIsCurrent(
 	);
 }
 
+async function scheduleCursorWithWatchdog(
+	ctx: MutationCtx,
+	args: {
+		cursorId: Id<'googleHealthSyncCursors'>;
+		generation: number;
+		trigger: SyncTrigger;
+	},
+	delayMs: number
+): Promise<boolean> {
+	const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+	if (!cursor || cursor.generation !== args.generation) return false;
+	const dispatchVersion = (cursor.dispatchVersion ?? 0) + 1;
+	await ctx.db.patch('googleHealthSyncCursors', cursor._id, { dispatchVersion });
+	await ctx.scheduler.runAfter(delayMs, internal.googleHealth.sync.runCursor, args);
+	await ctx.scheduler.runAfter(
+		delayMs + CURSOR_DISPATCH_WATCHDOG_MS,
+		internal.googleHealth.sync.ensureCursorDispatched,
+		{ ...args, expectedDispatchVersion: dispatchVersion }
+	);
+	return true;
+}
+
+export const ensureCursorDispatched = internalMutation({
+	args: {
+		cursorId: v.id('googleHealthSyncCursors'),
+		generation: v.number(),
+		trigger: syncTriggerValidator,
+		expectedDispatchVersion: v.optional(v.number())
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+		const connection = cursor
+			? await ctx.db.get('googleHealthConnections', cursor.connectionId)
+			: null;
+		if (
+			!cursor ||
+			!connection ||
+			cursor.generation !== args.generation ||
+			connection.generation !== args.generation ||
+			!SYNCABLE_STATUSES.has(connection.status) ||
+			(cursor.status !== 'queued' && cursor.status !== 'retry')
+		) {
+			return false;
+		}
+		const now = Date.now();
+		const dispatchAt =
+			cursor.status === 'retry' && connection.nextRetryAt !== undefined
+				? Math.max(now, connection.nextRetryAt)
+				: now;
+		if (args.expectedDispatchVersion === undefined) {
+			return await scheduleCursorWithWatchdog(
+				ctx,
+				{
+					cursorId: cursor._id,
+					generation: args.generation,
+					trigger: args.trigger
+				},
+				dispatchAt - now
+			);
+		}
+		if (cursor.dispatchVersion !== args.expectedDispatchVersion) return false;
+		const dispatchArgs = {
+			cursorId: cursor._id,
+			generation: args.generation,
+			trigger: args.trigger,
+			expectedDispatchVersion: args.expectedDispatchVersion
+		};
+		if (dispatchAt > now) {
+			await ctx.scheduler.runAfter(
+				dispatchAt - now,
+				internal.googleHealth.sync.ensureCursorDispatched,
+				dispatchArgs
+			);
+			return true;
+		}
+		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+			cursorId: cursor._id,
+			generation: args.generation,
+			trigger: args.trigger
+		});
+		await ctx.scheduler.runAfter(
+			CURSOR_DISPATCH_WATCHDOG_MS,
+			internal.googleHealth.sync.ensureCursorDispatched,
+			dispatchArgs
+		);
+		return true;
+	}
+});
+
 export const markCursorRunning = internalMutation({
 	args: {
 		cursorId: v.id('googleHealthSyncCursors'),
@@ -253,11 +344,15 @@ export const markCursorRunning = internalMutation({
 		)
 			return null;
 		if (connection.activeSyncRunId !== undefined) {
-			await ctx.scheduler.runAfter(CONNECTION_BUSY_RETRY_MS, internal.googleHealth.sync.runCursor, {
-				cursorId: cursor._id,
-				generation: args.generation,
-				trigger: args.trigger
-			});
+			await scheduleCursorWithWatchdog(
+				ctx,
+				{
+					cursorId: cursor._id,
+					generation: args.generation,
+					trigger: args.trigger
+				},
+				CONNECTION_BUSY_RETRY_MS
+			);
 			return null;
 		}
 		const now = Date.now();
@@ -306,6 +401,7 @@ export const markCursorRunning = internalMutation({
 			reconciliationEpoch,
 			leaseExpiresAt,
 			leaseVersion,
+			dispatchVersion: (cursor.dispatchVersion ?? 0) + 1,
 			hadMalformed,
 			updatedAt: now
 		});
@@ -475,11 +571,15 @@ async function completeCursorPageImpl(
 		lastErrorMessage: undefined,
 		nextRetryAt: undefined
 	});
-	await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-		cursorId: cursor._id,
-		generation: args.generation,
-		trigger: args.trigger
-	});
+	await scheduleCursorWithWatchdog(
+		ctx,
+		{
+			cursorId: cursor._id,
+			generation: args.generation,
+			trigger: args.trigger
+		},
+		0
+	);
 	return true;
 }
 
@@ -559,17 +659,25 @@ async function finishDataTypeImpl(
 		nextRetryAt: undefined
 	});
 	if (promotesPending)
-		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-			cursorId: cursor._id,
-			generation: args.generation,
-			trigger: 'webhook'
-		});
+		await scheduleCursorWithWatchdog(
+			ctx,
+			{
+				cursorId: cursor._id,
+				generation: args.generation,
+				trigger: 'webhook'
+			},
+			0
+		);
 	else if (next)
-		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-			cursorId: next._id,
-			generation: args.generation,
-			trigger: next.mode === 'backfill' ? 'oauth' : 'webhook'
-		});
+		await scheduleCursorWithWatchdog(
+			ctx,
+			{
+				cursorId: next._id,
+				generation: args.generation,
+				trigger: next.mode === 'backfill' ? 'oauth' : 'webhook'
+			},
+			0
+		);
 	return true;
 }
 
@@ -811,11 +919,15 @@ export const scheduleCursorRetry = internalMutation({
 			lastErrorMessage: 'Google Health is temporarily unavailable',
 			nextRetryAt: now + args.delayMs
 		});
-		await ctx.scheduler.runAfter(args.delayMs, internal.googleHealth.sync.runCursor, {
-			cursorId: cursor._id,
-			generation: args.generation,
-			trigger: 'retry'
-		});
+		await scheduleCursorWithWatchdog(
+			ctx,
+			{
+				cursorId: cursor._id,
+				generation: args.generation,
+				trigger: 'retry'
+			},
+			args.delayMs
+		);
 		return true;
 	}
 });
@@ -935,11 +1047,15 @@ export const abandonRun = internalMutation({
 			activeSyncRunId: undefined,
 			syncLeaseExpiresAt: undefined
 		});
-		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-			cursorId: cursor._id,
-			generation: args.generation,
-			trigger: 'retry'
-		});
+		await scheduleCursorWithWatchdog(
+			ctx,
+			{
+				cursorId: cursor._id,
+				generation: args.generation,
+				trigger: 'retry'
+			},
+			0
+		);
 		return true;
 	}
 });
@@ -1000,11 +1116,15 @@ export const recoverStaleRun = internalMutation({
 			syncLeaseExpiresAt: undefined
 		});
 		if (canRequeue) {
-			await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-				cursorId: cursor._id,
-				generation: args.generation,
-				trigger: 'retry'
-			});
+			await scheduleCursorWithWatchdog(
+				ctx,
+				{
+					cursorId: cursor._id,
+					generation: args.generation,
+					trigger: 'retry'
+				},
+				0
+			);
 		}
 		return true;
 	}

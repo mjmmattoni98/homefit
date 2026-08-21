@@ -1,8 +1,13 @@
 import { v } from 'convex/values';
 import { internal } from '../_generated/api';
 import type { Doc, Id } from '../_generated/dataModel';
-import { env, internalAction, internalMutation, type MutationCtx } from '../_generated/server';
-import { canonicalPhysicalCoverageKey } from './normalize';
+import {
+	internalAction,
+	internalMutation,
+	internalQuery,
+	type MutationCtx
+} from '../_generated/server';
+import { canonicalPhysicalCoverageKey, sha256Base64Url } from './normalize';
 import { deleteNamedGooglePoint } from './records';
 import { getMetricDefinition, type MetricDefinition } from './registry';
 import { verifyGoogleHealthSignature } from './webhookSignature';
@@ -10,7 +15,6 @@ import { verifyGoogleHealthSignature } from './webhookSignature';
 const PUBLIC_KEYSET_URL =
 	'https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json';
 const MAX_RAW_BODY_BYTES = 256 * 1024;
-const MAX_AUTHORIZATION_BYTES = 4096;
 const MAX_SIGNATURE_LENGTH = 4096;
 const MAX_KEYSET_BYTES = 64 * 1024;
 const KEYSET_TIMEOUT_MS = 5_000;
@@ -20,6 +24,9 @@ const MAX_INTERVALS_PER_NOTIFICATION = 16;
 const MAX_TOTAL_INTERVALS = 256;
 const MAX_SUBSCRIPTION_NAME_LENGTH = 512;
 const MAX_RECORD_ID_LENGTH = 1024;
+const DELIVERY_LEASE_MS = 60_000;
+const DELIVERY_RETRY_BASE_MS = 30_000;
+const DELIVERY_RETRY_MAX_MS = 60 * 60 * 1000;
 const SYNCABLE_STATUSES = new Set(['backfilling', 'active', 'delayed']);
 
 type PlainObject = Record<string, unknown>;
@@ -35,13 +42,8 @@ type ParsedInterval = {
 	physical?: { start: string; end: string };
 	civil?: { start: string; end: string };
 };
-type WebhookResult =
-	| { kind: 'verification'; accepted: 0 }
-	| { kind: 'notification'; accepted: number }
-	| { kind: 'unauthorized'; accepted: 0 }
-	| { kind: 'invalid'; accepted: 0 };
-
 let cachedKeyset: { value: unknown; expiresAt: number } | null = null;
+let keysetRequest: Promise<unknown | null> | null = null;
 
 const normalizedNotificationValidator = v.object({
 	healthUserId: v.string(),
@@ -51,13 +53,6 @@ const normalizedNotificationValidator = v.object({
 	windowEnd: v.string(),
 	recordId: v.optional(v.string())
 });
-
-const webhookResultValidator = v.union(
-	v.object({ kind: v.literal('verification'), accepted: v.literal(0) }),
-	v.object({ kind: v.literal('notification'), accepted: v.number() }),
-	v.object({ kind: v.literal('unauthorized'), accepted: v.literal(0) }),
-	v.object({ kind: v.literal('invalid'), accepted: v.literal(0) })
-);
 
 function isPlainObject(value: unknown): value is PlainObject {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -87,25 +82,6 @@ function boundedString(value: unknown, maximumLength: number): string | null {
 		return null;
 	}
 	return value;
-}
-
-function constantTimeAuthorizationMatches(received: string | undefined): boolean {
-	if (received === undefined) return false;
-	const encoder = new TextEncoder();
-	const actual = encoder.encode(received);
-	const expected = encoder.encode(env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION);
-	if (
-		actual.byteLength === 0 ||
-		actual.byteLength > MAX_AUTHORIZATION_BYTES ||
-		actual.byteLength !== expected.byteLength
-	) {
-		return false;
-	}
-	let difference = 0;
-	for (let index = 0; index < actual.byteLength; index += 1) {
-		difference |= actual[index] ^ expected[index];
-	}
-	return difference === 0;
 }
 
 function isValidDate(year: number, month: number, day: number): boolean {
@@ -275,6 +251,29 @@ function isMidnightCivil(value: string): boolean {
 	return value.length === 10 || value.endsWith('T00:00:00.000000000');
 }
 
+function addNanosecond(value: string): string | null {
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{9})(Z?)$/.exec(value);
+	if (match === null) return null;
+	const nanoseconds = Number(match[2]);
+	if (nanoseconds < 999_999_999) {
+		return `${match[1]}.${String(nanoseconds + 1).padStart(9, '0')}${match[3]}`;
+	}
+	const physical = match[3] === 'Z';
+	const instant = new Date(`${match[1]}Z`);
+	if (Number.isNaN(instant.getTime())) return null;
+	instant.setUTCSeconds(instant.getUTCSeconds() + 1);
+	if (instant.getUTCFullYear() < 1 || instant.getUTCFullYear() > 9999) return null;
+	return `${instant.toISOString().slice(0, 19)}.000000000${physical ? 'Z' : ''}`;
+}
+
+function widenEndForSelector(
+	strategy: MetricDefinition['filterStrategies']['physical'],
+	end: string
+): string | null {
+	if (strategy?.selector !== 'end' || strategy.comparison !== 'closedOpen') return end;
+	return addNanosecond(end);
+}
+
 function selectWindow(
 	definition: MetricDefinition,
 	intervals: readonly ParsedInterval[]
@@ -292,7 +291,12 @@ function selectWindow(
 		const ends = intervals.map((item) => item.civil?.end ?? '');
 		const start = starts.reduce((left, right) => (left < right ? left : right));
 		const end = ends.reduce((left, right) => (left > right ? left : right));
-		if (!needsDailyDates) return start.length > 10 && end.length > 10 ? { start, end } : null;
+		if (!needsDailyDates) {
+			const widenedEnd = widenEndForSelector(definition.filterStrategies.civil, end);
+			return start.length > 10 && widenedEnd !== null && widenedEnd.length > 10
+				? { start, end: widenedEnd }
+				: null;
+		}
 		const startDate = start.slice(0, 10);
 		const endDate = isMidnightCivil(end) ? end.slice(0, 10) : addDays(end.slice(0, 10), 1);
 		return { start: startDate, end: endDate <= startDate ? addDays(startDate, 1) : endDate };
@@ -300,10 +304,14 @@ function selectWindow(
 	if (intervals.every((item) => item.physical !== undefined)) {
 		const starts = intervals.map((item) => item.physical?.start ?? '');
 		const ends = intervals.map((item) => item.physical?.end ?? '');
-		return {
-			start: starts.reduce((left, right) => (left < right ? left : right)),
-			end: ends.reduce((left, right) => (left > right ? left : right))
-		};
+		const end = ends.reduce((left, right) => (left > right ? left : right));
+		const widenedEnd = widenEndForSelector(definition.filterStrategies.physical, end);
+		return widenedEnd === null
+			? null
+			: {
+					start: starts.reduce((left, right) => (left < right ? left : right)),
+					end: widenedEnd
+				};
 	}
 	if (
 		definition.filterStrategies.civil !== undefined &&
@@ -311,10 +319,14 @@ function selectWindow(
 	) {
 		const starts = intervals.map((item) => item.civil?.start ?? '');
 		const ends = intervals.map((item) => item.civil?.end ?? '');
-		return {
-			start: starts.reduce((left, right) => (left < right ? left : right)),
-			end: ends.reduce((left, right) => (left > right ? left : right))
-		};
+		const end = ends.reduce((left, right) => (left > right ? left : right));
+		const widenedEnd = widenEndForSelector(definition.filterStrategies.civil, end);
+		return widenedEnd === null
+			? null
+			: {
+					start: starts.reduce((left, right) => (left < right ? left : right)),
+					end: widenedEnd
+				};
 	}
 	return null;
 }
@@ -413,7 +425,7 @@ async function queueIncrementalCursor(
 		windowStart: string;
 		windowEnd: string;
 	}
-): Promise<Id<'googleHealthSyncCursors'> | null> {
+): Promise<Id<'googleHealthSyncCursors'>> {
 	const existing = await ctx.db
 		.query('googleHealthSyncCursors')
 		.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
@@ -498,7 +510,7 @@ async function queueIncrementalCursor(
 			pendingWindowEnd: pending.end,
 			updatedAt: now
 		});
-		return null;
+		return existing._id;
 	}
 	const window =
 		existing.status === 'queued' &&
@@ -506,7 +518,6 @@ async function queueIncrementalCursor(
 		existing.windowEnd !== undefined
 			? mergeWindow(existing.windowStart, existing.windowEnd, args.windowStart, args.windowEnd)
 			: { start: args.windowStart, end: args.windowEnd };
-	const shouldSchedule = existing.status !== 'queued';
 	await ctx.db.patch('googleHealthSyncCursors', existing._id, {
 		status: 'queued',
 		windowStart: window.start,
@@ -517,7 +528,7 @@ async function queueIncrementalCursor(
 		attempt: 0,
 		updatedAt: now
 	});
-	return shouldSchedule ? existing._id : null;
+	return existing._id;
 }
 
 function recordNameCandidates(healthUserId: string, dataType: string, recordId: string): string[] {
@@ -528,60 +539,6 @@ function recordNameCandidates(healthUserId: string, dataType: string, recordId: 
 		recordId
 	];
 }
-
-export const queueNotifications = internalMutation({
-	args: { notifications: v.array(normalizedNotificationValidator) },
-	returns: v.number(),
-	handler: async (ctx, args): Promise<number> => {
-		if (args.notifications.length === 0 || args.notifications.length > MAX_BATCH_SIZE) {
-			throw new Error('invalid Google Health webhook batch size');
-		}
-		let accepted = 0;
-		for (const notification of args.notifications) {
-			const connections = await ctx.db
-				.query('googleHealthConnections')
-				.withIndex('by_healthUserId', (q) => q.eq('healthUserId', notification.healthUserId))
-				.take(2);
-			if (connections.length !== 1) continue;
-			const connection = connections[0];
-			const definition = getMetricDefinition(notification.dataType);
-			if (
-				definition === null ||
-				!definition.webhook ||
-				!connection.grantedScopes.includes(definition.scope) ||
-				!SYNCABLE_STATUSES.has(connection.status)
-			) {
-				continue;
-			}
-			if (notification.operation === 'DELETE' && notification.recordId !== undefined) {
-				await deleteNamedGooglePoint(ctx, {
-					connection,
-					dataType: notification.dataType,
-					googleDataPointNames: recordNameCandidates(
-						notification.healthUserId,
-						notification.dataType,
-						notification.recordId
-					)
-				});
-			}
-			const cursorId = await queueIncrementalCursor(ctx, {
-				connection,
-				dataType: notification.dataType,
-				windowStart: notification.windowStart,
-				windowEnd: notification.windowEnd
-			});
-			if (cursorId !== null) {
-				await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
-					cursorId,
-					generation: connection.generation,
-					trigger: 'webhook'
-				});
-			}
-			accepted += 1;
-		}
-		return accepted;
-	}
-});
 
 async function fetchPublicKeyset(): Promise<unknown | null> {
 	const controller = new AbortController();
@@ -642,65 +599,406 @@ async function fetchPublicKeyset(): Promise<unknown | null> {
 	}
 }
 
-async function getPublicKeyset(forceRefresh: boolean): Promise<unknown | null> {
+async function getPublicKeyset(
+	forceRefresh: boolean,
+	staleKeyset?: unknown
+): Promise<unknown | null> {
 	const now = Date.now();
+	if (
+		forceRefresh &&
+		staleKeyset !== undefined &&
+		cachedKeyset !== null &&
+		cachedKeyset.expiresAt > now &&
+		cachedKeyset.value !== staleKeyset
+	) {
+		return cachedKeyset.value;
+	}
 	if (!forceRefresh && cachedKeyset !== null && cachedKeyset.expiresAt > now) {
 		return cachedKeyset.value;
 	}
-	const value = await fetchPublicKeyset();
+	const request = keysetRequest ?? fetchPublicKeyset();
+	keysetRequest = request;
+	let value: unknown | null;
+	try {
+		value = await request;
+	} finally {
+		if (keysetRequest === request) keysetRequest = null;
+	}
 	if (value === null) return null;
 	cachedKeyset = { value, expiresAt: now + KEYSET_CACHE_MS };
 	return value;
 }
 
-export const verifyAndQueue = internalAction({
-	args: {
-		rawBody: v.string(),
-		authorization: v.optional(v.string()),
-		signature: v.optional(v.string())
-	},
-	returns: webhookResultValidator,
-	handler: async (ctx, args): Promise<WebhookResult> => {
+const deliveryWorkValidator = v.union(
+	v.object({ rawBody: v.string(), signature: v.string() }),
+	v.null()
+);
+
+export const acceptDelivery = internalMutation({
+	args: { rawBody: v.string(), signature: v.string() },
+	returns: v.id('googleHealthWebhookDeliveries'),
+	handler: async (ctx, args) => {
 		if (
 			new TextEncoder().encode(args.rawBody).byteLength > MAX_RAW_BODY_BYTES ||
-			!constantTimeAuthorizationMatches(args.authorization)
+			args.signature.length === 0 ||
+			args.signature.length > MAX_SIGNATURE_LENGTH
 		) {
-			return { kind: 'unauthorized', accepted: 0 };
+			throw new Error('invalid Google Health webhook delivery');
+		}
+		const deliveryDigest = sha256Base64Url(`${args.signature}\n${args.rawBody}`);
+		const existing = await ctx.db
+			.query('googleHealthWebhookDeliveries')
+			.withIndex('by_deliveryDigest', (q) => q.eq('deliveryDigest', deliveryDigest))
+			.unique();
+		if (existing) return existing._id;
+		const now = Date.now();
+		const deliveryId = await ctx.db.insert('googleHealthWebhookDeliveries', {
+			deliveryDigest,
+			status: 'queued',
+			rawBody: args.rawBody,
+			signature: args.signature,
+			attempt: 0,
+			leaseVersion: 0,
+			updatedAt: now
+		});
+		await ctx.scheduler.runAfter(0, internal.googleHealth.webhook.dispatchDelivery, {
+			deliveryId
+		});
+		return deliveryId;
+	}
+});
+
+export const dispatchDelivery = internalMutation({
+	args: { deliveryId: v.id('googleHealthWebhookDeliveries') },
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		const now = Date.now();
+		if (
+			!delivery ||
+			(delivery.status !== 'queued' && delivery.status !== 'retry') ||
+			(delivery.nextAttemptAt !== undefined && delivery.nextAttemptAt > now) ||
+			delivery.rawBody === undefined ||
+			delivery.signature === undefined
+		) {
+			return false;
+		}
+		const leaseVersion = delivery.leaseVersion + 1;
+		const leaseExpiresAt = now + DELIVERY_LEASE_MS;
+		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			status: 'verifying',
+			attempt: delivery.attempt + 1,
+			leaseVersion,
+			leaseExpiresAt,
+			nextAttemptAt: undefined,
+			updatedAt: now
+		});
+		await ctx.scheduler.runAfter(0, internal.googleHealth.webhook.processDelivery, {
+			deliveryId: delivery._id,
+			leaseVersion
+		});
+		await ctx.scheduler.runAfter(
+			DELIVERY_LEASE_MS,
+			internal.googleHealth.webhook.recoverDeliveryLease,
+			{ deliveryId: delivery._id, leaseVersion, leaseExpiresAt }
+		);
+		return true;
+	}
+});
+
+export const readDeliveryWork = internalQuery({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number()
+	},
+	returns: deliveryWorkValidator,
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'verifying' ||
+			delivery.leaseVersion !== args.leaseVersion ||
+			delivery.rawBody === undefined ||
+			delivery.signature === undefined
+		) {
+			return null;
+		}
+		return { rawBody: delivery.rawBody, signature: delivery.signature };
+	}
+});
+
+export const rejectDelivery = internalMutation({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number(),
+		errorCode: v.union(v.literal('invalid_signature'), v.literal('invalid_payload'))
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'verifying' ||
+			delivery.leaseVersion !== args.leaseVersion
+		) {
+			return false;
+		}
+		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			status: 'rejected',
+			rawBody: undefined,
+			signature: undefined,
+			leaseExpiresAt: undefined,
+			lastErrorCode: args.errorCode,
+			updatedAt: Date.now()
+		});
+		return true;
+	}
+});
+
+export const retryDelivery = internalMutation({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number(),
+		errorCode: v.literal('keyset_unavailable')
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'verifying' ||
+			delivery.leaseVersion !== args.leaseVersion
+		) {
+			return false;
+		}
+		const delayMs = Math.min(
+			DELIVERY_RETRY_MAX_MS,
+			DELIVERY_RETRY_BASE_MS * 2 ** Math.min(20, Math.max(0, delivery.attempt - 1))
+		);
+		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			status: 'retry',
+			leaseExpiresAt: undefined,
+			nextAttemptAt: Date.now() + delayMs,
+			lastErrorCode: args.errorCode,
+			updatedAt: Date.now()
+		});
+		await ctx.scheduler.runAfter(delayMs, internal.googleHealth.webhook.dispatchDelivery, {
+			deliveryId: delivery._id
+		});
+		return true;
+	}
+});
+
+export const markDeliveryVerified = internalMutation({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number(),
+		notifications: v.array(normalizedNotificationValidator)
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'verifying' ||
+			delivery.leaseVersion !== args.leaseVersion ||
+			args.notifications.length === 0 ||
+			args.notifications.length > MAX_BATCH_SIZE
+		) {
+			return false;
+		}
+		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			status: 'applying',
+			rawBody: undefined,
+			signature: undefined,
+			notifications: args.notifications,
+			nextNotificationIndex: 0,
+			leaseExpiresAt: undefined,
+			lastErrorCode: undefined,
+			updatedAt: Date.now()
+		});
+		await ctx.scheduler.runAfter(0, internal.googleHealth.webhook.applyDelivery, {
+			deliveryId: delivery._id
+		});
+		return true;
+	}
+});
+
+export const processDelivery = internalAction({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number()
+	},
+	returns: v.null(),
+	handler: async (ctx, args) => {
+		const work = await ctx.runQuery(internal.googleHealth.webhook.readDeliveryWork, args);
+		if (work === null) return null;
+		const keyset = await getPublicKeyset(false);
+		if (keyset === null) {
+			await ctx.runMutation(internal.googleHealth.webhook.retryDelivery, {
+				...args,
+				errorCode: 'keyset_unavailable'
+			});
+			return null;
+		}
+		let verified = await verifyGoogleHealthSignature(work.rawBody, work.signature, keyset);
+		if (!verified) {
+			const latestCachedKeyset = await getPublicKeyset(false);
+			if (latestCachedKeyset !== null && latestCachedKeyset !== keyset) {
+				verified = await verifyGoogleHealthSignature(
+					work.rawBody,
+					work.signature,
+					latestCachedKeyset
+				);
+			}
+		}
+		if (!verified) {
+			const refreshedKeyset = await getPublicKeyset(true, keyset);
+			if (refreshedKeyset === null) {
+				await ctx.runMutation(internal.googleHealth.webhook.retryDelivery, {
+					...args,
+					errorCode: 'keyset_unavailable'
+				});
+				return null;
+			}
+			verified = await verifyGoogleHealthSignature(work.rawBody, work.signature, refreshedKeyset);
+		}
+		if (!verified) {
+			await ctx.runMutation(internal.googleHealth.webhook.rejectDelivery, {
+				...args,
+				errorCode: 'invalid_signature'
+			});
+			return null;
 		}
 		let value: unknown;
 		try {
-			value = JSON.parse(args.rawBody);
+			value = JSON.parse(work.rawBody);
 		} catch {
-			return { kind: 'invalid', accepted: 0 };
-		}
-		if (isPlainObject(value) && 'type' in value) {
-			return hasExactKeys(value, ['type']) && value.type === 'verification'
-				? { kind: 'verification', accepted: 0 }
-				: { kind: 'invalid', accepted: 0 };
-		}
-		if (args.signature === undefined || args.signature.length > MAX_SIGNATURE_LENGTH) {
-			return { kind: 'unauthorized', accepted: 0 };
-		}
-		const keyset = await getPublicKeyset(false);
-		if (keyset === null) return { kind: 'unauthorized', accepted: 0 };
-		let verified = await verifyGoogleHealthSignature(args.rawBody, args.signature, keyset);
-		if (!verified) {
-			const refreshedKeyset = await getPublicKeyset(true);
-			verified =
-				refreshedKeyset !== null &&
-				(await verifyGoogleHealthSignature(args.rawBody, args.signature, refreshedKeyset));
-		}
-		if (!verified) {
-			return { kind: 'unauthorized', accepted: 0 };
+			await ctx.runMutation(internal.googleHealth.webhook.rejectDelivery, {
+				...args,
+				errorCode: 'invalid_payload'
+			});
+			return null;
 		}
 		const notifications = parseNotifications(value);
-		if (notifications === null) return { kind: 'invalid', accepted: 0 };
-		const accepted: number = await ctx.runMutation(
-			internal.googleHealth.webhook.queueNotifications,
-			{
-				notifications
+		if (notifications === null) {
+			await ctx.runMutation(internal.googleHealth.webhook.rejectDelivery, {
+				...args,
+				errorCode: 'invalid_payload'
+			});
+			return null;
+		}
+		await ctx.runMutation(internal.googleHealth.webhook.markDeliveryVerified, {
+			...args,
+			notifications
+		});
+		return null;
+	}
+});
+
+export const recoverDeliveryLease = internalMutation({
+	args: {
+		deliveryId: v.id('googleHealthWebhookDeliveries'),
+		leaseVersion: v.number(),
+		leaseExpiresAt: v.number()
+	},
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'verifying' ||
+			delivery.leaseVersion !== args.leaseVersion ||
+			delivery.leaseExpiresAt !== args.leaseExpiresAt ||
+			Date.now() < args.leaseExpiresAt
+		) {
+			return false;
+		}
+		await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+			status: 'queued',
+			leaseExpiresAt: undefined,
+			lastErrorCode: 'verification_lease_expired',
+			updatedAt: Date.now()
+		});
+		await ctx.scheduler.runAfter(0, internal.googleHealth.webhook.dispatchDelivery, {
+			deliveryId: delivery._id
+		});
+		return true;
+	}
+});
+
+export const applyDelivery = internalMutation({
+	args: { deliveryId: v.id('googleHealthWebhookDeliveries') },
+	returns: v.boolean(),
+	handler: async (ctx, args) => {
+		const delivery = await ctx.db.get('googleHealthWebhookDeliveries', args.deliveryId);
+		if (
+			!delivery ||
+			delivery.status !== 'applying' ||
+			delivery.notifications === undefined ||
+			delivery.nextNotificationIndex === undefined
+		) {
+			return false;
+		}
+		const notification = delivery.notifications[delivery.nextNotificationIndex];
+		if (notification === undefined) throw new Error('invalid webhook delivery cursor');
+		const connections = await ctx.db
+			.query('googleHealthConnections')
+			.withIndex('by_healthUserId', (q) => q.eq('healthUserId', notification.healthUserId))
+			.take(2);
+		if (connections.length === 1) {
+			const connection = connections[0];
+			const definition = getMetricDefinition(notification.dataType);
+			if (
+				definition !== null &&
+				definition.webhook &&
+				connection.grantedScopes.includes(definition.scope) &&
+				SYNCABLE_STATUSES.has(connection.status)
+			) {
+				const deleted =
+					notification.operation === 'DELETE' && notification.recordId !== undefined
+						? await deleteNamedGooglePoint(ctx, {
+								connection,
+								dataType: notification.dataType,
+								googleDataPointNames: recordNameCandidates(
+									notification.healthUserId,
+									notification.dataType,
+									notification.recordId
+								)
+							})
+						: false;
+				if (!deleted) {
+					const cursorId = await queueIncrementalCursor(ctx, {
+						connection,
+						dataType: notification.dataType,
+						windowStart: notification.windowStart,
+						windowEnd: notification.windowEnd
+					});
+					await ctx.scheduler.runAfter(0, internal.googleHealth.sync.ensureCursorDispatched, {
+						cursorId,
+						generation: connection.generation,
+						trigger: 'webhook'
+					});
+				}
 			}
-		);
-		return { kind: 'notification', accepted };
+		}
+		const nextNotificationIndex = delivery.nextNotificationIndex + 1;
+		if (nextNotificationIndex >= delivery.notifications.length) {
+			await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+				status: 'complete',
+				notifications: undefined,
+				nextNotificationIndex,
+				updatedAt: Date.now()
+			});
+		} else {
+			await ctx.db.patch('googleHealthWebhookDeliveries', delivery._id, {
+				nextNotificationIndex,
+				updatedAt: Date.now()
+			});
+			await ctx.scheduler.runAfter(0, internal.googleHealth.webhook.applyDelivery, {
+				deliveryId: delivery._id
+			});
+		}
+		return true;
 	}
 });

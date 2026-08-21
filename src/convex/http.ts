@@ -6,10 +6,41 @@ const CALLBACK_PATH = '/google-health/oauth/callback';
 const WEBHOOK_PATH = '/google-health/webhook';
 const IMPORT_PATH = '/dashboard/import';
 const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
+const MAX_WEBHOOK_AUTHORIZATION_BYTES = 4096;
+const MAX_WEBHOOK_SIGNATURE_LENGTH = 4096;
+const WEBHOOK_BODY_TIMEOUT_MS = 5_000;
 
-type RawBodyResult = { kind: 'ok'; value: string } | { kind: 'invalid' } | { kind: 'too_large' };
+type RawBodyResult =
+	| { kind: 'ok'; value: string }
+	| { kind: 'invalid' }
+	| { kind: 'too_large' }
+	| { kind: 'timed_out' };
 
-async function readBoundedRawBody(request: Request): Promise<RawBodyResult> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function webhookAuthorizationMatches(received: string | null): boolean {
+	if (received === null) return false;
+	const expected = env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION;
+	const encoder = new TextEncoder();
+	const actualBytes = encoder.encode(received);
+	const expectedBytes = encoder.encode(expected);
+	if (
+		actualBytes.byteLength === 0 ||
+		actualBytes.byteLength > MAX_WEBHOOK_AUTHORIZATION_BYTES ||
+		actualBytes.byteLength !== expectedBytes.byteLength
+	) {
+		return false;
+	}
+	let difference = 0;
+	for (let index = 0; index < actualBytes.byteLength; index += 1) {
+		difference |= actualBytes[index] ^ expectedBytes[index];
+	}
+	return difference === 0;
+}
+
+export async function readBoundedRawBody(request: Request): Promise<RawBodyResult> {
 	const contentLength = request.headers.get('content-length');
 	if (contentLength !== null) {
 		if (!/^(0|[1-9][0-9]*)$/.test(contentLength)) return { kind: 'invalid' };
@@ -20,9 +51,17 @@ async function readBoundedRawBody(request: Request): Promise<RawBodyResult> {
 	const chunks: Uint8Array[] = [];
 	let total = 0;
 	let complete = false;
+	let timedOut = false;
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timeoutId = setTimeout(() => {
+			timedOut = true;
+			reject(new Error('Google Health webhook body timed out'));
+		}, WEBHOOK_BODY_TIMEOUT_MS);
+	});
 	try {
 		while (true) {
-			const result = await reader.read();
+			const result = await Promise.race([reader.read(), timeout]);
 			if (result.done) {
 				complete = true;
 				break;
@@ -31,7 +70,10 @@ async function readBoundedRawBody(request: Request): Promise<RawBodyResult> {
 			if (total > MAX_WEBHOOK_BODY_BYTES) return { kind: 'too_large' };
 			chunks.push(result.value);
 		}
+	} catch {
+		return { kind: timedOut ? 'timed_out' : 'invalid' };
 	} finally {
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
 		if (complete) reader.releaseLock();
 		else void reader.cancel().catch(() => undefined);
 	}
@@ -128,33 +170,38 @@ http.route({
 	path: WEBHOOK_PATH,
 	method: 'POST',
 	handler: httpAction(async (ctx, request) => {
+		if (!webhookAuthorizationMatches(request.headers.get('authorization'))) {
+			return new Response(null, { status: 401 });
+		}
 		const rawBody = await readBoundedRawBody(request);
 		if (rawBody.kind === 'too_large') return new Response(null, { status: 413 });
+		if (rawBody.kind === 'timed_out') return new Response(null, { status: 408 });
 		if (rawBody.kind === 'invalid') return new Response(null, { status: 400 });
+		let value: unknown;
 		try {
-			const result = await ctx.runAction(internal.googleHealth.webhook.verifyAndQueue, {
+			value = JSON.parse(rawBody.value);
+		} catch {
+			value = undefined;
+		}
+		if (isPlainObject(value) && 'type' in value) {
+			return Object.keys(value).length === 1 && value.type === 'verification'
+				? new Response(null, { status: 201 })
+				: new Response(null, { status: 400 });
+		}
+		const signature = request.headers.get('google-health-api-signature');
+		if (
+			signature === null ||
+			signature.length === 0 ||
+			signature.length > MAX_WEBHOOK_SIGNATURE_LENGTH
+		) {
+			return new Response(null, { status: 401 });
+		}
+		try {
+			await ctx.runMutation(internal.googleHealth.webhook.acceptDelivery, {
 				rawBody: rawBody.value,
-				...(request.headers.get('authorization') === null
-					? {}
-					: { authorization: request.headers.get('authorization') ?? undefined }),
-				...(request.headers.get('google-health-api-signature') === null
-					? {}
-					: { signature: request.headers.get('google-health-api-signature') ?? undefined })
+				signature
 			});
-			switch (result.kind) {
-				case 'verification':
-					return new Response(null, { status: 201 });
-				case 'notification':
-					return new Response(null, { status: 204 });
-				case 'unauthorized':
-					return new Response(null, { status: 401 });
-				case 'invalid':
-					return new Response(null, { status: 400 });
-				default: {
-					const exhaustive: never = result;
-					return exhaustive;
-				}
-			}
+			return new Response(null, { status: 204 });
 		} catch {
 			return new Response(null, { status: 503 });
 		}

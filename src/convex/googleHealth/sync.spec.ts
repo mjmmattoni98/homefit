@@ -796,6 +796,66 @@ describe('Google Health bounded cursor worker', () => {
 		).toBe(false);
 	});
 
+	it('dispatches queued and unscheduled retry cursors while invalidating an older watchdog', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		const t = boundedConvexTest();
+		const { cursorId } = await seedCursor(t, {
+			dataType: 'steps',
+			status: 'active',
+			backfillCompletedTypes: 1
+		});
+		expect(
+			await t.mutation(internal.googleHealth.sync.ensureCursorDispatched, {
+				cursorId,
+				generation: 1,
+				trigger: 'webhook'
+			})
+		).toBe(true);
+		const queued = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(10)
+		}));
+		expect(queued.cursor).toMatchObject({ status: 'queued', dispatchVersion: 1 });
+		expect(queued.scheduled.map((job) => job.name)).toEqual([
+			'googleHealth/sync:runCursor',
+			'googleHealth/sync:ensureCursorDispatched'
+		]);
+
+		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
+			cursorId,
+			generation: 1,
+			trigger: 'webhook'
+		});
+		if (work === null) throw new Error('expected leased work');
+		expect(
+			await t.mutation(internal.googleHealth.sync.failCursor, {
+				cursorId,
+				generation: 1,
+				runId: work.runId,
+				errorCode: 'malformed_request',
+				actionRequired: false
+			})
+		).toBe(true);
+		expect(
+			await t.mutation(internal.googleHealth.sync.ensureCursorDispatched, {
+				cursorId,
+				generation: 1,
+				trigger: 'webhook',
+				expectedDispatchVersion: 1
+			})
+		).toBe(false);
+		expect(
+			await t.mutation(internal.googleHealth.sync.ensureCursorDispatched, {
+				cursorId,
+				generation: 1,
+				trigger: 'webhook'
+			})
+		).toBe(true);
+		const retry = await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId));
+		expect(retry).toMatchObject({ status: 'retry', dispatchVersion: 3 });
+	});
+
 	it('renews a healthy run with an exact lease version so an older watchdog cannot recover it', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));

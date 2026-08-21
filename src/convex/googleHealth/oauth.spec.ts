@@ -185,7 +185,7 @@ describe('Google Health OAuth flow', () => {
 		expect(stored.connection.backfillTotalTypes).toBe(1);
 		expect(stored.cursors.map((cursor) => cursor.dataType)).toEqual(['sleep']);
 		expect(stored.scheduled).toHaveLength(1);
-		expect(stored.scheduled[0].name).toBe('googleHealth/sync:runCursor');
+		expect(stored.scheduled[0].name).toBe('googleHealth/sync:ensureCursorDispatched');
 
 		await t.finishAllScheduledFunctions(vi.runAllTimers);
 		const completed = await t.run(async (ctx) => ({
@@ -258,7 +258,7 @@ describe('Google Health OAuth flow', () => {
 		expect(JSON.stringify(stored.connection)).not.toContain('refresh-token-that-must-be-encrypted');
 		expect(stored.cursors).toHaveLength(40);
 		expect(stored.scheduled).toHaveLength(1);
-		expect(stored.scheduled[0].name).toBe('googleHealth/sync:runCursor');
+		expect(stored.scheduled[0].name).toBe('googleHealth/sync:ensureCursorDispatched');
 	});
 
 	it('rejects a location-only grant before requesting a Health identity', async () => {

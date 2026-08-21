@@ -293,13 +293,22 @@ The importer requests the full range supported by each endpoint and follows pagi
 
 ### Webhook Sync
 
-The webhook endpoint first enforces the configured `Authorization` value and
-then verifies `GOOGLE-HEALTH-API-SIGNATURE` against the raw request body and
-Google's rotating public keyset. It implements Google's two-step subscriber
-verification handshake: an authorized verification request returns `201` and the
-unauthorized challenge fails. A valid data notification is mapped to a HomeFit
-connection by `healthUserId`; the endpoint schedules an incremental worker and
-returns `204 No Content` promptly.
+The webhook endpoint checks the configured `Authorization` value before reading
+a bounded, deadline-limited raw body. It implements Google's two-step subscriber
+verification handshake synchronously: an authorized verification request
+returns `201` and the unauthorized challenge fails. A notification is durably
+deduplicated with its signature and returns `204 No Content` without waiting for
+public-key retrieval, signature verification, or health-data work.
+
+A leased asynchronous delivery worker verifies
+`GOOGLE-HEALTH-API-SIGNATURE` against the exact raw request body and Google's
+rotating public keyset. Keyset outages retain the delivery and retry with bounded
+backoff; malformed payloads and invalid signatures are rejected without
+scheduling synchronization or deletion. Verified batches are validated as
+unknown input and applied one notification per mutation, then mapped to a
+HomeFit connection by `healthUserId`. Delivery leases and scheduled-mutation
+recovery prevent an at-most-once action loss from dropping an accepted
+notification.
 
 The Google Cloud project has one subscriber configured with `AUTOMATIC` policies
 for every webhook-capable readable type. Google creates and removes the
@@ -309,10 +318,15 @@ support are covered by reconciliation.
 
 Notifications are delivery hints rather than the sole source of truth.
 Duplicate notifications are safe, including notifications received while the
-same metric cursor is already running. `UPSERT` notifications reconcile the
-affected type and time range. `DELETE` notifications remove an identifiable
-record when a `recordId` is supplied or reconcile the affected window otherwise,
-then rebuild affected summaries.
+same metric cursor is already running. Incremental cursors have token-bound
+dispatch watchdogs so a lost scheduled action cannot strand queued or retry
+work, while an old watchdog cannot revive a later deterministic failure.
+`UPSERT` notifications reconcile the affected type and time range. `DELETE`
+notifications remove an identifiable record and rebuild its summary without
+immediate reconciliation when the local record exists; interval deletes and
+unmatched record IDs reconcile the affected window. End-selected sleep windows
+advance the exclusive bound by one nanosecond so a session ending exactly at
+the notified end remains eligible.
 
 ### Daily Reconciliation
 
@@ -407,7 +421,9 @@ Hevy and Sleep Cycle CSV data are outside this deletion scope.
 - Encrypt refresh tokens at rest and never expose them through public Convex returns.
 - Validate OAuth return paths against an application-owned allowlist.
 - Hash, expire, and atomically consume OAuth state.
-- Verify webhook authenticity and intended audience before scheduling work.
+- Verify webhook authenticity and intended audience before scheduling any
+  synchronization or deletion work; only durable verification processing may
+  run beforehand.
 - Validate external JSON and enforce conservative record-size limits.
 - Apply ownership checks to every public health query and mutation.
 - Redact secrets and sensitive payload contents from logs and errors.

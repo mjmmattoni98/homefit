@@ -3,6 +3,7 @@
 import { convexTest } from 'convex-test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { internal } from '../_generated/api';
+import { readBoundedRawBody } from '../http';
 import schema from '../schema';
 import { canonicalJson, sha256Base64Url } from './normalize';
 import { getMetricDefinition } from './registry';
@@ -164,7 +165,9 @@ async function seedConnection(t: ReturnType<typeof backend>, healthUserId = 'hea
 				getMetricDefinition('steps')?.scope ??
 					'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
 				getMetricDefinition('exercise')?.scope ??
-					'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly'
+					'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
+				getMetricDefinition('sleep')?.scope ??
+					'https://www.googleapis.com/auth/googlehealth.sleep.readonly'
 			],
 			generation: 1,
 			backfillTotalTypes: 1,
@@ -191,10 +194,27 @@ async function postSigned(
 	});
 }
 
+async function pumpWebhookDelivery(
+	t: ReturnType<typeof backend>,
+	terminalStatuses: readonly string[] = ['complete', 'rejected'],
+	maximumTurns = 220
+) {
+	for (let turn = 0; turn < maximumTurns; turn += 1) {
+		vi.advanceTimersByTime(0);
+		await t.finishInProgressScheduledFunctions();
+		const delivery = await t.run(async (ctx) =>
+			ctx.db.query('googleHealthWebhookDeliveries').order('desc').first()
+		);
+		if (delivery !== null && terminalStatuses.includes(delivery.status)) return delivery;
+	}
+	throw new Error('Google Health webhook delivery did not reach a terminal status');
+}
+
 describe('Google Health webhook HTTP contract', () => {
 	let fixture: Awaited<ReturnType<typeof signer>>;
 
 	beforeEach(async () => {
+		vi.useFakeTimers();
 		vi.stubEnv('GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION', AUTHORIZATION);
 		fixture = await signer();
 		vi.stubGlobal(
@@ -210,6 +230,7 @@ describe('Google Health webhook HTTP contract', () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
@@ -233,11 +254,12 @@ describe('Google Health webhook HTTP contract', () => {
 		expect(unauthorized.status).toBe(401);
 	});
 
-	it('verifies and queues one physical UPSERT notification without returning health data', async () => {
+	it('durably acknowledges before signature verification and queues verified work asynchronously', async () => {
 		const t = backend();
 		const connectionId = await seedConnection(t);
 		const response = await postSigned(t, fixture, notification({}));
-		const stored = await t.run(async (ctx) => ({
+		const accepted = await t.run(async (ctx) => ({
+			delivery: await ctx.db.query('googleHealthWebhookDeliveries').unique(),
 			cursors: await ctx.db
 				.query('googleHealthSyncCursors')
 				.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
@@ -249,7 +271,27 @@ describe('Google Health webhook HTTP contract', () => {
 
 		expect(response.status).toBe(204);
 		expect(await response.text()).toBe('');
-		expect(stored.cursors).toMatchObject([
+		expect(fetch).not.toHaveBeenCalled();
+		expect(accepted.delivery).toMatchObject({ status: 'queued', attempt: 0 });
+		expect(accepted.delivery).not.toHaveProperty('authorization');
+		expect(accepted.cursors).toEqual([]);
+		expect(accepted.scheduled.map((job) => job.name)).toEqual([
+			'googleHealth/webhook:dispatchDelivery'
+		]);
+
+		const delivery = await pumpWebhookDelivery(t);
+		const stored = await t.run(async (ctx) =>
+			ctx.db
+				.query('googleHealthSyncCursors')
+				.withIndex('by_connectionId_and_dataType_and_mode', (q) =>
+					q.eq('connectionId', connectionId).eq('dataType', 'steps').eq('mode', 'incremental')
+				)
+				.take(2)
+		);
+		expect(delivery).toMatchObject({ status: 'complete', nextNotificationIndex: 1 });
+		expect(delivery).not.toHaveProperty('rawBody');
+		expect(delivery).not.toHaveProperty('signature');
+		expect(stored).toMatchObject([
 			{
 				status: 'queued',
 				windowStart: '2026-08-14T10:00:00.000000000Z',
@@ -257,7 +299,6 @@ describe('Google Health webhook HTTP contract', () => {
 				generation: 1
 			}
 		]);
-		expect(stored.scheduled.map((job) => job.name)).toEqual(['googleHealth/sync:runCursor']);
 	});
 
 	it('rejects a signed payload with unknown fields before scheduling', async () => {
@@ -265,12 +306,12 @@ describe('Google Health webhook HTTP contract', () => {
 		await seedConnection(t);
 		const value = notification({});
 		const response = await postSigned(t, fixture, { ...value, unexpected: true });
-		const scheduled = await t.run(async (ctx) =>
-			ctx.db.system.query('_scheduled_functions').take(1)
-		);
+		const delivery = await pumpWebhookDelivery(t);
+		const cursors = await t.run(async (ctx) => ctx.db.query('googleHealthSyncCursors').take(1));
 
-		expect(response.status).toBe(400);
-		expect(scheduled).toEqual([]);
+		expect(response.status).toBe(204);
+		expect(delivery).toMatchObject({ status: 'rejected', lastErrorCode: 'invalid_payload' });
+		expect(cursors).toEqual([]);
 	});
 
 	it('fails closed for wrong authorization, changed bodies, and unavailable signing keys', async () => {
@@ -292,20 +333,24 @@ describe('Google Health webhook HTTP contract', () => {
 			},
 			body: changedBody
 		});
+		const rejected = await pumpWebhookDelivery(t);
 		vi.stubGlobal(
 			'fetch',
 			vi.fn(async () => new Response(null, { status: 503 }))
 		);
 		const unavailableFixture = await signer();
 		const unavailableKeyset = await postSigned(t, unavailableFixture, notification({}));
-		const scheduled = await t.run(async (ctx) =>
-			ctx.db.system.query('_scheduled_functions').take(1)
-		);
+		const retrying = await pumpWebhookDelivery(t, ['retry']);
+		const cursors = await t.run(async (ctx) => ctx.db.query('googleHealthSyncCursors').take(1));
 
 		expect([wrongAuthorization.status, changed.status, unavailableKeyset.status]).toEqual([
-			401, 401, 401
+			401, 204, 204
 		]);
-		expect(scheduled).toEqual([]);
+		expect(rejected).toMatchObject({ status: 'rejected', lastErrorCode: 'invalid_signature' });
+		expect(retrying).toMatchObject({ status: 'retry', lastErrorCode: 'keyset_unavailable' });
+		expect(retrying).toHaveProperty('rawBody');
+		expect(retrying).toHaveProperty('signature');
+		expect(cursors).toEqual([]);
 	});
 
 	it('caches a verified keyset and refreshes only when a signature no longer matches', async () => {
@@ -320,6 +365,7 @@ describe('Google Health webhook HTTP contract', () => {
 			fixture,
 			notification({ healthUserId: 'unknown-health-user' })
 		);
+		await pumpWebhookDelivery(t);
 
 		expect([first.status, second.status]).toEqual([204, 204]);
 		expect(fetch).toHaveBeenCalledTimes(1);
@@ -337,17 +383,79 @@ describe('Google Health webhook HTTP contract', () => {
 			headers: { Authorization: AUTHORIZATION },
 			body: '{"type":"verification","extra":true}'
 		});
+		const unauthorizedOversized = await t.fetch('/google-health/webhook', {
+			method: 'POST',
+			headers: { Authorization: `${AUTHORIZATION}-wrong` },
+			body: 'x'.repeat(256 * 1024 + 1)
+		});
 
 		expect([tooLarge.status, extraVerificationField.status]).toEqual([413, 400]);
+		expect(unauthorizedOversized.status).toBe(401);
+	});
+
+	it('cancels a body stream that exceeds the total read deadline', async () => {
+		const cancelled = vi.fn();
+		const stream = new ReadableStream<Uint8Array>({
+			pull: () => new Promise<void>(() => undefined),
+			cancel: () => {
+				cancelled();
+			}
+		});
+		const requestInit = { method: 'POST', body: stream, duplex: 'half' };
+		const reading = readBoundedRawBody(
+			new Request('https://homefit.example/google-health/webhook', requestInit)
+		);
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(await reading).toEqual({ kind: 'timed_out' });
+		await Promise.resolve();
+		expect(cancelled).toHaveBeenCalledOnce();
+	});
+
+	it('recovers a verifying delivery when its scheduled action is lost', async () => {
+		const t = backend();
+		const response = await postSigned(t, fixture, notification({}));
+		const deliveryId = await t.run(
+			async (ctx) => (await ctx.db.query('googleHealthWebhookDeliveries').unique())?._id
+		);
+		if (deliveryId === undefined) throw new Error('expected accepted delivery');
+		expect(await t.mutation(internal.googleHealth.webhook.dispatchDelivery, { deliveryId })).toBe(
+			true
+		);
+		const leased = await t.run(async (ctx) =>
+			ctx.db.get('googleHealthWebhookDeliveries', deliveryId)
+		);
+		if (leased?.leaseExpiresAt === undefined) throw new Error('expected delivery lease');
+		vi.setSystemTime(leased.leaseExpiresAt);
+		expect(
+			await t.mutation(internal.googleHealth.webhook.recoverDeliveryLease, {
+				deliveryId,
+				leaseVersion: leased.leaseVersion,
+				leaseExpiresAt: leased.leaseExpiresAt
+			})
+		).toBe(true);
+		const recovered = await t.run(async (ctx) =>
+			ctx.db.get('googleHealthWebhookDeliveries', deliveryId)
+		);
+
+		expect(response.status).toBe(204);
+		expect(recovered).toMatchObject({
+			status: 'queued',
+			lastErrorCode: 'verification_lease_expired'
+		});
+		expect(recovered).toHaveProperty('rawBody');
+		expect(recovered).toHaveProperty('signature');
 	});
 });
 
 describe('Google Health webhook queue coalescing', () => {
 	beforeEach(() => {
+		vi.useFakeTimers();
 		vi.stubEnv('GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION', AUTHORIZATION);
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
@@ -420,6 +528,7 @@ describe('Google Health webhook queue coalescing', () => {
 				intervals: [physicalInterval('2026-08-14T10:30:00Z', '2026-08-14T12:00:00Z')]
 			})
 		);
+		await pumpWebhookDelivery(t);
 		const beforeFinish = await t.run(async (ctx) =>
 			ctx.db.get('googleHealthSyncCursors', cursorId)
 		);
@@ -448,7 +557,9 @@ describe('Google Health webhook queue coalescing', () => {
 			windowEnd: '2026-08-14T12:00:00.000000000Z'
 		});
 		expect(afterFinish.cursor).not.toHaveProperty('pendingWindowStart');
-		expect(afterFinish.scheduled.map((job) => job.name)).toContain('googleHealth/sync:runCursor');
+		expect(afterFinish.scheduled.map((job) => job.name)).toContain(
+			'googleHealth/sync:ensureCursorDispatched'
+		);
 	});
 
 	it('clears matching stale incremental ownership before queueing a reconnected generation', async () => {
@@ -506,6 +617,7 @@ describe('Google Health webhook queue coalescing', () => {
 		});
 
 		const response = await postSigned(t, fixture, notification({}));
+		await pumpWebhookDelivery(t);
 		const stored = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -518,7 +630,9 @@ describe('Google Health webhook queue coalescing', () => {
 		expect(stored.connection).not.toHaveProperty('activeSyncRunId');
 		expect(stored.cursor).toMatchObject({ status: 'queued', generation: 2 });
 		expect(stored.run).toMatchObject({ status: 'failed', errorCode: 'stale_generation' });
-		expect(stored.scheduled.map((job) => job.name)).toEqual(['googleHealth/sync:runCursor']);
+		expect(stored.scheduled.map((job) => job.name)).toContain(
+			'googleHealth/sync:ensureCursorDispatched'
+		);
 	});
 });
 
@@ -526,6 +640,7 @@ describe('Google Health webhook delivery variants', () => {
 	let fixture: Awaited<ReturnType<typeof signer>>;
 
 	beforeEach(async () => {
+		vi.useFakeTimers();
 		vi.stubEnv('GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION', AUTHORIZATION);
 		fixture = await signer();
 		vi.stubGlobal(
@@ -535,6 +650,7 @@ describe('Google Health webhook delivery variants', () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
@@ -545,14 +661,22 @@ describe('Google Health webhook delivery variants', () => {
 		await seedConnection(t);
 		const batch = Array.from({ length: 99 }, () => notification({}));
 		const accepted = await postSigned(t, fixture, batch);
+		const acceptedDelivery = await pumpWebhookDelivery(t);
 		const tooLarge = await postSigned(t, fixture, [...batch, notification({})]);
+		const rejectedDelivery = await pumpWebhookDelivery(t);
 		const unknown = await postSigned(
 			t,
 			fixture,
 			notification({ healthUserId: 'unknown-health-user' })
 		);
+		const unknownDelivery = await pumpWebhookDelivery(t);
 
-		expect([accepted.status, tooLarge.status, unknown.status]).toEqual([204, 400, 204]);
+		expect([accepted.status, tooLarge.status, unknown.status]).toEqual([204, 204, 204]);
+		expect([acceptedDelivery.status, rejectedDelivery.status, unknownDelivery.status]).toEqual([
+			'complete',
+			'rejected',
+			'complete'
+		]);
 	});
 
 	it('uses civil bounds for civil-only metrics and exclusive dates for daily rollups', async () => {
@@ -568,6 +692,7 @@ describe('Google Health webhook delivery variants', () => {
 				intervals: [civilInterval('2026-08-14T10:00:00', '2026-08-14T11:00:00')]
 			})
 		]);
+		await pumpWebhookDelivery(t);
 		const cursors = await t.run(async (ctx) =>
 			ctx.db
 				.query('googleHealthSyncCursors')
@@ -590,7 +715,7 @@ describe('Google Health webhook delivery variants', () => {
 		});
 	});
 
-	it('deletes an identifiable record, queues its reconciliation, and rejects non-webhook types', async () => {
+	it('deletes an identifiable record without reconciliation and rejects non-webhook types', async () => {
 		const t = backend();
 		const connectionId = await seedConnection(t);
 		const recordId = 'step-record-123';
@@ -631,11 +756,13 @@ describe('Google Health webhook delivery variants', () => {
 			return dataPointId;
 		});
 		const deleted = await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
+		await pumpWebhookDelivery(t);
 		const unsupported = await postSigned(
 			t,
 			fixture,
 			notification({ dataType: 'electrocardiogram' })
 		);
+		const unsupportedDelivery = await pumpWebhookDelivery(t);
 		const stored = await t.run(async (ctx) => ({
 			point: await ctx.db.get('healthDataPoints', dataPointId),
 			rebuilds: await ctx.db
@@ -643,11 +770,131 @@ describe('Google Health webhook delivery variants', () => {
 				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
 					q.eq('userId', 'clerk|user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
 				)
-				.take(2)
+				.take(2),
+			cursors: await ctx.db.query('googleHealthSyncCursors').take(1)
 		}));
 
-		expect([deleted.status, unsupported.status]).toEqual([204, 400]);
+		expect([deleted.status, unsupported.status]).toEqual([204, 204]);
+		expect(unsupportedDelivery).toMatchObject({
+			status: 'rejected',
+			lastErrorCode: 'invalid_payload'
+		});
 		expect(stored.point).toBeNull();
 		expect(stored.rebuilds).toHaveLength(1);
+		expect(stored.cursors).toEqual([]);
+	});
+
+	it('falls back to interval reconciliation when a named delete has no local match', async () => {
+		const t = backend();
+		await seedConnection(t);
+		const response = await postSigned(
+			t,
+			fixture,
+			notification({ operation: 'DELETE', recordId: 'not-imported' })
+		);
+		await pumpWebhookDelivery(t);
+		const cursor = await t.run(async (ctx) => ctx.db.query('googleHealthSyncCursors').unique());
+
+		expect(response.status).toBe(204);
+		expect(cursor).toMatchObject({ dataType: 'steps', status: 'queued' });
+	});
+
+	it.each([
+		[
+			'physical',
+			physicalInterval('2026-08-14T22:00:00Z', '2026-08-15T06:00:00Z'),
+			'2026-08-14T22:00:00.000000000Z',
+			'2026-08-15T06:00:00.000000001Z'
+		],
+		[
+			'civil',
+			civilInterval('2026-08-14T22:00:00', '2026-08-15T06:00:00'),
+			'2026-08-14T22:00:00.000000000',
+			'2026-08-15T06:00:00.000000001'
+		]
+	] as const)(
+		'widens the official overnight sleep %s end-selector window by one nanosecond',
+		async (_axis, interval, windowStart, windowEnd) => {
+			const t = backend();
+			await seedConnection(t);
+			const response = await postSigned(
+				t,
+				fixture,
+				notification({ dataType: 'sleep', intervals: [interval] })
+			);
+			await pumpWebhookDelivery(t);
+			const cursor = await t.run(async (ctx) => ctx.db.query('googleHealthSyncCursors').unique());
+
+			expect(response.status).toBe(204);
+			expect(cursor).toMatchObject({ dataType: 'sleep', windowStart, windowEnd });
+		}
+	);
+
+	it('applies 99 maximum-size named deletes in bounded transactions', async () => {
+		const t = backend();
+		const connectionId = await seedConnection(t);
+		const largePayload = 'x'.repeat(749 * 1024);
+		const batch: unknown[] = [];
+		for (let index = 0; index < 99; index += 1) {
+			const recordId = `large-step-${index}`;
+			const fullName = `users/health-user-a/dataTypes/steps/dataPoints/${recordId}`;
+			const recordKey = sha256Base64Url(
+				`steps\n${canonicalJson({ kind: 'named', name: fullName })}`
+			);
+			await t.run(async (ctx) => {
+				const dataPointId = await ctx.db.insert('healthDataPoints', {
+					connectionId,
+					userId: 'clerk|user-a',
+					provider: 'google_health',
+					recordKey,
+					googleDataPointName: fullName,
+					dataType: 'steps',
+					category: 'activity',
+					recordTimestamp: Date.parse('2026-08-14T10:30:00Z'),
+					localDate: '2026-08-14',
+					physicalCoverageKey: '2026-08-14T10:30:00.000000000Z',
+					primaryValue: index,
+					primaryUnit: 'steps',
+					payloadDigest: `digest-${index}`,
+					payloadJson: largePayload,
+					lastSeenSyncId: 'old',
+					seenEpoch: 1
+				});
+				await ctx.db.insert('healthDataPointContributions', {
+					connectionId,
+					dataPointId,
+					userId: 'clerk|user-a',
+					recordKey,
+					dataType: 'steps',
+					category: 'activity',
+					localDate: '2026-08-14',
+					recordTimestamp: Date.parse('2026-08-14T10:30:00Z'),
+					primaryValue: index,
+					physicalCoverageKey: '2026-08-14T10:30:00.000000000Z',
+					seenEpoch: 1
+				});
+			});
+			batch.push(notification({ operation: 'DELETE', recordId }));
+		}
+
+		const response = await postSigned(t, fixture, batch);
+		const delivery = await pumpWebhookDelivery(t);
+		const remaining = await t.run(async (ctx) => ({
+			point: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_connectionId', (q) => q.eq('connectionId', connectionId))
+				.first(),
+			contribution: await ctx.db
+				.query('healthDataPointContributions')
+				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+					q.eq('userId', 'clerk|user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+				)
+				.first(),
+			cursor: await ctx.db.query('googleHealthSyncCursors').first()
+		}));
+
+		expect(response.status).toBe(204);
+		expect(delivery).toMatchObject({ status: 'complete', nextNotificationIndex: 99 });
+		expect(remaining).toEqual({ point: null, contribution: null, cursor: null });
 	});
 });

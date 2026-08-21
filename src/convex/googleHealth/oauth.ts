@@ -99,7 +99,7 @@ export const completeOAuth = internalAction({
 				connectionId: connection.connectionId
 			});
 			if (initialized.firstCursorId !== null) {
-				await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+				await ctx.scheduler.runAfter(0, internal.googleHealth.sync.ensureCursorDispatched, {
 					cursorId: initialized.firstCursorId,
 					generation: connection.generation,
 					trigger: 'oauth'

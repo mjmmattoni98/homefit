@@ -19,7 +19,7 @@
 - Request only these read-only scopes: `activity_and_fitness`, `ecg`, `health_metrics_and_measurements`, `irn`, `location`, `nutrition`, and `sleep`.
 - Import all 40 readable types listed in Task 2; exclude write-only menstrual-period, moods, ovulation-test, and symptoms.
 - Treat automatic Google subscriptions as project-level configuration; do not create or persist per-user subscription records.
-- A Google webhook must pass the configured `Authorization` value and Tink-prefixed ECDSA signature verification before work is scheduled.
+- A Google webhook must pass the configured `Authorization` value before durable acceptance, and must pass Tink-prefixed ECDSA signature verification before any synchronization or deletion work is scheduled.
 - Keep refresh tokens, OAuth client secrets, encryption keys, webhook secrets, raw payloads, and Google account identifiers out of browser responses and logs.
 - Disconnect retains data; only the separately confirmed delete flow removes Google-imported records.
 - Add all user-facing text to both `messages/en.json` and `messages/es.json`.
@@ -45,7 +45,7 @@
 - `src/convex/googleHealth/oauth.ts` — authenticated begin action and internal callback action.
 - `src/convex/googleHealth/sync.ts` — bounded backfill/incremental Node actions and retry classification.
 - `src/convex/googleHealth/webhookSignature.ts` — Google Tink prefix/public-keyset parsing and ECDSA verification.
-- `src/convex/googleHealth/webhook.ts` — authorization, handshake, payload validation, health-user mapping, and scheduling.
+- `src/convex/googleHealth/webhook.ts` — durable notification delivery, signature processing, payload validation, health-user mapping, and scheduling.
 - `src/convex/googleHealth/account.ts` — manual sync, disconnect, revoke, and bounded destructive deletion.
 - `src/convex/googleHealth/maintenance.ts` — daily reconciliation and run/OAuth-state retention batches.
 - `src/convex/http.ts` — OAuth callback and webhook routes.
@@ -659,10 +659,15 @@ git commit -m "feat: import Google Health history"
 - Create: `src/convex/googleHealth/webhook.ts`
 - Create: `src/convex/googleHealth/webhook.spec.ts`
 - Modify: `src/convex/http.ts`
+- Modify: `src/convex/schema.ts`
+- Modify: `src/convex/googleHealth/sync.ts`
+- Modify: `src/convex/googleHealth/sync.spec.ts`
+- Modify: `src/convex/googleHealth/oauth.ts`
+- Modify: `src/convex/googleHealth/oauth.spec.ts`
 
 **Interfaces:**
 - Produces: `verifyGoogleHealthSignature(rawBody, signatureHeader, keyset): boolean`.
-- Produces internal action `verifyAndQueue({ rawBody, authorization, signature })` returning `{ kind: "verification" | "notification"; accepted: number }`.
+- Produces durable delivery mutations and a leased asynchronous signature-verification action; scheduled arguments never contain the authorization secret.
 - Produces `POST /google-health/webhook`.
 
 - [ ] **Step 1: Write failing signature tests**
@@ -671,7 +676,7 @@ Generate an ECDSA P-256 keypair in the test, encode its public key as the Google
 
 - [ ] **Step 2: Write failing webhook contract tests**
 
-Cover the authorized `{"type":"verification"}` handshake returning 201, unauthorized challenge returning 401, a valid wrapped notification, a defensively accepted top-level batch up to 99, unknown `healthUserId`, unsupported data type, `UPSERT`, interval-only `DELETE`, identifiable `DELETE` with `recordId`, duplicate delivery, and a notification arriving while its cursor is already running. Assert no health payload is logged or returned.
+Cover the authorized `{"type":"verification"}` handshake returning 201, unauthorized challenge returning 401 before body consumption, immediate durable 204 acceptance, a total body-read deadline, leased-delivery recovery, keyset-outage retry, a valid wrapped notification, a defensively accepted top-level batch up to 99, unknown `healthUserId`, unsupported data type, `UPSERT`, interval-only `DELETE`, identifiable `DELETE` with `recordId`, duplicate delivery, and a notification arriving while its cursor is already running. Include 99 named deletes against approximately 749 KiB records under transaction limits and official physical/civil overnight sleep bounds. Assert no health payload is logged or returned.
 
 - [ ] **Step 3: Run webhook tests and verify failure**
 
@@ -683,15 +688,15 @@ Expected: FAIL because webhook modules are absent.
 
 - [ ] **Step 4: Implement Tink signature verification**
 
-Fetch `https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json` with bounded response bytes and a timeout. Decode the first signature byte and four-byte key ID, select a matching `ENABLED`/`TINK`/`ASYMMETRIC_PUBLIC` key with `type.googleapis.com/google.crypto.tink.EcdsaPublicKey`, parse length-delimited protobuf fields 3 and 4 from `keyData.value`, normalize each current Tink sign-padded 33-byte coordinate only when its first byte is zero, create a P-256 JWK (`kty: "EC"`, `crv: "P-256"`, base64url `x`/`y`), and verify the remaining DER signature against the exact UTF-8 raw body with SHA-256. Treat all parsing/fetch failures as unauthorized; do not accept an unverified fallback.
+Fetch `https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json` with bounded response bytes and a timeout. Decode the first signature byte and four-byte key ID, select a matching `ENABLED`/`TINK`/`ASYMMETRIC_PUBLIC` key with `type.googleapis.com/google.crypto.tink.EcdsaPublicKey`, parse length-delimited protobuf fields 3 and 4 from `keyData.value`, normalize each current Tink sign-padded 33-byte coordinate only when its first byte is zero, create a P-256 JWK (`kty: "EC"`, `crv: "P-256"`, base64url `x`/`y`), and verify the remaining DER signature against the exact UTF-8 raw body with SHA-256. Reject invalid signatures and malformed keysets without an unverified fallback; retry durably accepted deliveries when the rotating keyset is unavailable.
 
 - [ ] **Step 5: Implement webhook validation and scheduling**
 
-Compare equal-length byte buffers for the complete `Authorization` header and `env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION` using `timingSafeEqual`; reject unequal lengths before calling it. Parse verification only after authorization. Validate the official `{ data: ... }` notification wrapper as unknown input: version `"1"`, bounded client-provided subscription name and healthUserId, webhook-capable registry dataType, operation `UPSERT|DELETE`, optional bounded `recordId`, and one or more bounded physical/civil intervals. Query the connection through `by_healthUserId`, choose the clock supported by that metric, and coalesce ranges through incremental cursor state. A notification received while a cursor is running goes into bounded pending-window state; guarded finalization atomically promotes that window so active work cannot overwrite or lose the notification. Daily-rollup types use exclusive civil-date bounds. Schedule workers with trigger `webhook`.
+Compare equal-length byte buffers for the complete `Authorization` header and `env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`; reject unequal lengths first. Parse verification only after authorization. Persist the bounded raw body and signature in a private deduplicated delivery row, schedule a mutation dispatcher, and return 204. The dispatcher leases an action, pairs it with lease recovery, retries keyset outages, and only stores normalized notifications after signature verification. Validate the official `{ data: ... }` wrapper as unknown input: version `"1"`, bounded client-provided subscription name and healthUserId, webhook-capable registry dataType, operation `UPSERT|DELETE`, optional bounded `recordId`, and one or more bounded physical/civil intervals. Apply one notification per mutation so a 99-record delete batch cannot read oversized health records in one transaction. Query connections through `by_healthUserId`, choose the metric-supported clock, widen closed-open end-selector bounds minimally, and coalesce ranges through incremental cursor state. A notification received while a cursor is running goes into bounded pending-window state; guarded finalization atomically promotes that window so active work cannot overwrite or lose the notification. Daily-rollup types use exclusive civil-date bounds. A successful named delete stops after deletion and summary enqueue; only interval deletes and unmatched IDs reconcile. Schedule workers with trigger `webhook` through a token-bound mutation watchdog.
 
 - [ ] **Step 6: Register the raw-body HTTP route**
 
-Read `await request.text()` exactly once and reject bodies beyond the webhook byte limit. Unauthorized requests, including Google's second verification challenge, return 401. Authorized verification returns 201. A verified notification schedules work and returns 204; malformed or invalid signatures return 401/400 without scheduling.
+Check authorization before touching the request stream. Read the raw body once with one total deadline, cancellation/error handling, fatal UTF-8 decoding, and a byte cap. Unauthorized requests, including Google's second verification challenge, return 401. Authorized verification returns 201. Authenticated notifications are durably accepted and return 204 before key retrieval or verification; asynchronous invalid signatures and malformed payloads become rejected delivery rows and never schedule health-data work.
 
 - [ ] **Step 7: Run webhook tests and type checking**
 
@@ -705,7 +710,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit webhooks**
 
 ```bash
-git add src/convex/googleHealth/webhookSignature.ts src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.ts src/convex/googleHealth/webhook.spec.ts src/convex/http.ts
+git add src/convex/googleHealth/webhookSignature.ts src/convex/googleHealth/webhookSignature.spec.ts src/convex/googleHealth/webhook.ts src/convex/googleHealth/webhook.spec.ts src/convex/googleHealth/sync.ts src/convex/googleHealth/sync.spec.ts src/convex/googleHealth/oauth.ts src/convex/googleHealth/oauth.spec.ts src/convex/schema.ts src/convex/http.ts
 git commit -m "feat: sync Google Health webhooks"
 ```
 
@@ -741,7 +746,7 @@ Expected: FAIL because account and maintenance functions are absent.
 
 - [ ] **Step 4: Implement lifecycle actions**
 
-`syncNow` requires an active/backfilling connection and coalesces existing queued work. `disconnect` decrypts the token in a Node action, best-effort POSTs to Google revoke, and always invokes an internal mutation that increments generation, clears token fields, clears retry fields, and sets `disconnected`. `deleteImportedData` validates the exact confirmation, disconnects, sets `deleting`, and schedules indexed batches in this order: summary dependencies, compact point contributions, summary rebuild state, points, summaries, cursors, sync runs, OAuth states, connection.
+`syncNow` requires an active/backfilling connection and coalesces existing queued work. `disconnect` decrypts the token in a Node action, best-effort POSTs to Google revoke, and always invokes an internal mutation that increments generation, clears token fields, clears retry fields, and sets `disconnected`. `deleteImportedData` validates the exact confirmation, disconnects, sets `deleting`, and schedules indexed batches in this order: summary dependencies, compact point contributions, summary rebuild state, points, summaries, cursors, sync runs, OAuth states, connection. Operational cleanup also removes terminal webhook delivery rows after their retention window; accepted deliveries clear raw bodies, signatures, and normalized notifications as soon as processing reaches a terminal state.
 
 - [ ] **Step 5: Implement cron coordinators**
 

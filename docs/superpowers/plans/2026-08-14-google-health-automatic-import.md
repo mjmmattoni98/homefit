@@ -671,7 +671,7 @@ Generate an ECDSA P-256 keypair in the test, encode its public key as the Google
 
 - [ ] **Step 2: Write failing webhook contract tests**
 
-Cover the authorized `{"type":"verification"}` handshake, unauthorized challenge returning 401, valid single notification, a batch up to 99, unknown `healthUserId`, unsupported data type, `UPSERT`, `DELETE`, and duplicate delivery. Assert no health payload is logged or returned.
+Cover the authorized `{"type":"verification"}` handshake returning 201, unauthorized challenge returning 401, a valid wrapped notification, a defensively accepted top-level batch up to 99, unknown `healthUserId`, unsupported data type, `UPSERT`, interval-only `DELETE`, identifiable `DELETE` with `recordId`, duplicate delivery, and a notification arriving while its cursor is already running. Assert no health payload is logged or returned.
 
 - [ ] **Step 3: Run webhook tests and verify failure**
 
@@ -683,15 +683,15 @@ Expected: FAIL because webhook modules are absent.
 
 - [ ] **Step 4: Implement Tink signature verification**
 
-Fetch `https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json`. Decode the first signature byte and four-byte key ID, select an enabled key with `type.googleapis.com/google.crypto.tink.EcdsaPublicKey`, parse length-delimited protobuf fields 3 and 4 from `keyData.value`, create a P-256 JWK (`kty: "EC"`, `crv: "P-256"`, base64url `x`/`y`), and verify the remaining DER signature against the exact UTF-8 raw body with SHA-256. Treat all parsing/fetch failures as unauthorized; do not accept an unverified fallback.
+Fetch `https://www.gstatic.com/googlehealthapi/webhooks/webhooks_public_keyset.json` with bounded response bytes and a timeout. Decode the first signature byte and four-byte key ID, select a matching `ENABLED`/`TINK`/`ASYMMETRIC_PUBLIC` key with `type.googleapis.com/google.crypto.tink.EcdsaPublicKey`, parse length-delimited protobuf fields 3 and 4 from `keyData.value`, normalize each current Tink sign-padded 33-byte coordinate only when its first byte is zero, create a P-256 JWK (`kty: "EC"`, `crv: "P-256"`, base64url `x`/`y`), and verify the remaining DER signature against the exact UTF-8 raw body with SHA-256. Treat all parsing/fetch failures as unauthorized; do not accept an unverified fallback.
 
 - [ ] **Step 5: Implement webhook validation and scheduling**
 
-Compare equal-length byte buffers for the complete `Authorization` header and `env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION` using `timingSafeEqual`; reject unequal lengths before calling it. Parse verification only after authorization. Validate notification fields as unknown input: version string, healthUserId, supported registry dataType, operation `UPSERT|DELETE`, and one or more bounded physical/civil intervals. Query connection through `by_healthUserId`, coalesce identical intervals through cursor state, and schedule incremental workers with trigger `webhook`.
+Compare equal-length byte buffers for the complete `Authorization` header and `env.GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION` using `timingSafeEqual`; reject unequal lengths before calling it. Parse verification only after authorization. Validate the official `{ data: ... }` notification wrapper as unknown input: version `"1"`, bounded client-provided subscription name and healthUserId, webhook-capable registry dataType, operation `UPSERT|DELETE`, optional bounded `recordId`, and one or more bounded physical/civil intervals. Query the connection through `by_healthUserId`, choose the clock supported by that metric, and coalesce ranges through incremental cursor state. A notification received while a cursor is running goes into bounded pending-window state; guarded finalization atomically promotes that window so active work cannot overwrite or lose the notification. Daily-rollup types use exclusive civil-date bounds. Schedule workers with trigger `webhook`.
 
 - [ ] **Step 6: Register the raw-body HTTP route**
 
-Read `await request.text()` exactly once. Unauthorized requests, including Google's second verification challenge, return 401. Authorized verification returns 200. A verified notification schedules work and returns 204; malformed or invalid signatures return 401/400 without scheduling.
+Read `await request.text()` exactly once and reject bodies beyond the webhook byte limit. Unauthorized requests, including Google's second verification challenge, return 401. Authorized verification returns 201. A verified notification schedules work and returns 204; malformed or invalid signatures return 401/400 without scheduling.
 
 - [ ] **Step 7: Run webhook tests and type checking**
 

@@ -296,7 +296,7 @@ The importer requests the full range supported by each endpoint and follows pagi
 The webhook endpoint first enforces the configured `Authorization` value and
 then verifies `GOOGLE-HEALTH-API-SIGNATURE` against the raw request body and
 Google's rotating public keyset. It implements Google's two-step subscriber
-verification handshake: an authorized verification request succeeds and the
+verification handshake: an authorized verification request returns `201` and the
 unauthorized challenge fails. A valid data notification is mapped to a HomeFit
 connection by `healthUserId`; the endpoint schedules an incremental worker and
 returns `204 No Content` promptly.
@@ -308,10 +308,11 @@ those automatic subscription resources individually. Types without webhook
 support are covered by reconciliation.
 
 Notifications are delivery hints rather than the sole source of truth.
-Duplicate notifications are safe. `UPSERT` notifications reconcile the affected
-type and time range. `DELETE` notifications remove an identifiable record when a
-name is supplied or reconcile the affected window otherwise, then rebuild
-affected summaries.
+Duplicate notifications are safe, including notifications received while the
+same metric cursor is already running. `UPSERT` notifications reconcile the
+affected type and time range. `DELETE` notifications remove an identifiable
+record when a `recordId` is supplied or reconcile the affected window otherwise,
+then rebuild affected summaries.
 
 ### Daily Reconciliation
 

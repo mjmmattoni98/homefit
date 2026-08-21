@@ -784,6 +784,100 @@ describe('Google Health webhook delivery variants', () => {
 		expect(stored.cursors).toEqual([]);
 	});
 
+	it('does not let an earlier name tombstone hide a live alternate name representation', async () => {
+		const t = backend();
+		const connectionId = await seedConnection(t);
+		const recordId = 'alternate-name-record';
+		const firstName = `users/health-user-a/dataTypes/steps/dataPoints/${recordId}`;
+		const alternateName = `users/me/dataTypes/steps/dataPoints/${recordId}`;
+		const firstRecordKey = sha256Base64Url(
+			`steps\n${canonicalJson({ kind: 'named', name: firstName })}`
+		);
+		const alternateRecordKey = sha256Base64Url(
+			`steps\n${canonicalJson({ kind: 'named', name: alternateName })}`
+		);
+		const dataPointId = await t.run(async (ctx) => {
+			await ctx.db.patch('googleHealthConnections', connectionId, {
+				reconciliationEpoch: 4
+			});
+			await ctx.db.insert('googleHealthRecordTombstones', {
+				connectionId,
+				userId: 'clerk|user-a',
+				generation: 1,
+				dataType: 'steps',
+				recordKey: firstRecordKey,
+				blockedThroughEpoch: 2,
+				updatedAt: Date.now() - 1_000
+			});
+			const dataPointId = await ctx.db.insert('healthDataPoints', {
+				connectionId,
+				userId: 'clerk|user-a',
+				provider: 'google_health',
+				recordKey: alternateRecordKey,
+				googleDataPointName: alternateName,
+				dataType: 'steps',
+				category: 'activity',
+				recordTimestamp: Date.parse('2026-08-14T10:30:00Z'),
+				localDate: '2026-08-14',
+				physicalCoverageKey: '2026-08-14T10:30:00.000000000Z',
+				primaryValue: 10,
+				primaryUnit: 'steps',
+				payloadDigest: 'alternate-name-digest',
+				payloadJson: '{}',
+				lastSeenSyncId: 'older-sync',
+				seenEpoch: 3
+			});
+			await ctx.db.insert('healthDataPointContributions', {
+				connectionId,
+				dataPointId,
+				userId: 'clerk|user-a',
+				recordKey: alternateRecordKey,
+				dataType: 'steps',
+				category: 'activity',
+				localDate: '2026-08-14',
+				recordTimestamp: Date.parse('2026-08-14T10:30:00Z'),
+				primaryValue: 10,
+				physicalCoverageKey: '2026-08-14T10:30:00.000000000Z',
+				seenEpoch: 3
+			});
+			return dataPointId;
+		});
+
+		const response = await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
+		await pumpWebhookDelivery(t);
+		const stored = await t.run(async (ctx) => ({
+			point: await ctx.db.get('healthDataPoints', dataPointId),
+			contribution: await ctx.db
+				.query('healthDataPointContributions')
+				.withIndex('by_dataPointId', (q) => q.eq('dataPointId', dataPointId))
+				.unique(),
+			tombstones: await ctx.db
+				.query('googleHealthRecordTombstones')
+				.withIndex('by_connectionId_and_generation_and_recordKey', (q) =>
+					q.eq('connectionId', connectionId).eq('generation', 1)
+				)
+				.take(4),
+			rebuilds: await ctx.db
+				.query('healthSummaryRebuilds')
+				.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+					q.eq('userId', 'clerk|user-a').eq('dataType', 'steps').eq('localDate', '2026-08-14')
+				)
+				.take(2),
+			cursors: await ctx.db.query('googleHealthSyncCursors').take(1)
+		}));
+
+		expect(response.status).toBe(204);
+		expect(stored.point).toBeNull();
+		expect(stored.contribution).toBeNull();
+		expect(stored.tombstones).toHaveLength(2);
+		expect(new Set(stored.tombstones.map((tombstone) => tombstone.recordKey))).toEqual(
+			new Set([firstRecordKey, alternateRecordKey])
+		);
+		expect(stored.tombstones.every((tombstone) => tombstone.blockedThroughEpoch === 4)).toBe(true);
+		expect(stored.rebuilds).toHaveLength(1);
+		expect(stored.cursors).toEqual([]);
+	});
+
 	it('bounds a named delete to its active epoch and proactively clears it for a named upsert', async () => {
 		const t = backend();
 		const connectionId = await seedConnection(t);

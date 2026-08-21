@@ -318,6 +318,12 @@ export async function deleteNamedGooglePoint(
 			);
 		}
 	}
+	const contributions = new Map<
+		Id<'healthDataPointContributions'>,
+		Doc<'healthDataPointContributions'>
+	>();
+	const tombstonedRecordKeys = new Set<string>();
+	let matched = false;
 	for (const googleDataPointName of new Set(args.googleDataPointNames)) {
 		const recordKey = sha256Base64Url(
 			`${args.dataType}\n${canonicalJson({ kind: 'named', name: googleDataPointName })}`
@@ -332,13 +338,14 @@ export async function deleteNamedGooglePoint(
 			)
 			.unique();
 		if (tombstone !== null) {
+			matched = true;
+			tombstonedRecordKeys.add(recordKey);
 			if (tombstone.blockedThroughEpoch < blockedThroughEpoch) {
 				await ctx.db.patch('googleHealthRecordTombstones', tombstone._id, {
 					blockedThroughEpoch,
 					updatedAt: Date.now()
 				});
 			}
-			return true;
 		}
 		const contribution = await ctx.db
 			.query('healthDataPointContributions')
@@ -353,17 +360,37 @@ export async function deleteNamedGooglePoint(
 		) {
 			continue;
 		}
-		await ctx.db.delete('healthDataPoints', contribution.dataPointId);
+		matched = true;
+		contributions.set(contribution._id, contribution);
+	}
+	const deletedPointIds = new Set<Id<'healthDataPoints'>>();
+	for (const contribution of contributions.values()) {
+		if (!tombstonedRecordKeys.has(contribution.recordKey)) {
+			await ctx.db.insert('googleHealthRecordTombstones', {
+				connectionId: args.connection._id,
+				userId: args.connection.userId,
+				generation: args.connection.generation,
+				dataType: args.dataType,
+				recordKey: contribution.recordKey,
+				blockedThroughEpoch,
+				updatedAt: Date.now()
+			});
+			tombstonedRecordKeys.add(contribution.recordKey);
+		}
+		if (!deletedPointIds.has(contribution.dataPointId)) {
+			const point = await ctx.db.get('healthDataPoints', contribution.dataPointId);
+			if (
+				point !== null &&
+				point.connectionId === args.connection._id &&
+				point.userId === args.connection.userId &&
+				point.dataType === args.dataType &&
+				point.recordKey === contribution.recordKey
+			) {
+				await ctx.db.delete('healthDataPoints', point._id);
+				deletedPointIds.add(point._id);
+			}
+		}
 		await ctx.db.delete('healthDataPointContributions', contribution._id);
-		await ctx.db.insert('googleHealthRecordTombstones', {
-			connectionId: args.connection._id,
-			userId: args.connection.userId,
-			generation: args.connection.generation,
-			dataType: args.dataType,
-			recordKey,
-			blockedThroughEpoch,
-			updatedAt: Date.now()
-		});
 		await enqueueSummary(ctx, {
 			connectionId: args.connection._id,
 			userId: args.connection.userId,
@@ -371,9 +398,8 @@ export async function deleteNamedGooglePoint(
 			category: contribution.category,
 			localDate: contribution.localDate
 		});
-		return true;
 	}
-	return false;
+	return matched;
 }
 
 export async function clearNamedGooglePointTombstones(

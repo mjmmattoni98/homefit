@@ -110,6 +110,8 @@ export default defineSchema({
 		pageToken: v.optional(v.string()),
 		windowStart: v.optional(v.string()),
 		windowEnd: v.optional(v.string()),
+		pendingWindowStart: v.optional(v.string()),
+		pendingWindowEnd: v.optional(v.string()),
 		watermark: v.optional(v.string()),
 		syncId: v.string(),
 		attempt: v.number(),

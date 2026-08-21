@@ -17,6 +17,8 @@ import type * as googleHealth_records from "../googleHealth/records.js";
 import type * as googleHealth_registry from "../googleHealth/registry.js";
 import type * as googleHealth_sync from "../googleHealth/sync.js";
 import type * as googleHealth_validators from "../googleHealth/validators.js";
+import type * as googleHealth_webhook from "../googleHealth/webhook.js";
+import type * as googleHealth_webhookSignature from "../googleHealth/webhookSignature.js";
 import type * as helpers from "../helpers.js";
 import type * as http from "../http.js";
 import type * as sleep from "../sleep.js";
@@ -38,6 +40,8 @@ declare const fullApi: ApiFromModules<{
   "googleHealth/registry": typeof googleHealth_registry;
   "googleHealth/sync": typeof googleHealth_sync;
   "googleHealth/validators": typeof googleHealth_validators;
+  "googleHealth/webhook": typeof googleHealth_webhook;
+  "googleHealth/webhookSignature": typeof googleHealth_webhookSignature;
   helpers: typeof helpers;
   http: typeof http;
   sleep: typeof sleep;

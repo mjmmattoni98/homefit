@@ -3,7 +3,7 @@ import { v } from 'convex/values';
 import { internal } from '../_generated/api';
 import type { Doc, Id } from '../_generated/dataModel';
 import { internalMutation, type MutationCtx } from '../_generated/server';
-import { canonicalPhysicalCoverageKey } from './normalize';
+import { canonicalJson, canonicalPhysicalCoverageKey, sha256Base64Url } from './normalize';
 import { getMetricDefinition } from './registry';
 import {
 	normalizedHealthPointValidator,
@@ -287,6 +287,45 @@ async function enqueueSummary(
 		await ctx.scheduler.runAfter(0, internal.googleHealth.records.rebuildSummaryBatch, {
 			rebuildId
 		});
+}
+
+export async function deleteNamedGooglePoint(
+	ctx: MutationCtx,
+	args: {
+		connection: Doc<'googleHealthConnections'>;
+		dataType: string;
+		googleDataPointNames: readonly string[];
+	}
+): Promise<boolean> {
+	for (const googleDataPointName of new Set(args.googleDataPointNames)) {
+		const recordKey = sha256Base64Url(
+			`${args.dataType}\n${canonicalJson({ kind: 'named', name: googleDataPointName })}`
+		);
+		const contribution = await ctx.db
+			.query('healthDataPointContributions')
+			.withIndex('by_userId_and_recordKey', (q) =>
+				q.eq('userId', args.connection.userId).eq('recordKey', recordKey)
+			)
+			.unique();
+		if (
+			!contribution ||
+			contribution.connectionId !== args.connection._id ||
+			contribution.dataType !== args.dataType
+		) {
+			continue;
+		}
+		await ctx.db.delete('healthDataPoints', contribution.dataPointId);
+		await ctx.db.delete('healthDataPointContributions', contribution._id);
+		await enqueueSummary(ctx, {
+			connectionId: args.connection._id,
+			userId: args.connection.userId,
+			dataType: contribution.dataType,
+			category: contribution.category,
+			localDate: contribution.localDate
+		});
+		return true;
+	}
+	return false;
 }
 
 export const rebuildSummaryBatch = internalMutation({

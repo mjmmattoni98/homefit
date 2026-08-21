@@ -505,11 +505,24 @@ async function finishDataTypeImpl(
 		!SYNCABLE_STATUSES.has(connection.status)
 	)
 		return false;
+	const hasPendingStart = cursor.pendingWindowStart !== undefined;
+	const hasPendingEnd = cursor.pendingWindowEnd !== undefined;
+	if (hasPendingStart !== hasPendingEnd) throw new Error('incomplete pending webhook window');
+	const promotesPending = cursor.mode === 'incremental' && hasPendingStart && hasPendingEnd;
 	await completeRun(ctx, args.runId, args.counts, 'succeeded', undefined, args.hadMalformed);
 	const now = Date.now();
 	await ctx.db.patch('googleHealthSyncCursors', cursor._id, {
-		status: 'complete',
+		status: promotesPending ? 'queued' : 'complete',
 		pageToken: undefined,
+		...(promotesPending
+			? {
+					windowStart: cursor.pendingWindowStart,
+					windowEnd: cursor.pendingWindowEnd,
+					syncId: `webhook:${args.generation}:${cursor.dataType}:${now}`
+				}
+			: {}),
+		pendingWindowStart: undefined,
+		pendingWindowEnd: undefined,
 		activeRunId: undefined,
 		activeEpoch: undefined,
 		leaseExpiresAt: undefined,
@@ -545,11 +558,17 @@ async function finishDataTypeImpl(
 		lastErrorMessage: undefined,
 		nextRetryAt: undefined
 	});
-	if (next)
+	if (promotesPending)
+		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
+			cursorId: cursor._id,
+			generation: args.generation,
+			trigger: 'webhook'
+		});
+	else if (next)
 		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
 			cursorId: next._id,
 			generation: args.generation,
-			trigger: 'oauth'
+			trigger: next.mode === 'backfill' ? 'oauth' : 'webhook'
 		});
 	return true;
 }

@@ -26,6 +26,22 @@ async function pumpReady(t: ReturnType<typeof convexTest>, times = 1): Promise<v
 
 const runCursor = internal.googleHealth.sync.runCursor;
 
+async function runCurrentCursor(
+	t: ReturnType<typeof convexTest>,
+	args: {
+		cursorId: Id<'googleHealthSyncCursors'>;
+		generation: number;
+		trigger: 'oauth' | 'webhook' | 'manual' | 'retry' | 'reconciliation';
+	}
+): Promise<void> {
+	const expectedDispatchVersion = await t.run(async (ctx) => {
+		const cursor = await ctx.db.get('googleHealthSyncCursors', args.cursorId);
+		if (cursor === null) throw new Error('expected cursor');
+		return cursor.dispatchVersion ?? 0;
+	});
+	await t.action(runCursor, { ...args, expectedDispatchVersion });
+}
+
 function jsonResponse(value: unknown, status = 200): Response {
 	return new Response(JSON.stringify(value), {
 		status,
@@ -165,7 +181,7 @@ describe('Google Health bounded cursor worker', () => {
 		});
 		vi.stubGlobal('fetch', fetchMock);
 
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		expect(page).toBe(1);
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
@@ -223,7 +239,7 @@ describe('Google Health bounded cursor worker', () => {
 			})
 		);
 
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		expect(urls).toHaveLength(1);
 		const request = new URL(urls[0]);
 		expect(request.searchParams.get('pageSize')).toBe(String(pageSize));
@@ -275,7 +291,7 @@ describe('Google Health bounded cursor worker', () => {
 						})
 			)
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			scheduled: await ctx.db.system.query('_scheduled_functions').take(50),
@@ -310,7 +326,7 @@ describe('Google Health bounded cursor worker', () => {
 				})
 			);
 
-			await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+			await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 			await pumpReady(t, 3);
 			expect(rollupBody).toEqual({
 				range: {
@@ -372,7 +388,7 @@ describe('Google Health bounded cursor worker', () => {
 				})
 			);
 
-			await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+			await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 			const filter = new URL(healthUrl).searchParams.get('filter');
 			expect(filter).toBe(`${filterField} >= "${windowStart}" AND ${filterField} < "${windowEnd}"`);
 		}
@@ -396,7 +412,7 @@ describe('Google Health bounded cursor worker', () => {
 				return jsonResponse({ dataPoints: [] });
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 		expect(new URL(healthUrl).searchParams.get('filter')).toBe(
 			'electrocardiogram.interval.start_time >= "2026-08-14T10:00:00Z"'
 		);
@@ -420,7 +436,7 @@ describe('Google Health bounded cursor worker', () => {
 				return jsonResponse({ dataPoints: [] });
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 		expect(new URL(healthUrl).searchParams.has('filter')).toBe(false);
 		expect(
 			(await t.run(async (ctx) => ctx.db.system.query('_scheduled_functions').take(10))).some(
@@ -449,7 +465,7 @@ describe('Google Health bounded cursor worker', () => {
 			)
 		);
 
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId));
 		if (
 			!stored?.encryptedRefreshToken ||
@@ -491,7 +507,7 @@ describe('Google Health bounded cursor worker', () => {
 					: jsonResponse({ dataPoints: [] })
 			)
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthConnections', connectionId)))
 				?.grantedScopes
@@ -512,7 +528,7 @@ describe('Google Health bounded cursor worker', () => {
 			});
 			const fetchMock = vi.fn();
 			vi.stubGlobal('fetch', fetchMock);
-			await t.action(runCursor, {
+			await runCurrentCursor(t, {
 				cursorId,
 				generation: testCase.invocationGeneration,
 				trigger: 'oauth'
@@ -540,7 +556,7 @@ describe('Google Health bounded cursor worker', () => {
 				'fetch',
 				vi.fn(async () => jsonResponse({ error: errorCode }, status))
 			);
-			await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+			await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 			const stored = await t.run(async (ctx) => ({
 				connection: await ctx.db.get('googleHealthConnections', connectionId),
 				cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -575,7 +591,7 @@ describe('Google Health bounded cursor worker', () => {
 			})
 		);
 
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -643,7 +659,7 @@ describe('Google Health bounded cursor worker', () => {
 				return jsonResponse({ rollupDataPoints: [] });
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		expect(body).toMatchObject({ pageToken: 'rollup-page-2' });
 		expect(
 			(await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId)))?.status
@@ -681,7 +697,7 @@ describe('Google Health bounded cursor worker', () => {
 					: jsonResponse({ dataPoints: [], nextPageToken: 'next' })
 			)
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 		await pumpReady(t);
 		const stored = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
@@ -711,7 +727,7 @@ describe('Google Health bounded cursor worker', () => {
 				return tokenResponse();
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			runs: await ctx.db
@@ -742,7 +758,7 @@ describe('Google Health bounded cursor worker', () => {
 				return tokenResponse();
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
 			runs: await ctx.db
@@ -767,7 +783,8 @@ describe('Google Health bounded cursor worker', () => {
 		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId,
 			generation: 1,
-			trigger: 'oauth'
+			trigger: 'oauth',
+			expectedDispatchVersion: 0
 		});
 		if (work === null) throw new Error('expected leased work');
 		const scheduled = await t.run(async (ctx) =>
@@ -825,7 +842,8 @@ describe('Google Health bounded cursor worker', () => {
 		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId,
 			generation: 1,
-			trigger: 'webhook'
+			trigger: 'webhook',
+			expectedDispatchVersion: 1
 		});
 		if (work === null) throw new Error('expected leased work');
 		expect(
@@ -856,6 +874,89 @@ describe('Google Health bounded cursor worker', () => {
 		expect(retry).toMatchObject({ status: 'retry', dispatchVersion: 3 });
 	});
 
+	it('rejects a duplicate stale action without bypassing retry backoff', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
+		const t = boundedConvexTest();
+		const { connectionId, cursorId } = await seedCursor(t, {
+			dataType: 'steps',
+			status: 'active',
+			backfillCompletedTypes: 1
+		});
+		expect(
+			await t.mutation(internal.googleHealth.sync.ensureCursorDispatched, {
+				cursorId,
+				generation: 1,
+				trigger: 'webhook'
+			})
+		).toBe(true);
+
+		let tokenRequests = 0;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (input: RequestInfo | URL) => {
+				if (String(input) === 'https://oauth2.googleapis.com/token') {
+					tokenRequests += 1;
+					return tokenRequests === 1
+						? jsonResponse({ error: 'unavailable' }, 503)
+						: tokenResponse();
+				}
+				return jsonResponse({ dataPoints: [] });
+			})
+		);
+
+		const duplicateAction = {
+			cursorId,
+			generation: 1,
+			trigger: 'webhook' as const,
+			expectedDispatchVersion: 1
+		};
+		await t.action(runCursor, duplicateAction);
+		const afterFailure = await t.run(async (ctx) => ({
+			connection: await ctx.db.get('googleHealthConnections', connectionId),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_cursorId', (q) => q.eq('cursorId', cursorId))
+				.take(10),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(20)
+		}));
+		expect(afterFailure.connection?.nextRetryAt).toBe(Date.parse('2026-08-14T12:00:30Z'));
+		expect(afterFailure.cursor).toMatchObject({ status: 'retry', dispatchVersion: 3 });
+		expect(afterFailure.runs).toHaveLength(1);
+
+		await t.action(runCursor, duplicateAction);
+		const afterDuplicate = await t.run(async (ctx) => ({
+			runs: await ctx.db
+				.query('googleHealthSyncRuns')
+				.withIndex('by_cursorId', (q) => q.eq('cursorId', cursorId))
+				.take(10),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(20)
+		}));
+		expect(tokenRequests).toBe(1);
+		expect(afterDuplicate.runs).toHaveLength(1);
+		expect(afterDuplicate.scheduled).toEqual(afterFailure.scheduled);
+
+		await t.action(runCursor, {
+			...duplicateAction,
+			expectedDispatchVersion: 3
+		});
+		expect(tokenRequests).toBe(1);
+		const beforeRetry = await t.run(async (ctx) => ({
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
+			scheduled: await ctx.db.system.query('_scheduled_functions').take(20)
+		}));
+		expect(beforeRetry.cursor).toMatchObject({ status: 'retry', dispatchVersion: 3 });
+		expect(beforeRetry.scheduled).toEqual(afterDuplicate.scheduled);
+		vi.setSystemTime(new Date('2026-08-14T12:00:30.001Z'));
+		await t.action(runCursor, {
+			...duplicateAction,
+			expectedDispatchVersion: 3
+		});
+		expect(tokenRequests).toBe(2);
+	});
+
 	it('renews a healthy run with an exact lease version so an older watchdog cannot recover it', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
@@ -864,7 +965,8 @@ describe('Google Health bounded cursor worker', () => {
 		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId,
 			generation: 1,
-			trigger: 'oauth'
+			trigger: 'oauth',
+			expectedDispatchVersion: 0
 		});
 		if (work === null) throw new Error('expected leased work');
 		const oldExpiry = Date.parse('2026-08-14T12:05:00Z');
@@ -921,12 +1023,14 @@ describe('Google Health bounded cursor worker', () => {
 		const first = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId: backfillCursorId,
 			generation: 1,
-			trigger: 'oauth'
+			trigger: 'oauth',
+			expectedDispatchVersion: 0
 		});
 		const second = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId: incrementalCursorId,
 			generation: 1,
-			trigger: 'webhook'
+			trigger: 'webhook',
+			expectedDispatchVersion: 0
 		});
 		expect(first?.reconciliationEpoch).toBe(1);
 		expect(second).toBeNull();
@@ -952,7 +1056,8 @@ describe('Google Health bounded cursor worker', () => {
 		const active = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId,
 			generation: 1,
-			trigger: 'oauth'
+			trigger: 'oauth',
+			expectedDispatchVersion: 0
 		});
 		if (active === null) throw new Error('expected active run');
 		const unrelatedRunId = await t.run(async (ctx) =>
@@ -999,7 +1104,8 @@ describe('Google Health bounded cursor worker', () => {
 		const work = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId,
 			generation: 1,
-			trigger: 'oauth'
+			trigger: 'oauth',
+			expectedDispatchVersion: 0
 		});
 		if (work === null) throw new Error('expected active old-generation run');
 		await t.run(async (ctx) =>
@@ -1027,7 +1133,7 @@ describe('Google Health bounded cursor worker', () => {
 					: jsonResponse({ dataPoints: {} })
 			)
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		const stored = await t.run(async (ctx) => ({
 			connection: await ctx.db.get('googleHealthConnections', connectionId),
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -1094,7 +1200,7 @@ describe('Google Health bounded cursor worker', () => {
 			)
 		);
 
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 		await t.finishAllScheduledFunctions(vi.runAllTimers);
 		const stored = await t.run(async (ctx) => ({
 			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId),
@@ -1134,7 +1240,7 @@ describe('Google Health bounded cursor worker', () => {
 					: jsonResponse({ dataPoints: [duplicate, duplicate] })
 			)
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'oauth' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'oauth' });
 		await pumpReady(t, 4);
 		const stored = await t.run(async (ctx) => ({
 			run: (
@@ -1235,7 +1341,7 @@ describe('Google Health bounded cursor worker', () => {
 				);
 			})
 		);
-		await t.action(runCursor, { cursorId, generation: 1, trigger: 'webhook' });
+		await runCurrentCursor(t, { cursorId, generation: 1, trigger: 'webhook' });
 		expect(
 			await t.run(async (ctx) => ctx.db.get('googleHealthSyncCursors', cursorId))
 		).toMatchObject({ status: 'running', hadMalformed: true });

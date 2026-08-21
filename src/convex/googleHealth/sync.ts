@@ -244,11 +244,12 @@ async function scheduleCursorWithWatchdog(
 	if (!cursor || cursor.generation !== args.generation) return false;
 	const dispatchVersion = (cursor.dispatchVersion ?? 0) + 1;
 	await ctx.db.patch('googleHealthSyncCursors', cursor._id, { dispatchVersion });
-	await ctx.scheduler.runAfter(delayMs, internal.googleHealth.sync.runCursor, args);
+	const dispatchArgs = { ...args, expectedDispatchVersion: dispatchVersion };
+	await ctx.scheduler.runAfter(delayMs, internal.googleHealth.sync.runCursor, dispatchArgs);
 	await ctx.scheduler.runAfter(
 		delayMs + CURSOR_DISPATCH_WATCHDOG_MS,
 		internal.googleHealth.sync.ensureCursorDispatched,
-		{ ...args, expectedDispatchVersion: dispatchVersion }
+		dispatchArgs
 	);
 	return true;
 }
@@ -310,7 +311,8 @@ export const ensureCursorDispatched = internalMutation({
 		await ctx.scheduler.runAfter(0, internal.googleHealth.sync.runCursor, {
 			cursorId: cursor._id,
 			generation: args.generation,
-			trigger: args.trigger
+			trigger: args.trigger,
+			expectedDispatchVersion: args.expectedDispatchVersion
 		});
 		await ctx.scheduler.runAfter(
 			CURSOR_DISPATCH_WATCHDOG_MS,
@@ -325,7 +327,8 @@ export const markCursorRunning = internalMutation({
 	args: {
 		cursorId: v.id('googleHealthSyncCursors'),
 		generation: v.number(),
-		trigger: syncTriggerValidator
+		trigger: syncTriggerValidator,
+		expectedDispatchVersion: v.number()
 	},
 	returns: v.union(cursorWorkValidator, v.null()),
 	handler: async (ctx, args) => {
@@ -333,6 +336,7 @@ export const markCursorRunning = internalMutation({
 		if (
 			!cursor ||
 			cursor.generation !== args.generation ||
+			(cursor.dispatchVersion ?? 0) !== args.expectedDispatchVersion ||
 			(cursor.status !== 'queued' && cursor.status !== 'retry')
 		)
 			return null;
@@ -343,6 +347,14 @@ export const markCursorRunning = internalMutation({
 			!SYNCABLE_STATUSES.has(connection.status)
 		)
 			return null;
+		const now = Date.now();
+		if (
+			cursor.status === 'retry' &&
+			connection.nextRetryAt !== undefined &&
+			connection.nextRetryAt > now
+		) {
+			return null;
+		}
 		if (connection.activeSyncRunId !== undefined) {
 			await scheduleCursorWithWatchdog(
 				ctx,
@@ -355,7 +367,6 @@ export const markCursorRunning = internalMutation({
 			);
 			return null;
 		}
-		const now = Date.now();
 		const continuingEpoch = cursor.pageToken !== undefined && cursor.activeEpoch !== undefined;
 		const reconciliationEpoch = continuingEpoch
 			? (cursor.activeEpoch ?? 0)
@@ -1176,7 +1187,8 @@ export const runCursor = internalAction({
 	args: {
 		cursorId: v.id('googleHealthSyncCursors'),
 		generation: v.number(),
-		trigger: syncTriggerValidator
+		trigger: syncTriggerValidator,
+		expectedDispatchVersion: v.number()
 	},
 	returns: v.null(),
 	handler: async (ctx, args) => {

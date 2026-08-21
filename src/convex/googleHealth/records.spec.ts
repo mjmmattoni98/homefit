@@ -797,7 +797,8 @@ describe('bounded Google Health record reconciliation', () => {
 		const newer = await t.mutation(internal.googleHealth.sync.markCursorRunning, {
 			cursorId: old.cursorId,
 			generation: 1,
-			trigger: 'reconciliation'
+			trigger: 'reconciliation',
+			expectedDispatchVersion: 0
 		});
 		if (newer === null) throw new Error('expected newer reconciliation');
 		expect(

@@ -784,6 +784,174 @@ describe('Google Health webhook delivery variants', () => {
 		expect(stored.cursors).toEqual([]);
 	});
 
+	it('tombstones a named delete against an active page until a same-generation upsert', async () => {
+		const t = backend();
+		const connectionId = await seedConnection(t);
+		const recordId = 'step-record-active-run';
+		const fullName = `users/health-user-a/dataTypes/steps/dataPoints/${recordId}`;
+		const recordKey = sha256Base64Url(`steps\n${canonicalJson({ kind: 'named', name: fullName })}`);
+		const pagePoint = {
+			provider: 'google_health' as const,
+			recordKey,
+			googleDataPointName: fullName,
+			dataType: 'steps',
+			category: 'activity' as const,
+			recordTimestamp: Date.parse('2026-08-14T10:30:00Z'),
+			localDate: '2026-08-14',
+			physicalCoverageKey: '2026-08-14T10:30:00.000000000Z',
+			primaryValue: 10,
+			primaryUnit: 'steps',
+			payloadDigest: 'page-digest',
+			payloadJson: '{}'
+		};
+		const { cursorId, runId } = await t.run(async (ctx) => {
+			const cursorId = await ctx.db.insert('googleHealthSyncCursors', {
+				connectionId,
+				userId: 'clerk|user-a',
+				dataType: 'steps',
+				mode: 'incremental',
+				status: 'queued',
+				windowStart: '2026-08-14T10:00:00.000000000Z',
+				windowEnd: '2026-08-14T11:00:00.000000000Z',
+				syncId: 'active-page',
+				attempt: 0,
+				generation: 1,
+				updatedAt: Date.now()
+			});
+			const runId = await ctx.db.insert('googleHealthSyncRuns', {
+				connectionId,
+				userId: 'clerk|user-a',
+				cursorId,
+				generation: 1,
+				reconciliationEpoch: 1,
+				trigger: 'webhook',
+				dataType: 'steps',
+				startedAt: Date.now(),
+				pages: 0,
+				fetched: 0,
+				inserted: 0,
+				updated: 0,
+				deleted: 0,
+				skipped: 0,
+				status: 'running'
+			});
+			await ctx.db.patch('googleHealthSyncCursors', cursorId, {
+				status: 'running',
+				activeRunId: runId,
+				activeEpoch: 1,
+				reconciliationEpoch: 1,
+				leaseVersion: 1,
+				leaseExpiresAt: Date.now() + 300_000
+			});
+			await ctx.db.patch('googleHealthConnections', connectionId, {
+				reconciliationEpoch: 1,
+				activeSyncCursorId: cursorId,
+				activeSyncRunId: runId,
+				syncLeaseVersion: 1,
+				syncLeaseExpiresAt: Date.now() + 300_000
+			});
+			const dataPointId = await ctx.db.insert('healthDataPoints', {
+				connectionId,
+				userId: 'clerk|user-a',
+				...pagePoint,
+				payloadDigest: 'stored-before-delete',
+				lastSeenSyncId: 'older-page',
+				seenEpoch: 1
+			});
+			await ctx.db.insert('healthDataPointContributions', {
+				connectionId,
+				dataPointId,
+				userId: 'clerk|user-a',
+				recordKey,
+				dataType: 'steps',
+				category: 'activity',
+				localDate: '2026-08-14',
+				recordTimestamp: pagePoint.recordTimestamp,
+				primaryValue: 10,
+				physicalCoverageKey: pagePoint.physicalCoverageKey,
+				seenEpoch: 1
+			});
+			return { cursorId, runId };
+		});
+
+		const deleted = await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
+		await pumpWebhookDelivery(t);
+		const afterDelete = await t.run(async (ctx) => ({
+			points: await ctx.db
+				.query('healthDataPoints')
+				.withIndex('by_userId_and_recordKey', (q) =>
+					q.eq('userId', 'clerk|user-a').eq('recordKey', recordKey)
+				)
+				.take(2),
+			cursor: await ctx.db.get('googleHealthSyncCursors', cursorId)
+		}));
+		expect(deleted.status).toBe(204);
+		expect(afterDelete.points).toEqual([]);
+		expect(afterDelete.cursor).toMatchObject({ status: 'running' });
+		expect(afterDelete.cursor).not.toHaveProperty('pendingWindowStart');
+		expect(afterDelete.cursor).not.toHaveProperty('pendingWindowEnd');
+
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				cursorId,
+				runId,
+				dataType: 'steps',
+				points: [pagePoint],
+				syncId: 'page-fetched-before-delete',
+				seenEpoch: 1
+			})
+		).toEqual({ inserted: 0, updated: 0, skipped: 1 });
+		expect(
+			await t.run(async (ctx) =>
+				ctx.db
+					.query('healthDataPoints')
+					.withIndex('by_userId_and_recordKey', (q) =>
+						q.eq('userId', 'clerk|user-a').eq('recordKey', recordKey)
+					)
+					.unique()
+			)
+		).toBeNull();
+
+		const upserted = await postSigned(t, fixture, notification({ operation: 'UPSERT', recordId }));
+		await pumpWebhookDelivery(t);
+		expect(upserted.status).toBe(204);
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 1,
+				cursorId,
+				runId,
+				dataType: 'steps',
+				points: [pagePoint],
+				syncId: 'page-after-upsert',
+				seenEpoch: 1
+			})
+		).toEqual({ inserted: 1, updated: 0, skipped: 0 });
+
+		await postSigned(t, fixture, notification({ operation: 'DELETE', recordId }));
+		await pumpWebhookDelivery(t);
+		await t.run(async (ctx) =>
+			ctx.db.patch('googleHealthConnections', connectionId, {
+				generation: 2,
+				activeSyncCursorId: undefined,
+				activeSyncRunId: undefined,
+				syncLeaseExpiresAt: undefined
+			})
+		);
+		expect(
+			await t.mutation(internal.googleHealth.records.applyReconciledPage, {
+				connectionId,
+				expectedGeneration: 2,
+				dataType: 'steps',
+				points: [pagePoint],
+				syncId: 'new-generation-page',
+				seenEpoch: 2
+			})
+		).toEqual({ inserted: 1, updated: 0, skipped: 0 });
+	});
+
 	it('falls back to interval reconciliation when a named delete has no local match', async () => {
 		const t = backend();
 		await seedConnection(t);

@@ -164,6 +164,19 @@ export default defineSchema({
 		.index('by_userId', ['userId'])
 		.index('by_status_and_updatedAt', ['status', 'updatedAt']),
 
+	googleHealthRecordTombstones: defineTable({
+		connectionId: v.id('googleHealthConnections'),
+		userId: v.string(),
+		generation: v.number(),
+		dataType: v.string(),
+		recordKey: v.string(),
+		updatedAt: v.number()
+	}).index('by_connectionId_and_generation_and_recordKey', [
+		'connectionId',
+		'generation',
+		'recordKey'
+	]),
+
 	healthDataPoints: defineTable({
 		connectionId: v.id('googleHealthConnections'),
 		userId: v.string(),

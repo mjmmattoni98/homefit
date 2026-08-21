@@ -8,7 +8,7 @@ import {
 	type MutationCtx
 } from '../_generated/server';
 import { canonicalPhysicalCoverageKey, sha256Base64Url } from './normalize';
-import { deleteNamedGooglePoint } from './records';
+import { clearNamedGooglePointTombstones, deleteNamedGooglePoint } from './records';
 import { getMetricDefinition, type MetricDefinition } from './registry';
 import { verifyGoogleHealthSignature } from './webhookSignature';
 
@@ -373,11 +373,7 @@ function parseNotification(value: unknown): NormalizedNotification | null {
 	if (window === null || window.start >= window.end) return null;
 	const recordId =
 		data.recordId === undefined ? undefined : boundedString(data.recordId, MAX_RECORD_ID_LENGTH);
-	if (
-		(data.recordId !== undefined && recordId === null) ||
-		(data.operation === 'UPSERT' && data.recordId !== undefined)
-	)
-		return null;
+	if (data.recordId !== undefined && recordId === null) return null;
 	return {
 		healthUserId: data.healthUserId,
 		dataType: data.dataType,
@@ -955,16 +951,27 @@ export const applyDelivery = internalMutation({
 				connection.grantedScopes.includes(definition.scope) &&
 				SYNCABLE_STATUSES.has(connection.status)
 			) {
+				const names =
+					notification.recordId === undefined
+						? []
+						: recordNameCandidates(
+								notification.healthUserId,
+								notification.dataType,
+								notification.recordId
+							);
+				if (notification.operation === 'UPSERT' && names.length > 0) {
+					await clearNamedGooglePointTombstones(ctx, {
+						connection,
+						dataType: notification.dataType,
+						googleDataPointNames: names
+					});
+				}
 				const deleted =
 					notification.operation === 'DELETE' && notification.recordId !== undefined
 						? await deleteNamedGooglePoint(ctx, {
 								connection,
 								dataType: notification.dataType,
-								googleDataPointNames: recordNameCandidates(
-									notification.healthUserId,
-									notification.dataType,
-									notification.recordId
-								)
+								googleDataPointNames: names
 							})
 						: false;
 				if (!deleted) {

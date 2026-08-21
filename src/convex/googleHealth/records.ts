@@ -301,6 +301,16 @@ export async function deleteNamedGooglePoint(
 		const recordKey = sha256Base64Url(
 			`${args.dataType}\n${canonicalJson({ kind: 'named', name: googleDataPointName })}`
 		);
+		const tombstone = await ctx.db
+			.query('googleHealthRecordTombstones')
+			.withIndex('by_connectionId_and_generation_and_recordKey', (q) =>
+				q
+					.eq('connectionId', args.connection._id)
+					.eq('generation', args.connection.generation)
+					.eq('recordKey', recordKey)
+			)
+			.unique();
+		if (tombstone !== null) return true;
 		const contribution = await ctx.db
 			.query('healthDataPointContributions')
 			.withIndex('by_userId_and_recordKey', (q) =>
@@ -316,6 +326,14 @@ export async function deleteNamedGooglePoint(
 		}
 		await ctx.db.delete('healthDataPoints', contribution.dataPointId);
 		await ctx.db.delete('healthDataPointContributions', contribution._id);
+		await ctx.db.insert('googleHealthRecordTombstones', {
+			connectionId: args.connection._id,
+			userId: args.connection.userId,
+			generation: args.connection.generation,
+			dataType: args.dataType,
+			recordKey,
+			updatedAt: Date.now()
+		});
 		await enqueueSummary(ctx, {
 			connectionId: args.connection._id,
 			userId: args.connection.userId,
@@ -326,6 +344,31 @@ export async function deleteNamedGooglePoint(
 		return true;
 	}
 	return false;
+}
+
+export async function clearNamedGooglePointTombstones(
+	ctx: MutationCtx,
+	args: {
+		connection: Doc<'googleHealthConnections'>;
+		dataType: string;
+		googleDataPointNames: readonly string[];
+	}
+): Promise<void> {
+	for (const googleDataPointName of new Set(args.googleDataPointNames)) {
+		const recordKey = sha256Base64Url(
+			`${args.dataType}\n${canonicalJson({ kind: 'named', name: googleDataPointName })}`
+		);
+		const tombstone = await ctx.db
+			.query('googleHealthRecordTombstones')
+			.withIndex('by_connectionId_and_generation_and_recordKey', (q) =>
+				q
+					.eq('connectionId', args.connection._id)
+					.eq('generation', args.connection.generation)
+					.eq('recordKey', recordKey)
+			)
+			.unique();
+		if (tombstone !== null) await ctx.db.delete('googleHealthRecordTombstones', tombstone._id);
+	}
 }
 
 export const rebuildSummaryBatch = internalMutation({
@@ -525,6 +568,19 @@ export const applyReconciledPage = internalMutation({
 		for (const point of args.points) {
 			if (point.dataType !== args.dataType || point.category !== definition.category) {
 				throw new Error('Google Health point does not match cursor data type');
+			}
+			const tombstone = await ctx.db
+				.query('googleHealthRecordTombstones')
+				.withIndex('by_connectionId_and_generation_and_recordKey', (q) =>
+					q
+						.eq('connectionId', connection._id)
+						.eq('generation', args.expectedGeneration)
+						.eq('recordKey', point.recordKey)
+				)
+				.unique();
+			if (tombstone !== null) {
+				skipped += 1;
+				continue;
 			}
 			const existing = await ctx.db
 				.query('healthDataPoints')

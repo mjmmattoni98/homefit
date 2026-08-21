@@ -1,11 +1,13 @@
-import { paginationOptsValidator } from 'convex/server';
-import { v } from 'convex/values';
+import { paginationOptsValidator, paginationResultValidator } from 'convex/server';
+import { type Infer, v } from 'convex/values';
 import { internal } from '../_generated/api';
 import type { Doc, Id } from '../_generated/dataModel';
-import { internalMutation, type MutationCtx } from '../_generated/server';
+import { internalMutation, query, type MutationCtx, type QueryCtx } from '../_generated/server';
+import { requireUserId } from '../helpers';
 import { canonicalJson, canonicalPhysicalCoverageKey, sha256Base64Url } from './normalize';
 import { getMetricDefinition } from './registry';
 import {
+	healthCategoryValidator,
 	normalizedHealthPointValidator,
 	pageCountsValidator,
 	syncTriggerValidator,
@@ -17,6 +19,471 @@ const CLEANUP_PAGE_SIZE = 64;
 const SUMMARY_PAGE_SIZE = 128;
 const SUMMARY_DEPENDENCY_PAGE_SIZE = 32;
 const RUN_LEASE_MS = 5 * 60 * 1000;
+const MAX_PUBLIC_METRIC_TYPES = 96;
+const MAX_TREND_SUMMARIES = 366;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_DETAIL_PAYLOAD_BYTES = 128 * 1024;
+const MAX_DETAIL_PAYLOAD_DEPTH = 8;
+const MAX_DETAIL_PAYLOAD_FIELDS = 128;
+const MAX_DETAIL_PAYLOAD_NODES = 256;
+const MAX_PAYLOAD_PATH_COMPONENT_BYTES = 96;
+const MAX_PAYLOAD_PATH_BYTES = 512;
+const MAX_PAYLOAD_STRING_BYTES = 512;
+const MAX_SOURCE_FIELD_BYTES = 256;
+
+const healthCategories = ['activity', 'vitals', 'sleep', 'body', 'nutrition', 'other'] as const;
+
+const metricRecordKindValidator = v.union(
+	v.literal('sample'),
+	v.literal('interval'),
+	v.literal('daily'),
+	v.literal('session'),
+	v.literal('reference')
+);
+
+const metricAggregationValidator = v.union(
+	v.literal('sum'),
+	v.literal('average'),
+	v.literal('latest'),
+	v.literal('duration')
+);
+
+const metricMetadataValidator = v.object({
+	provider: v.literal('google_health'),
+	sourceLabel: v.literal('Google Health'),
+	dataType: v.string(),
+	known: v.boolean(),
+	category: healthCategoryValidator,
+	recordKind: v.union(metricRecordKindValidator, v.null()),
+	aggregation: v.union(metricAggregationValidator, v.null()),
+	primaryUnit: v.union(v.string(), v.null())
+});
+
+const summaryViewValidator = v.object({
+	localDate: v.string(),
+	count: v.number(),
+	latestValue: v.union(v.number(), v.null()),
+	latestTimestamp: v.union(v.number(), v.null()),
+	sum: v.union(v.number(), v.null()),
+	average: v.union(v.number(), v.null()),
+	min: v.union(v.number(), v.null()),
+	max: v.union(v.number(), v.null()),
+	durationSeconds: v.union(v.number(), v.null())
+});
+
+const catalogMetricValidator = metricMetadataValidator.extend({
+	latestSummary: summaryViewValidator
+});
+
+const overviewMetricValidator = catalogMetricValidator.extend({
+	trend: v.array(summaryViewValidator)
+});
+
+const metricTrendResultValidator = v.union(
+	v.object({ kind: v.literal('not_found') }),
+	v.object({
+		kind: v.literal('found'),
+		metric: metricMetadataValidator,
+		summaries: v.array(summaryViewValidator)
+	})
+);
+
+const payloadLeafValidator = v.object({
+	path: v.array(v.string()),
+	value: v.union(v.null(), v.boolean(), v.number(), v.string())
+});
+
+const safePayloadValidator = v.union(
+	v.object({ kind: v.literal('fields'), fields: v.array(payloadLeafValidator) }),
+	v.object({ kind: v.literal('unavailable') })
+);
+
+const detailRecordValidator = v.object({
+	provider: v.literal('google_health'),
+	dataType: v.string(),
+	category: healthCategoryValidator,
+	recordTimestamp: v.number(),
+	startTime: v.union(v.number(), v.null()),
+	endTime: v.union(v.number(), v.null()),
+	localDate: v.string(),
+	primaryValue: v.union(v.number(), v.null()),
+	primaryUnit: v.union(v.string(), v.null()),
+	sourcePlatform: v.union(v.string(), v.null()),
+	sourceApplication: v.union(v.string(), v.null()),
+	sourceDevice: v.union(v.string(), v.null()),
+	recordingMethod: v.union(v.string(), v.null()),
+	sourceFamily: v.union(v.string(), v.null()),
+	googleCreateTime: v.union(v.number(), v.null()),
+	googleUpdateTime: v.union(v.number(), v.null()),
+	payload: safePayloadValidator
+});
+
+type SummaryView = Infer<typeof summaryViewValidator>;
+type PayloadLeaf = Infer<typeof payloadLeafValidator>;
+type SafePayload = Infer<typeof safePayloadValidator>;
+
+function metricMetadata(dataType: string): Infer<typeof metricMetadataValidator> {
+	const definition = getMetricDefinition(dataType);
+	if (definition === null) {
+		return {
+			provider: 'google_health',
+			sourceLabel: 'Google Health',
+			dataType,
+			known: false,
+			category: 'other',
+			recordKind: null,
+			aggregation: null,
+			primaryUnit: null
+		};
+	}
+	return {
+		provider: 'google_health',
+		sourceLabel: 'Google Health',
+		dataType,
+		known: true,
+		category: definition.category,
+		recordKind: definition.recordKind,
+		aggregation: definition.aggregation,
+		primaryUnit: definition.primaryUnit
+	};
+}
+
+function summaryView(summary: Doc<'healthDailySummaries'>): SummaryView {
+	return {
+		localDate: summary.localDate,
+		count: summary.count,
+		latestValue: summary.latestValue ?? null,
+		latestTimestamp: summary.latestTimestamp ?? null,
+		sum: summary.sum ?? null,
+		average: summary.average ?? null,
+		min: summary.min ?? null,
+		max: summary.max ?? null,
+		durationSeconds: summary.durationSeconds ?? null
+	};
+}
+
+function compareDataTypes(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+async function latestOwnedSummaries(
+	ctx: QueryCtx,
+	userId: string
+): Promise<Doc<'healthDailySummaries'>[]> {
+	const latest: Doc<'healthDailySummaries'>[] = [];
+	let afterDataType: string | null = null;
+	for (let index = 0; index <= MAX_PUBLIC_METRIC_TYPES; index += 1) {
+		const lowerBound: string | null = afterDataType;
+		const firstOfType: Doc<'healthDailySummaries'> | null =
+			lowerBound === null
+				? await ctx.db
+						.query('healthDailySummaries')
+						.withIndex('by_userId_and_dataType_and_localDate', (q) => q.eq('userId', userId))
+						.first()
+				: await ctx.db
+						.query('healthDailySummaries')
+						.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+							q.eq('userId', userId).gt('dataType', lowerBound)
+						)
+						.first();
+		if (firstOfType === null) break;
+		if (index === MAX_PUBLIC_METRIC_TYPES) {
+			throw new Error('Too many imported Google Health metric types');
+		}
+		const newest = await ctx.db
+			.query('healthDailySummaries')
+			.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+				q.eq('userId', userId).eq('dataType', firstOfType.dataType)
+			)
+			.order('desc')
+			.first();
+		if (newest === null) throw new Error('Google Health metric summary disappeared');
+		latest.push(newest);
+		afterDataType = firstOfType.dataType;
+	}
+	return latest;
+}
+
+function assertDataType(dataType: string): void {
+	if (dataType.length > 96 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(dataType)) {
+		throw new Error('Invalid Google Health data type');
+	}
+}
+
+function parseLocalDate(localDate: string): number | null {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(localDate);
+	if (match === null) return null;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const date = new Date(0);
+	date.setUTCHours(0, 0, 0, 0);
+	date.setUTCFullYear(year, month - 1, day);
+	if (
+		year < 1 ||
+		year > 9999 ||
+		date.getUTCFullYear() !== year ||
+		date.getUTCMonth() !== month - 1 ||
+		date.getUTCDate() !== day
+	) {
+		return null;
+	}
+	return date.getTime();
+}
+
+function formatLocalDate(epochMs: number): string {
+	return new Date(epochMs).toISOString().slice(0, 10);
+}
+
+function assertDateRange(fromDate: string, toDate: string): void {
+	const from = parseLocalDate(fromDate);
+	const to = parseLocalDate(toDate);
+	if (from === null || to === null || from > to || (to - from) / DAY_MS + 1 > 366) {
+		throw new Error('Invalid Google Health date range');
+	}
+}
+
+function utf8BytesAtMost(value: string, maximum: number): boolean {
+	return value.length <= maximum && new TextEncoder().encode(value).byteLength <= maximum;
+}
+
+function flattenPayloadValue(
+	value: unknown,
+	path: string[],
+	pathBytes: number,
+	depth: number,
+	state: { nodes: number; fields: PayloadLeaf[] }
+): boolean {
+	state.nodes += 1;
+	if (state.nodes > MAX_DETAIL_PAYLOAD_NODES || depth > MAX_DETAIL_PAYLOAD_DEPTH) return false;
+	if (
+		value === null ||
+		typeof value === 'boolean' ||
+		typeof value === 'string' ||
+		typeof value === 'number'
+	) {
+		if (typeof value === 'number' && !Number.isFinite(value)) return false;
+		if (typeof value === 'string' && !utf8BytesAtMost(value, MAX_PAYLOAD_STRING_BYTES)) {
+			return false;
+		}
+		state.fields.push({ path, value });
+		return state.fields.length <= MAX_DETAIL_PAYLOAD_FIELDS;
+	}
+	if (typeof value !== 'object') return false;
+	if (Array.isArray(value) && value.length > MAX_DETAIL_PAYLOAD_NODES - state.nodes) return false;
+	const keys = Array.isArray(value)
+		? Array.from({ length: value.length }, (_, index) => String(index))
+		: Object.keys(value);
+	if (keys.length > MAX_DETAIL_PAYLOAD_NODES - state.nodes) return false;
+	for (const key of keys) {
+		if (key.length === 0 || !utf8BytesAtMost(key, MAX_PAYLOAD_PATH_COMPONENT_BYTES)) return false;
+		const keyBytes = new TextEncoder().encode(key).byteLength;
+		const nextPathBytes = pathBytes + keyBytes;
+		if (nextPathBytes > MAX_PAYLOAD_PATH_BYTES) return false;
+		const child: unknown = Reflect.get(value, key);
+		if (!flattenPayloadValue(child, [...path, key], nextPathBytes, depth + 1, state)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function safePayload(payloadJson: string): SafePayload {
+	if (!utf8BytesAtMost(payloadJson, MAX_DETAIL_PAYLOAD_BYTES)) {
+		return { kind: 'unavailable' };
+	}
+	try {
+		const parsed: unknown = JSON.parse(payloadJson);
+		const state: { nodes: number; fields: PayloadLeaf[] } = { nodes: 0, fields: [] };
+		return flattenPayloadValue(parsed, [], 0, 0, state)
+			? { kind: 'fields', fields: state.fields }
+			: { kind: 'unavailable' };
+	} catch {
+		return { kind: 'unavailable' };
+	}
+}
+
+function safeSourceField(value: string | undefined): string | null {
+	return value !== undefined && utf8BytesAtMost(value, MAX_SOURCE_FIELD_BYTES) ? value : null;
+}
+
+function detailRecord(point: Doc<'healthDataPoints'>): Infer<typeof detailRecordValidator> {
+	const metadata = metricMetadata(point.dataType);
+	return {
+		provider: 'google_health',
+		dataType: point.dataType,
+		category: metadata.category,
+		recordTimestamp: point.recordTimestamp,
+		startTime: point.startTime ?? null,
+		endTime: point.endTime ?? null,
+		localDate: point.localDate,
+		primaryValue: point.primaryValue ?? null,
+		primaryUnit: metadata.primaryUnit ?? safeSourceField(point.primaryUnit),
+		sourcePlatform: safeSourceField(point.sourcePlatform),
+		sourceApplication: safeSourceField(point.sourceApplication),
+		sourceDevice: safeSourceField(point.sourceDevice),
+		recordingMethod: safeSourceField(point.recordingMethod),
+		sourceFamily: safeSourceField(point.sourceFamily),
+		googleCreateTime: point.googleCreateTime ?? null,
+		googleUpdateTime: point.googleUpdateTime ?? null,
+		payload: safePayload(point.payloadJson)
+	};
+}
+
+export const listCategories = query({
+	args: {},
+	returns: v.array(v.object({ category: healthCategoryValidator, count: v.number() })),
+	handler: async (ctx) => {
+		const userId = await requireUserId(ctx);
+		const counts = new Map<(typeof healthCategories)[number], number>();
+		for (const summary of await latestOwnedSummaries(ctx, userId)) {
+			const category = metricMetadata(summary.dataType).category;
+			counts.set(category, (counts.get(category) ?? 0) + 1);
+		}
+		return healthCategories.flatMap((category) => {
+			const count = counts.get(category) ?? 0;
+			return count === 0 ? [] : [{ category, count }];
+		});
+	}
+});
+
+export const listMetrics = query({
+	args: { category: v.union(healthCategoryValidator, v.null()) },
+	returns: v.array(catalogMetricValidator),
+	handler: async (ctx, args) => {
+		const userId = await requireUserId(ctx);
+		return (await latestOwnedSummaries(ctx, userId))
+			.map((summary) => ({
+				...metricMetadata(summary.dataType),
+				latestSummary: summaryView(summary)
+			}))
+			.filter((metric) => args.category === null || metric.category === args.category)
+			.sort((left, right) => compareDataTypes(left.dataType, right.dataType));
+	}
+});
+
+export const getOverview = query({
+	args: { days: v.number() },
+	returns: v.object({
+		anchorDate: v.union(v.string(), v.null()),
+		fromDate: v.union(v.string(), v.null()),
+		toDate: v.union(v.string(), v.null()),
+		metrics: v.array(overviewMetricValidator)
+	}),
+	handler: async (ctx, args) => {
+		const userId = await requireUserId(ctx);
+		if (!Number.isSafeInteger(args.days) || args.days < 1 || args.days > 365) {
+			throw new Error('Invalid Google Health overview range');
+		}
+		const latest = await latestOwnedSummaries(ctx, userId);
+		if (latest.length === 0) {
+			return { anchorDate: null, fromDate: null, toDate: null, metrics: [] };
+		}
+		const anchorDate = latest.reduce(
+			(newest, summary) => (summary.localDate > newest ? summary.localDate : newest),
+			latest[0].localDate
+		);
+		const anchorEpoch = parseLocalDate(anchorDate);
+		if (anchorEpoch === null) throw new Error('Invalid stored Google Health summary date');
+		const fromDate = formatLocalDate(anchorEpoch - (args.days - 1) * DAY_MS);
+		const priority = new Map([
+			['steps', 0],
+			['sleep', 1],
+			['daily-resting-heart-rate', 2],
+			['weight', 3]
+		]);
+		const selected = [...latest]
+			.sort((left, right) => {
+				const leftPriority = priority.get(left.dataType) ?? Number.POSITIVE_INFINITY;
+				const rightPriority = priority.get(right.dataType) ?? Number.POSITIVE_INFINITY;
+				return leftPriority - rightPriority || compareDataTypes(left.dataType, right.dataType);
+			})
+			.slice(0, 4);
+		const metrics = await Promise.all(
+			selected.map(async (latestSummary) => {
+				const summaries = await ctx.db
+					.query('healthDailySummaries')
+					.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+						q
+							.eq('userId', userId)
+							.eq('dataType', latestSummary.dataType)
+							.gte('localDate', fromDate)
+							.lte('localDate', anchorDate)
+					)
+					.take(args.days + 1);
+				if (summaries.length > args.days) {
+					throw new Error('Too many Google Health summaries in overview range');
+				}
+				return {
+					...metricMetadata(latestSummary.dataType),
+					latestSummary: summaryView(latestSummary),
+					trend: summaries.map(summaryView)
+				};
+			})
+		);
+		return { anchorDate, fromDate, toDate: anchorDate, metrics };
+	}
+});
+
+export const getMetricTrend = query({
+	args: { dataType: v.string(), fromDate: v.string(), toDate: v.string() },
+	returns: metricTrendResultValidator,
+	handler: async (ctx, args): Promise<Infer<typeof metricTrendResultValidator>> => {
+		const userId = await requireUserId(ctx);
+		assertDataType(args.dataType);
+		assertDateRange(args.fromDate, args.toDate);
+		const latestSummary = await ctx.db
+			.query('healthDailySummaries')
+			.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+				q.eq('userId', userId).eq('dataType', args.dataType)
+			)
+			.order('desc')
+			.first();
+		if (latestSummary === null) return { kind: 'not_found' };
+		const summaries = await ctx.db
+			.query('healthDailySummaries')
+			.withIndex('by_userId_and_dataType_and_localDate', (q) =>
+				q
+					.eq('userId', userId)
+					.eq('dataType', args.dataType)
+					.gte('localDate', args.fromDate)
+					.lte('localDate', args.toDate)
+			)
+			.take(MAX_TREND_SUMMARIES + 1);
+		if (summaries.length > MAX_TREND_SUMMARIES) {
+			throw new Error('Too many Google Health summaries in trend range');
+		}
+		return {
+			kind: 'found',
+			metric: metricMetadata(args.dataType),
+			summaries: summaries.map(summaryView)
+		};
+	}
+});
+
+export const listMetricRecords = query({
+	args: { dataType: v.string(), paginationOpts: paginationOptsValidator },
+	returns: paginationResultValidator(detailRecordValidator),
+	handler: async (ctx, args) => {
+		const userId = await requireUserId(ctx);
+		assertDataType(args.dataType);
+		if (
+			!Number.isSafeInteger(args.paginationOpts.numItems) ||
+			args.paginationOpts.numItems < 1 ||
+			args.paginationOpts.numItems > 8
+		) {
+			throw new Error('Invalid Google Health page size');
+		}
+		const page = await ctx.db
+			.query('healthDataPoints')
+			.withIndex('by_userId_and_dataType_and_recordTimestamp', (q) =>
+				q.eq('userId', userId).eq('dataType', args.dataType)
+			)
+			.order('desc')
+			.paginate(args.paginationOpts);
+		return { ...page, page: page.page.map(detailRecord) };
+	}
+});
 
 const coveredRangeValidator = v.union(
 	v.object({ kind: v.literal('physical'), startKey: v.string(), endKeyExclusive: v.string() }),

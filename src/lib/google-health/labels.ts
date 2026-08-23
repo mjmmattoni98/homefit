@@ -1,4 +1,5 @@
 import * as m from '$lib/paraglide/messages';
+import type { HealthCategory } from './view';
 
 const metricLabels: Readonly<Record<string, () => string>> = {
 	'active-energy-burned': m.google_health_metric_active_energy_burned,
@@ -51,8 +52,6 @@ const categoryLabels = {
 	nutrition: m.google_health_category_nutrition,
 	other: m.google_health_category_other
 } as const;
-
-export type HealthCategory = keyof typeof categoryLabels;
 
 export function metricLabel(dataType: string): string {
 	const localized = metricLabels[dataType];

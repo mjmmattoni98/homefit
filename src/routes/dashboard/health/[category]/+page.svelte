@@ -1,33 +1,35 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { api } from '$convex/_generated/api';
-	import { useAuth, useQuery } from 'convex-svelte';
-	import * as Empty from '$lib/components/ui/empty';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import HealthMetricCard from '$lib/components/google-health/HealthMetricCard.svelte';
-	import HealthSyncBanner from '$lib/components/google-health/HealthSyncBanner.svelte';
-	import { categoryLabel, metricLabel } from '$lib/google-health/labels';
-	import { isHealthCategory } from '$lib/google-health/view';
-	import * as m from '$lib/paraglide/messages';
+	import { getMetrics } from '#lib/remote/health.remote.js';
+	import * as Empty from '#lib/components/ui/empty/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import HealthMetricCard from '#lib/components/google-health/HealthMetricCard.svelte';
+	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
+	import { categoryLabel, metricLabel } from '#lib/google-health/labels.js';
+	import { isHealthCategory } from '#lib/google-health/view.js';
+	import * as m from '#lib/paraglide/messages.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
-	const auth = useAuth();
 	const category = $derived.by(() => {
 		const value = page.params.category;
 		return value !== undefined && isHealthCategory(value) ? value : null;
 	});
-	const metricsQuery = useQuery(api.googleHealth.records.listMetrics, () =>
-		auth.isAuthenticated && category !== null ? { category } : 'skip'
-	);
+	const metricsQuery = $derived(category === null ? null : getMetrics(category));
 	const metrics = $derived(
-		[...(metricsQuery.data ?? [])].sort((left, right) =>
+		[...(metricsQuery?.current ?? [])].sort((left, right) =>
 			metricLabel(left.dataType).localeCompare(metricLabel(right.dataType))
 		)
 	);
 	const isLoading = $derived(
-		auth.isLoading || !auth.isAuthenticated || (category !== null && metricsQuery.isLoading)
+		metricsQuery !== null && !metricsQuery.ready && metricsQuery.error === undefined
 	);
 </script>
+
+<svelte:head>
+	<title>
+		{category === null ? m.health_not_found_title() : categoryLabel(category)} · {m.app_name()}
+	</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div>
@@ -57,7 +59,7 @@
 				<Skeleton class="h-36 w-full" />
 			{/each}
 		</div>
-	{:else if metricsQuery.error}
+	{:else if metricsQuery?.error !== undefined}
 		<Empty.Root class="border">
 			<Empty.Header>
 				<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
@@ -76,10 +78,7 @@
 	{:else}
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
 			{#each metrics as metric (metric.dataType)}
-				<HealthMetricCard
-					{metric}
-					href={`/dashboard/health/metrics/${encodeURIComponent(metric.dataType)}`}
-				/>
+				<HealthMetricCard {metric} />
 			{/each}
 		</div>
 	{/if}

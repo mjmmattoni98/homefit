@@ -2,7 +2,7 @@ import { page } from 'vitest/browser';
 import { describe, expect, it } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import HealthMetricCard from './HealthMetricCard.svelte';
-import type { HealthMetric, HealthSummary } from '$lib/google-health/view';
+import type { HealthMetric, HealthSummary } from '#lib/google-health/view.js';
 
 function summary(overrides: Partial<HealthSummary> = {}): HealthSummary {
 	return {
@@ -37,13 +37,15 @@ function metric(overrides: Partial<HealthMetric> = {}): HealthMetric {
 describe('HealthMetricCard', () => {
 	it('formats a numeric value with its unit and source', async () => {
 		render(HealthMetricCard, {
-			metric: metric(),
-			href: '/dashboard/health/metrics/weight'
+			metric: metric()
 		});
 
 		await expect.element(page.getByText('Weight')).toBeInTheDocument();
 		await expect.element(page.getByText('72.4 kg')).toBeInTheDocument();
 		await expect.element(page.getByText('Source: Google Health')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('link'))
+			.toHaveAttribute('href', '/dashboard/health/metrics/weight');
 	});
 
 	it('uses Recorded for a complex metric without a scalar value', async () => {
@@ -55,17 +57,15 @@ describe('HealthMetricCard', () => {
 				aggregation: 'latest',
 				primaryUnit: '',
 				latestSummary: summary({ latestValue: null, sum: null, average: null })
-			}),
-			href: '/dashboard/health/metrics/electrocardiogram'
+			})
 		});
 
-		await expect.element(page.getByText('Recorded')).toBeInTheDocument();
+		await expect.element(page.getByText('Recorded', { exact: true })).toBeInTheDocument();
 	});
 
 	it('shows the change between the two latest trend values', async () => {
 		render(HealthMetricCard, {
 			metric: metric(),
-			href: '/dashboard/health/metrics/weight',
 			trend: [
 				summary({ localDate: '2026-08-19', latestValue: 71.8 }),
 				summary({ localDate: '2026-08-20', latestValue: 72.4 })

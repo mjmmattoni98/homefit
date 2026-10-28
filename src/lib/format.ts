@@ -1,19 +1,32 @@
-import { getLocale } from '$lib/paraglide/runtime';
+import { getLocale } from '#lib/paraglide/runtime.js';
+
+// Creating an Intl formatter is far slower than using one, and charts format every tick, bar and
+// tooltip, so formatters are reused per locale and options.
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+
+function dateFormatter(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+	const locale = getLocale();
+	const key = `${locale}|${JSON.stringify(options)}`;
+	let formatter = dateFormatters.get(key);
+	if (formatter === undefined) {
+		formatter = new Intl.DateTimeFormat(locale, options);
+		dateFormatters.set(key, formatter);
+	}
+	return formatter;
+}
 
 export function formatDate(ms: number, options?: Intl.DateTimeFormatOptions): string {
-	return new Date(ms).toLocaleDateString(
-		getLocale(),
-		options ?? { day: 'numeric', month: 'short' }
-	);
+	return dateFormatter(options ?? { day: 'numeric', month: 'short' }).format(ms);
 }
 
 export function formatDateLong(ms: number): string {
 	return formatDate(ms, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-/** Short date with 2-digit year ("17 nov 24") for axis labels on multi-year spans. */
-export function formatDateAxis(ms: number): string {
-	return formatDate(ms, { day: 'numeric', month: 'short', year: '2-digit' });
+/** Month and year ("Nov 2024") for axis labels on spans of several months. */
+export function formatMonthAxis(ms: number): string {
+	return formatDate(ms, { month: 'short', year: 'numeric' });
 }
 
 /** Formats seconds as "7.5 h". */
@@ -22,7 +35,14 @@ export function formatHours(seconds: number): string {
 }
 
 export function formatNumber(n: number, maximumFractionDigits = 0): string {
-	return n.toLocaleString(getLocale(), { maximumFractionDigits });
+	const locale = getLocale();
+	const key = `${locale}|${maximumFractionDigits}`;
+	let formatter = numberFormatters.get(key);
+	if (formatter === undefined) {
+		formatter = new Intl.NumberFormat(locale, { maximumFractionDigits });
+		numberFormatters.set(key, formatter);
+	}
+	return formatter.format(n);
 }
 
 /** Formats large numbers compactly for axis labels: 1200 -> "1.2k", 15000 -> "15k". */

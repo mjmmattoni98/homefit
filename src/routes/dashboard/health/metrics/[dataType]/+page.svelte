@@ -1,18 +1,18 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { api } from '$convex/_generated/api';
-	import { useAuth, usePaginatedQuery, useQuery } from 'convex-svelte';
-	import * as Card from '$lib/components/ui/card';
-	import * as Empty from '$lib/components/ui/empty';
-	import * as Table from '$lib/components/ui/table';
-	import * as ToggleGroup from '$lib/components/ui/toggle-group';
-	import { Badge } from '$lib/components/ui/badge';
-	import { Button } from '$lib/components/ui/button';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import { Spinner } from '$lib/components/ui/spinner';
-	import HealthSyncBanner from '$lib/components/google-health/HealthSyncBanner.svelte';
-	import HealthTrendChart from '$lib/components/google-health/HealthTrendChart.svelte';
-	import { categoryLabel, metricLabel } from '$lib/google-health/labels';
+	import { getMetricRecords, getMetricTrend, getMetrics } from '#lib/remote/health.remote.js';
+	import type { RecordsCursor } from '#lib/server/google-health/records.js';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import * as Empty from '#lib/components/ui/empty/index.js';
+	import * as Table from '#lib/components/ui/table/index.js';
+	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
+	import { Badge } from '#lib/components/ui/badge/index.js';
+	import { Button } from '#lib/components/ui/button/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import { Spinner } from '#lib/components/ui/spinner/index.js';
+	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
+	import HealthTrendChart from '#lib/components/google-health/HealthTrendChart.svelte';
+	import { categoryLabel, metricLabel } from '#lib/google-health/labels.js';
 	import {
 		dateRange,
 		formatDuration,
@@ -21,14 +21,14 @@
 		isHealthDataType,
 		payloadPath,
 		payloadValue
-	} from '$lib/google-health/view';
-	import { formatDateLong } from '$lib/format';
-	import * as m from '$lib/paraglide/messages';
+	} from '#lib/google-health/view.js';
+	import { formatDateLong } from '#lib/format.js';
+	import * as m from '#lib/paraglide/messages.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
 	const RANGE_DAYS = [7, 30, 90, 365] as const;
+	const RECORDS_PAGE_SIZE = 8;
 
-	const auth = useAuth();
 	const dataType = $derived.by(() => {
 		const value = page.params.dataType;
 		return value !== undefined && isHealthDataType(value) ? value : null;
@@ -36,36 +36,53 @@
 	let rangeValue = $state('30');
 	const rangeDays = $derived(Number(rangeValue));
 
-	const metricsQuery = useQuery(api.googleHealth.records.listMetrics, () =>
-		auth.isAuthenticated && dataType !== null ? { category: null } : 'skip'
-	);
-	const metric = $derived(metricsQuery.data?.find((item) => item.dataType === dataType));
+	const metricsQuery = $derived(dataType === null ? null : getMetrics(null));
+	const metric = $derived(metricsQuery?.current?.find((item) => item.dataType === dataType));
 	const selectedRange = $derived(
 		metric === undefined ? null : dateRange(metric.latestSummary.localDate, rangeDays)
 	);
-	const trendQuery = useQuery(api.googleHealth.records.getMetricTrend, () =>
-		auth.isAuthenticated && dataType !== null && selectedRange !== null
-			? { dataType, ...selectedRange }
-			: 'skip'
-	);
-	const recordsQuery = usePaginatedQuery(
-		api.googleHealth.records.listMetricRecords,
-		() => (auth.isAuthenticated && dataType !== null ? { dataType } : 'skip'),
-		{ initialNumItems: 8 }
+	const trendQuery = $derived(
+		dataType === null || selectedRange === null
+			? null
+			: getMetricTrend({ dataType, ...selectedRange })
 	);
 
-	const trend = $derived(trendQuery.data?.kind === 'found' ? trendQuery.data.summaries : []);
-	const records = $derived(recordsQuery.results);
-	const isLoading = $derived(
-		auth.isLoading ||
-			!auth.isAuthenticated ||
-			(dataType !== null && (metricsQuery.isLoading || recordsQuery.status === 'LoadingFirstPage'))
-	);
+	// One query per loaded page. Each starts where the previous page currently ends, so pages stay
+	// contiguous when a refresh adds or removes earlier records. Navigating to another metric
+	// resets the list to its first page.
+	let pageCount = $derived(dataType === null ? 0 : 1);
+	const recordPages = $derived.by(() => {
+		if (dataType === null) return [];
+		const records = (after: RecordsCursor | null) =>
+			getMetricRecords({ dataType, limit: RECORDS_PAGE_SIZE, after });
+		const pages = [records(null)];
+		while (pages.length < pageCount) {
+			const after = pages[pages.length - 1].current?.nextCursor ?? null;
+			if (after === null) break;
+			pages.push(records(after));
+		}
+		return pages;
+	});
+	const lastPage = $derived(recordPages.at(-1));
+	const nextCursor = $derived(lastPage?.current?.nextCursor ?? null);
+	const loadingMore = $derived(recordPages.length > 1 && lastPage !== undefined && !lastPage.ready);
+
+	const trend = $derived(trendQuery?.current?.kind === 'found' ? trendQuery.current.summaries : []);
+	const records = $derived(recordPages.flatMap((query) => query.current?.records ?? []));
 	const hasError = $derived(
-		metricsQuery.error !== undefined ||
-			trendQuery.error !== undefined ||
-			recordsQuery.error !== undefined
+		metricsQuery?.error !== undefined ||
+			trendQuery?.error !== undefined ||
+			recordPages.some((query) => query.error !== undefined)
 	);
+	const isLoading = $derived(
+		!hasError &&
+			dataType !== null &&
+			(metricsQuery?.ready !== true || recordPages[0]?.ready !== true)
+	);
+
+	function loadMore(): void {
+		if (nextCursor !== null) pageCount = recordPages.length + 1;
+	}
 
 	function recordValue(primaryValue: number | null, primaryUnit: string | null): string {
 		return primaryValue === null
@@ -73,6 +90,12 @@
 			: formatMetricNumber(primaryValue, primaryUnit);
 	}
 </script>
+
+<svelte:head>
+	<title>
+		{dataType === null ? m.health_not_found_title() : metricLabel(dataType)} · {m.app_name()}
+	</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div>
@@ -198,7 +221,7 @@
 				</ToggleGroup.Root>
 			</Card.Header>
 			<Card.Content>
-				{#if trendQuery.isLoading}
+				{#if trendQuery !== null && !trendQuery.ready}
 					<Skeleton class="h-[260px] w-full" />
 				{:else}
 					<HealthTrendChart {metric} summaries={trend} />
@@ -266,14 +289,10 @@
 					</Table.Root>
 				{/if}
 
-				{#if recordsQuery.status === 'CanLoadMore' || recordsQuery.status === 'LoadingMore'}
+				{#if nextCursor !== null || loadingMore}
 					<div class="mt-4 flex justify-center">
-						<Button
-							variant="outline"
-							disabled={recordsQuery.status === 'LoadingMore'}
-							onclick={() => recordsQuery.loadMore(8)}
-						>
-							{#if recordsQuery.status === 'LoadingMore'}
+						<Button variant="outline" disabled={loadingMore} onclick={loadMore}>
+							{#if loadingMore}
 								<Spinner data-icon="inline-start" />
 								{m.health_loading_more()}
 							{:else}

@@ -1,13 +1,14 @@
 <script lang="ts">
-	import { api } from '$convex/_generated/api';
-	import { useMutation } from 'convex-svelte';
-	import * as m from '$lib/paraglide/messages';
-	import * as Card from '$lib/components/ui/card';
-	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
-	import { Spinner } from '$lib/components/ui/spinner';
-	import { parseSleepCsv, type ParsedSleepRecord } from '$lib/csv/sleep';
-	import { parseHevyCsv, type ParsedWorkout } from '$lib/csv/hevy';
+	import { refreshAll } from '$app/navigation';
+	import { importSleepBatch, importWorkoutBatch } from '#lib/remote/imports.remote.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import { Button } from '#lib/components/ui/button/index.js';
+	import { Input } from '#lib/components/ui/input/index.js';
+	import { Progress } from '#lib/components/ui/progress/index.js';
+	import { Spinner } from '#lib/components/ui/spinner/index.js';
+	import { parseSleepCsv, type ParsedSleepRecord } from '#lib/csv/sleep.js';
+	import { parseHevyCsv, type ParsedWorkout } from '#lib/csv/hevy.js';
 	import { toast } from 'svelte-sonner';
 	import type { Component } from 'svelte';
 
@@ -26,13 +27,12 @@
 		icon: Component;
 	} = $props();
 
-	const importSleepBatch = useMutation(api.sleep.importBatch);
-	const importHevyBatch = useMutation(api.workouts.importBatch);
-
 	let sleepRecords = $state<ParsedSleepRecord[] | null>(null);
 	let hevyWorkouts = $state<ParsedWorkout[] | null>(null);
 	let parseError = $state(false);
 	let importing = $state(false);
+	// Records sent so far while the file is imported in batches.
+	let sent = $state(0);
 	let result = $state<string | null>(null);
 
 	const parsedCount = $derived(sleepRecords?.length ?? hevyWorkouts?.length ?? 0);
@@ -62,6 +62,7 @@
 
 	async function doImport() {
 		importing = true;
+		sent = 0;
 		result = null;
 		try {
 			let imported = 0;
@@ -73,14 +74,16 @@
 					});
 					imported += res.imported;
 					skipped += res.skipped;
+					sent = Math.min(i + SLEEP_BATCH, sleepRecords.length);
 				}
 			} else if (kind === 'hevy' && hevyWorkouts) {
 				for (let i = 0; i < hevyWorkouts.length; i += HEVY_BATCH) {
-					const res = await importHevyBatch({
+					const res = await importWorkoutBatch({
 						workouts: hevyWorkouts.slice(i, i + HEVY_BATCH)
 					});
 					imported += res.imported;
 					skipped += res.skipped;
+					sent = Math.min(i + HEVY_BATCH, hevyWorkouts.length);
 				}
 			}
 			result = m.import_result({ imported, skipped });
@@ -89,20 +92,30 @@
 			toast.error(error instanceof Error ? error.message : m.import_error());
 		} finally {
 			importing = false;
+			// Written batches change the dashboard and exercise views, even if a later one failed.
+			if (sent > 0) void refreshAll();
 		}
 	}
 </script>
 
 <Card.Root>
 	<Card.Header>
-		<div class="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+		<div
+			class="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"
+		>
 			<Icon class="size-5" />
 		</div>
 		<Card.Title>{title}</Card.Title>
 		<Card.Description>{description}</Card.Description>
 	</Card.Header>
 	<Card.Content class="flex flex-col gap-3">
-		<Input type="file" accept=".csv,text/csv,text/plain" onchange={onFileChange} />
+		<Input
+			type="file"
+			accept=".csv,text/csv,text/plain"
+			disabled={importing}
+			aria-label={title}
+			onchange={onFileChange}
+		/>
 
 		{#if parseError}
 			<p class="text-sm text-destructive">{m.import_error()}</p>
@@ -112,8 +125,17 @@
 			</p>
 		{/if}
 
+		{#if importing}
+			<div class="flex flex-col gap-1.5">
+				<Progress value={sent} max={parsedCount} aria-labelledby="{kind}-import-progress" />
+				<p id="{kind}-import-progress" class="text-xs text-muted-foreground tabular-nums">
+					{sent} / {parsedCount}
+				</p>
+			</div>
+		{/if}
+
 		{#if result}
-			<p class="text-sm font-medium text-green-600 dark:text-green-400">{result}</p>
+			<p class="text-sm font-medium text-green-600 dark:text-green-400" role="status">{result}</p>
 		{/if}
 
 		<Button disabled={parsedCount === 0 || importing} onclick={doImport} class="w-full sm:w-auto">

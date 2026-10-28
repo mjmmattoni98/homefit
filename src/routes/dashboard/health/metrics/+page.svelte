@@ -1,28 +1,27 @@
 <script lang="ts">
-	import type { Pathname } from '$app/types';
 	import { resolve } from '$app/paths';
-	import { api } from '$convex/_generated/api';
-	import { useAuth, useQuery } from 'convex-svelte';
-	import * as Empty from '$lib/components/ui/empty';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import { buttonVariants } from '$lib/components/ui/button';
-	import HealthMetricCard from '$lib/components/google-health/HealthMetricCard.svelte';
-	import HealthSyncBanner from '$lib/components/google-health/HealthSyncBanner.svelte';
-	import { metricLabel } from '$lib/google-health/labels';
-	import * as m from '$lib/paraglide/messages';
+	import { getMetrics } from '#lib/remote/health.remote.js';
+	import * as Empty from '#lib/components/ui/empty/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import HealthMetricCard from '#lib/components/google-health/HealthMetricCard.svelte';
+	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
+	import { metricLabel } from '#lib/google-health/labels.js';
+	import * as m from '#lib/paraglide/messages.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
-	const auth = useAuth();
-	const metricsQuery = useQuery(api.googleHealth.records.listMetrics, () =>
-		auth.isAuthenticated ? { category: null } : 'skip'
-	);
+	const metricsQuery = getMetrics(null);
 	const metrics = $derived(
-		[...(metricsQuery.data ?? [])].sort((left, right) =>
+		[...(metricsQuery.current ?? [])].sort((left, right) =>
 			metricLabel(left.dataType).localeCompare(metricLabel(right.dataType))
 		)
 	);
-	const isLoading = $derived(auth.isLoading || !auth.isAuthenticated || metricsQuery.isLoading);
+	const isLoading = $derived(!metricsQuery.ready && metricsQuery.error === undefined);
 </script>
+
+<svelte:head>
+	<title>{m.health_all_metrics_title()} · {m.app_name()}</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div>
@@ -38,7 +37,7 @@
 				<Skeleton class="h-36 w-full" />
 			{/each}
 		</div>
-	{:else if metricsQuery.error}
+	{:else if metricsQuery.error !== undefined}
 		<Empty.Root class="border">
 			<Empty.Header>
 				<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
@@ -54,18 +53,13 @@
 				<Empty.Description>{m.health_no_data_description()}</Empty.Description>
 			</Empty.Header>
 			<Empty.Content>
-				<a href={resolve('/dashboard/import' as Pathname)} class={buttonVariants()}>
-					{m.health_no_data_cta()}
-				</a>
+				<a href={resolve('/dashboard/import')} class={buttonVariants()}>{m.health_no_data_cta()}</a>
 			</Empty.Content>
 		</Empty.Root>
 	{:else}
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
 			{#each metrics as metric (metric.dataType)}
-				<HealthMetricCard
-					{metric}
-					href={`/dashboard/health/metrics/${encodeURIComponent(metric.dataType)}`}
-				/>
+				<HealthMetricCard {metric} />
 			{/each}
 		</div>
 	{/if}

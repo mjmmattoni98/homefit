@@ -1,11 +1,19 @@
 <script lang="ts">
 	import { BarChart } from 'layerchart';
-	import * as Chart from '$lib/components/ui/chart';
-	import * as m from '$lib/paraglide/messages';
-	import { formatCompact } from '$lib/format';
-	import { CHART_COLORS, sparseTicks } from '$lib/charts';
+	import * as Chart from '#lib/components/ui/chart/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { formatCompact } from '#lib/format.js';
+	import { CHART_COLORS, sparseTicks, timeAxis, tooltipDate } from '#lib/charts.js';
 
-	let { data }: { data: { label: string; volume: number }[] } = $props();
+	let {
+		data,
+		tooltipLabel = tooltipDate
+	}: {
+		/** One bar per entry, oldest first. */
+		data: { date: Date; volume: number }[];
+		/** Tooltip heading for a bar's date. */
+		tooltipLabel?: (date: Date) => string;
+	} = $props();
 
 	const config = {
 		volume: { label: m.volume_kg(), color: CHART_COLORS.volume }
@@ -15,22 +23,25 @@
 <Chart.Container {config} class="h-[260px] w-full">
 	<BarChart
 		{data}
-		x="label"
+		x="date"
 		series={[
 			{
 				key: 'volume',
 				label: m.volume_kg(),
 				color: 'var(--color-volume)',
-				props: { radius: 3, rounded: 'top' }
+				props: { radius: 3, rounded: 'top', stroke: 'none' }
 			}
 		]}
 		props={{
-			xAxis: { ticks: sparseTicks(6) },
+			xAxis: { ticks: sparseTicks(6), ...timeAxis(data) },
 			yAxis: { format: (v: unknown) => formatCompact(Number(v)) }
 		}}
 	>
 		{#snippet tooltip()}
-			<Chart.Tooltip hideLabel />
+			<Chart.Tooltip
+				labelFormatter={(value: unknown) =>
+					value instanceof Date ? tooltipLabel(value) : String(value)}
+			/>
 		{/snippet}
 	</BarChart>
 </Chart.Container>

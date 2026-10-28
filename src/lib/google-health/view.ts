@@ -1,4 +1,4 @@
-import { formatNumber } from '$lib/format';
+import { formatNumber } from '#lib/format.js';
 
 export const HEALTH_CATEGORIES = [
 	'activity',

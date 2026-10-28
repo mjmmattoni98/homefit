@@ -1,30 +1,60 @@
 <script lang="ts">
-	import type { Pathname } from '$app/types';
+	import { refreshAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { api } from '$convex/_generated/api';
-	import { useAuth, useQuery } from 'convex-svelte';
-	import * as Alert from '$lib/components/ui/alert';
-	import { Badge } from '$lib/components/ui/badge';
-	import { Progress } from '$lib/components/ui/progress';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import { buttonVariants } from '$lib/components/ui/button';
-	import * as m from '$lib/paraglide/messages';
-	import { formatDateLong } from '$lib/format';
+	import { page } from '$app/state';
+	import { getConnectionStatus } from '#lib/remote/health.remote.js';
+	import * as Alert from '#lib/components/ui/alert/index.js';
+	import { Badge } from '#lib/components/ui/badge/index.js';
+	import { Progress } from '#lib/components/ui/progress/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { formatDateLong } from '#lib/format.js';
 	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
 	import InfoIcon from '@lucide/svelte/icons/info';
 
-	const auth = useAuth();
-	const connectionQuery = useQuery(api.googleHealth.model.getConnectionStatus, () =>
-		auth.isAuthenticated ? {} : 'skip'
-	);
+	// Background jobs and other tabs change what these pages show. Poll the cheap status query, and
+	// refresh every health query when the connection appears, disappears, changes status or syncs.
+	// While the worker is importing, retrying or deleting, refresh everything more often so the
+	// page follows its progress.
+	const STATUS_POLL_INTERVAL_MS = 30_000;
+	const IMPORT_REFRESH_INTERVAL_MS = 15_000;
+	const ACTIVE_STATUSES = new Set<string>(['connecting', 'backfilling', 'delayed', 'deleting']);
 
-	const connection = $derived(connectionQuery.data);
-	const isLoading = $derived(auth.isLoading || !auth.isAuthenticated || connectionQuery.isLoading);
+	const connectionQuery = getConnectionStatus();
+
+	const connection = $derived(connectionQuery.current);
+	const status = $derived(connection?.status);
+	const isLoading = $derived(!connectionQuery.ready && connectionQuery.error === undefined);
+
+	$effect(() => {
+		if (!page.data.googleHealthEnabled) return;
+		const interval =
+			status !== undefined && ACTIVE_STATUSES.has(status)
+				? setInterval(() => void refreshAll(), IMPORT_REFRESH_INTERVAL_MS)
+				: setInterval(() => void connectionQuery.refresh(), STATUS_POLL_INTERVAL_MS);
+		return () => clearInterval(interval);
+	});
+
+	// The connection state the page last saw, or undefined before it loads. Not reactive: it only
+	// remembers what the effect below last saw.
+	let seen: string | undefined;
+	$effect(() => {
+		if (connection === undefined) return;
+		const current =
+			connection === null
+				? 'none'
+				: `${connection.status}:${connection.lastSuccessfulSyncAt ?? 'never'}`;
+		if (seen !== undefined && current !== seen) void refreshAll();
+		seen = current;
+	});
 </script>
 
-{#if isLoading}
+{#if !page.data.googleHealthEnabled}
+	<!-- The optional integration is not configured on this server. -->
+{:else if isLoading}
 	<Skeleton class="h-14 w-full" />
-{:else if connectionQuery.error}
+{:else if connectionQuery.error !== undefined}
 	<Alert.Root variant="destructive">
 		<AlertCircleIcon aria-hidden="true" />
 		<Alert.Title>{m.health_query_error_title()}</Alert.Title>
@@ -36,7 +66,7 @@
 		<Alert.Title>{m.google_health_status_not_connected()}</Alert.Title>
 		<Alert.Description class="flex flex-wrap items-center justify-between gap-3">
 			<span>{m.google_health_not_connected_description()}</span>
-			<a href={resolve('/dashboard/import' as Pathname)} class={buttonVariants({ size: 'sm' })}>
+			<a href={resolve('/dashboard/import')} class={buttonVariants({ size: 'sm' })}>
 				{m.google_health_connect()}
 			</a>
 		</Alert.Description>
@@ -74,7 +104,7 @@
 			<Alert.Description class="flex flex-wrap items-center justify-between gap-3">
 				<span>{m.google_health_action_required_description()}</span>
 				<a
-					href={resolve('/dashboard/import' as Pathname)}
+					href={resolve('/dashboard/import')}
 					class={buttonVariants({ variant: 'outline', size: 'sm' })}
 				>
 					{m.google_health_review_access()}

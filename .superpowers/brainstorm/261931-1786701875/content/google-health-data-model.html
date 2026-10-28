@@ -1,0 +1,239 @@
+<h2>Data model and synchronization lifecycle</h2>
+<p class="subtitle">
+	The normalized envelope makes every record searchable and chartable; the original Google payload
+	preserves fields that vary by metric or appear in future API versions.
+</p>
+
+<div class="section">
+	<div class="label">Per-user records</div>
+	<div
+		style="
+			display: grid;
+			grid-template-columns: 1fr 44px 1.25fr 44px 1fr;
+			gap: 8px;
+			align-items: center;
+			margin-top: 10px;
+		"
+	>
+		<div
+			style="
+				border: 1px solid #cfd9d4;
+				border-radius: 12px;
+				background: #fff;
+				padding: 16px;
+				min-height: 220px;
+			"
+		>
+			<h3 style="margin-top: 0">Google connection</h3>
+			<div
+				style="
+					font:
+						12px/1.75 ui-monospace,
+						monospace;
+					color: #53635b;
+				"
+			>
+				<div><b style="color: #1e2e27">userId</b> · Clerk owner</div>
+				<div>
+					<b style="color: #1e2e27">status</b> · connecting/backfill/active/error/disconnected
+				</div>
+				<div><b style="color: #1e2e27">refreshToken</b> · AES-GCM encrypted</div>
+				<div><b style="color: #1e2e27">scopes</b> · granted read-only scopes</div>
+				<div><b style="color: #1e2e27">subscription</b> · Google identifiers</div>
+				<div><b style="color: #1e2e27">syncState</b> · cursors/checkpoints</div>
+				<div><b style="color: #1e2e27">lastSync/error</b> · user-visible state</div>
+			</div>
+		</div>
+		<div style="font-size: 24px; color: #398362; text-align: center">1 →</div>
+		<div
+			style="
+				border: 2px solid #398362;
+				border-radius: 12px;
+				background: #edf8f2;
+				padding: 16px;
+				min-height: 250px;
+				box-sizing: border-box;
+			"
+		>
+			<h3 style="margin-top: 0">
+				Health data point <span style="font-size: 11px; color: #398362">many</span>
+			</h3>
+			<div
+				style="
+					font:
+						12px/1.72 ui-monospace,
+						monospace;
+					color: #53635b;
+					display: grid;
+					grid-template-columns: 1fr 1fr;
+					gap: 0 12px;
+				"
+			>
+				<div><b style="color: #1e2e27">userId</b></div>
+				<div>ownership</div>
+				<div><b style="color: #1e2e27">externalName</b></div>
+				<div>deduplication key</div>
+				<div><b style="color: #1e2e27">dataType</b></div>
+				<div>steps, sleep…</div>
+				<div><b style="color: #1e2e27">category</b></div>
+				<div>activity, vitals…</div>
+				<div><b style="color: #1e2e27">start/end/sample</b></div>
+				<div>queryable time</div>
+				<div><b style="color: #1e2e27">value + unit</b></div>
+				<div>primary scalar</div>
+				<div><b style="color: #1e2e27">source</b></div>
+				<div>device/app/method</div>
+				<div><b style="color: #1e2e27">updateTime</b></div>
+				<div>correction detection</div>
+				<div><b style="color: #1e2e27">payloadJson</b></div>
+				<div>full-fidelity fields</div>
+			</div>
+			<div
+				style="
+					margin-top: 12px;
+					background: white;
+					border-radius: 7px;
+					padding: 8px;
+					font-size: 11px;
+					color: #52635b;
+				"
+			>
+				Indexed by user + type + time, and user + external name. Each Google point is one bounded
+				Convex document.
+			</div>
+		</div>
+		<div style="font-size: 24px; color: #398362; text-align: center">→</div>
+		<div
+			style="
+				border: 1px solid #cfd9d4;
+				border-radius: 12px;
+				background: #fff;
+				padding: 16px;
+				min-height: 220px;
+			"
+		>
+			<h3 style="margin-top: 0">Daily metric summary</h3>
+			<div
+				style="
+					font:
+						12px/1.75 ui-monospace,
+						monospace;
+					color: #53635b;
+				"
+			>
+				<div><b style="color: #1e2e27">userId + dataType + date</b></div>
+				<div><b style="color: #1e2e27">count</b> · observations</div>
+				<div><b style="color: #1e2e27">latest</b> · value/time</div>
+				<div><b style="color: #1e2e27">sum/average/min/max</b></div>
+				<div><b style="color: #1e2e27">duration</b> · interval metrics</div>
+				<div><b style="color: #1e2e27">localDate</b> · Google civil time</div>
+			</div>
+			<div
+				style="
+					margin-top: 12px;
+					background: #f0f4f2;
+					border-radius: 7px;
+					padding: 8px;
+					font-size: 11px;
+					color: #52635b;
+				"
+			>
+				Small chart-ready rows keep dashboard queries fast even after years of history.
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="section" style="margin-top: 22px">
+	<div class="label">Metric presentation registry</div>
+	<div
+		style="
+			margin-top: 8px;
+			border: 1px solid #d6dfda;
+			border-radius: 10px;
+			padding: 13px;
+			background: #fff;
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 8px;
+			text-align: center;
+			font-size: 12px;
+		"
+	>
+		<div style="background: #eef6f2; border-radius: 7px; padding: 9px">
+			<b>Category</b><br /><span style="color: #637068"
+				>Activity, Vitals, Sleep, Body, Nutrition, Other</span
+			>
+		</div>
+		<div style="background: #eef6f2; border-radius: 7px; padding: 9px">
+			<b>Formatter</b><br /><span style="color: #637068"
+				>Title, primary value, units, detail fields</span
+			>
+		</div>
+		<div style="background: #eef6f2; border-radius: 7px; padding: 9px">
+			<b>Aggregation</b><br /><span style="color: #637068"
+				>Sum, latest, average, range, duration</span
+			>
+		</div>
+		<div style="background: #eef6f2; border-radius: 7px; padding: 9px">
+			<b>Visualization</b><br /><span style="color: #637068"
+				>Trend, interval, stages, sessions, records</span
+			>
+		</div>
+	</div>
+	<p style="font-size: 12px; color: #637068; margin-bottom: 0">
+		Known Google types receive tailored cards and charts. An unknown future type automatically
+		appears under “Other” with a generic record view, so it is imported and visible without a schema
+		migration.
+	</p>
+</div>
+
+<div class="section" style="margin-top: 22px">
+	<div class="label">Idempotent import lifecycle</div>
+	<div
+		style="
+			display: grid;
+			grid-template-columns: repeat(6, 1fr);
+			gap: 7px;
+			margin-top: 10px;
+			text-align: center;
+			font-size: 11px;
+		"
+	>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>1. Discover</b><br /><span style="color: #637068">available data types</span>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>2. Fetch</b><br /><span style="color: #637068">one bounded page</span>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>3. Normalize</b><br /><span style="color: #637068">common envelope</span>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>4. Upsert</b><br /><span style="color: #637068">external name + update time</span>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>5. Summarize</b><br /><span style="color: #637068">affected local dates</span>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 11px; background: #fff">
+			<b>6. Continue</b><br /><span style="color: #637068">schedule next page</span>
+		</div>
+	</div>
+	<p style="font-size: 12px; color: #637068">
+		Corrections replace older versions; provider deletions remove the corresponding data point and
+		rebuild affected summaries. Disconnecting alone never deletes records.
+	</p>
+</div>
+
+<div class="options" style="margin-top: 18px">
+	<div class="option" data-choice="data-model-approved" onclick="toggleSelect(this)">
+		<div class="letter">✓</div>
+		<div class="content">
+			<h3>Approve data model and sync lifecycle</h3>
+			<p>
+				Use the generic envelope, full payload preservation, chart summaries, metric registry, and
+				paginated idempotent jobs.
+			</p>
+		</div>
+	</div>
+</div>

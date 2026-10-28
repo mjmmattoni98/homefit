@@ -1,11 +1,10 @@
 <script lang="ts">
-	import type { Pathname } from '$app/types';
 	import { resolve } from '$app/paths';
-	import * as Card from '$lib/components/ui/card';
-	import { Badge } from '$lib/components/ui/badge';
-	import * as m from '$lib/paraglide/messages';
-	import { formatDateLong } from '$lib/format';
-	import { metricLabel } from '$lib/google-health/labels';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import { Badge } from '#lib/components/ui/badge/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { formatDateLong } from '#lib/format.js';
+	import { metricLabel } from '#lib/google-health/labels.js';
 	import {
 		formatDuration,
 		formatMetricNumber,
@@ -13,18 +12,17 @@
 		trendDelta,
 		type HealthMetric,
 		type HealthSummary
-	} from '$lib/google-health/view';
+	} from '#lib/google-health/view.js';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 	import TrendingDownIcon from '@lucide/svelte/icons/trending-down';
 	import TrendingUpIcon from '@lucide/svelte/icons/trending-up';
 
 	type Props = {
 		metric: HealthMetric;
-		href: string;
 		trend?: HealthSummary[];
 	};
 
-	let { metric, href, trend = [] }: Props = $props();
+	let { metric, trend = [] }: Props = $props();
 
 	const title = $derived(metricLabel(metric.dataType));
 	const value = $derived(formatSummaryValue(metric, metric.latestSummary, m.health_recorded()));
@@ -44,7 +42,7 @@
 </script>
 
 <a
-	href={resolve(href as Pathname)}
+	href={resolve('/dashboard/health/metrics/[dataType]', { dataType: metric.dataType })}
 	aria-label={m.health_open_metric({ metric: title })}
 	class="block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
 >

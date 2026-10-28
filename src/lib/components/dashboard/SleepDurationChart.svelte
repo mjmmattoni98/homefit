@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { AreaChart } from 'layerchart';
 	import { curveMonotoneX } from 'd3-shape';
-	import * as Chart from '$lib/components/ui/chart';
-	import * as m from '$lib/paraglide/messages';
-	import { formatDateAxis } from '$lib/format';
-	import { CHART_COLORS } from '$lib/charts';
+	import * as Chart from '#lib/components/ui/chart/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { CHART_COLORS, timeAxis, tooltipDate } from '#lib/charts.js';
 
 	let { data }: { data: { date: Date; inBed: number | undefined; asleep: number | undefined }[] } =
 		$props();
@@ -16,9 +15,11 @@
 </script>
 
 <Chart.Container {config} class="h-[260px] w-full">
+	<!-- Both series are hours of the same night, so they overlap rather than stack. -->
 	<AreaChart
 		{data}
 		x="date"
+		seriesLayout="overlap"
 		series={[
 			{
 				key: 'inBed',
@@ -44,14 +45,12 @@
 			}
 		]}
 		props={{
-			xAxis: {
-				format: (v: unknown) => (v instanceof Date ? formatDateAxis(v.getTime()) : String(v))
-			},
+			xAxis: timeAxis(data),
 			yAxis: { format: (v: unknown) => `${v} h` }
 		}}
 	>
 		{#snippet tooltip()}
-			<Chart.Tooltip />
+			<Chart.Tooltip labelFormatter={tooltipDate} />
 		{/snippet}
 	</AreaChart>
 </Chart.Container>

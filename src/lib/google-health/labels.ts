@@ -1,4 +1,4 @@
-import * as m from '$lib/paraglide/messages';
+import * as m from '#lib/paraglide/messages.js';
 import type { HealthCategory } from './view';
 
 const metricLabels: Readonly<Record<string, () => string>> = {

@@ -4,11 +4,11 @@ import { render } from 'vitest-browser-svelte';
 import GoogleHealthImportCard from './GoogleHealthImportCard.svelte';
 
 const mocks = vi.hoisted(() => ({
-	auth: { isAuthenticated: true, isLoading: false },
 	connectionQuery: {
-		data: null as Record<string, unknown> | null | undefined,
+		current: null as Record<string, unknown> | null | undefined,
 		error: undefined as Error | undefined,
-		isLoading: false
+		ready: true,
+		refresh: vi.fn()
 	},
 	beginConnection: vi.fn(),
 	syncNow: vi.fn(),
@@ -18,27 +18,12 @@ const mocks = vi.hoisted(() => ({
 	toastError: vi.fn()
 }));
 
-vi.mock('$convex/_generated/api', () => ({
-	api: {
-		googleHealth: {
-			model: { getConnectionStatus: 'getConnectionStatus' },
-			account: {
-				syncNow: 'syncNow',
-				disconnect: 'disconnect',
-				deleteImportedData: 'deleteImportedData'
-			},
-			oauth: { beginConnection: 'beginConnection' }
-		}
-	}
-}));
-
-vi.mock('convex-svelte', () => ({
-	useAuth: () => mocks.auth,
-	useQuery: () => mocks.connectionQuery,
-	useAction: (reference: string) =>
-		reference === 'beginConnection' ? mocks.beginConnection : mocks.disconnect,
-	useMutation: (reference: string) =>
-		reference === 'syncNow' ? mocks.syncNow : mocks.deleteImportedData
+vi.mock('#lib/remote/health.remote.js', () => ({
+	getConnectionStatus: () => mocks.connectionQuery,
+	beginConnection: mocks.beginConnection,
+	syncNow: mocks.syncNow,
+	disconnect: mocks.disconnect,
+	deleteImportedData: mocks.deleteImportedData
 }));
 
 vi.mock('svelte-sonner', () => ({
@@ -60,11 +45,9 @@ function connection(status: string, completed = 40, total = 40): Record<string, 
 
 describe('GoogleHealthImportCard', () => {
 	beforeEach(() => {
-		mocks.auth.isAuthenticated = true;
-		mocks.auth.isLoading = false;
-		mocks.connectionQuery.data = null;
+		mocks.connectionQuery.current = null;
 		mocks.connectionQuery.error = undefined;
-		mocks.connectionQuery.isLoading = false;
+		mocks.connectionQuery.ready = true;
 		vi.clearAllMocks();
 		mocks.beginConnection.mockResolvedValue({ authorizationUrl: 'https://accounts.google.com/' });
 		mocks.syncNow.mockResolvedValue(undefined);
@@ -84,7 +67,7 @@ describe('GoogleHealthImportCard', () => {
 	});
 
 	it('reports backfill progress by metric type', async () => {
-		mocks.connectionQuery.data = connection('backfilling', 7, 40);
+		mocks.connectionQuery.current = connection('backfilling', 7, 40);
 		render(GoogleHealthImportCard);
 
 		await expect.element(page.getByText('7 of 40 metric types completed')).toBeInTheDocument();
@@ -98,24 +81,47 @@ describe('GoogleHealthImportCard', () => {
 		['disconnected', 'Imported data retained'],
 		['deleting', 'Your imported Google Health data is being deleted.']
 	])('renders the %s connection state', async (status, expectedText) => {
-		mocks.connectionQuery.data = connection(status);
+		mocks.connectionQuery.current = connection(status);
 		render(GoogleHealthImportCard);
 
 		await expect.element(page.getByText(expectedText, { exact: false })).toBeInTheDocument();
 	});
 
+	it.each([
+		['backfilling', 5_000, 1],
+		['delayed', 5_000, 1],
+		['deleting', 5_000, 1],
+		['active', 5_000, 0],
+		['active', 30_000, 1],
+		['action_required', 30_000, 1],
+		['disconnected', 30_000, 1]
+	])('polls the status while %s (%i ms)', async (status, elapsed, expectedRefreshes) => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		try {
+			mocks.connectionQuery.current = connection(status, 7, 40);
+			render(GoogleHealthImportCard);
+			await expect.element(page.getByText('Google Health', { exact: true })).toBeInTheDocument();
+
+			vi.advanceTimersByTime(elapsed);
+
+			expect(mocks.connectionQuery.refresh).toHaveBeenCalledTimes(expectedRefreshes);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('queues a manual sync for an active connection', async () => {
-		mocks.connectionQuery.data = connection('active');
+		mocks.connectionQuery.current = connection('active');
 		render(GoogleHealthImportCard);
 
 		await page.getByRole('button', { name: 'Sync now' }).click();
 
-		expect(mocks.syncNow).toHaveBeenCalledWith({});
-		await expect.element(page.getByText('Connected')).toBeInTheDocument();
+		expect(mocks.syncNow).toHaveBeenCalledWith();
+		await expect.element(page.getByText('Connected', { exact: true })).toBeInTheDocument();
 	});
 
 	it('explains that disconnecting retains imported data', async () => {
-		mocks.connectionQuery.data = connection('active');
+		mocks.connectionQuery.current = connection('active');
 		render(GoogleHealthImportCard);
 
 		await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
@@ -125,11 +131,11 @@ describe('GoogleHealthImportCard', () => {
 			.toBeInTheDocument();
 		await dialog.getByRole('button', { name: 'Disconnect Google Health' }).click();
 
-		expect(mocks.disconnect).toHaveBeenCalledWith({});
+		expect(mocks.disconnect).toHaveBeenCalledWith();
 	});
 
 	it('requires the exact phrase before deleting imported data', async () => {
-		mocks.connectionQuery.data = connection('disconnected');
+		mocks.connectionQuery.current = connection('disconnected');
 		render(GoogleHealthImportCard);
 
 		await page.getByRole('button', { name: 'Delete imported data', exact: true }).click();

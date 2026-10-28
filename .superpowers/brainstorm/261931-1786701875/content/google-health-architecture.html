@@ -1,0 +1,228 @@
+<h2>Architecture: secure per-user Google Health synchronization</h2>
+<p class="subtitle">
+	The browser never receives a Google client secret or refresh token. Convex owns OAuth state,
+	encrypted credentials, ingestion, and scheduled recovery.
+</p>
+
+<div class="mockup">
+	<div class="mockup-header">Connection and initial import</div>
+	<div class="mockup-body" style="padding: 24px">
+		<div
+			style="
+				display: grid;
+				grid-template-columns: 1fr 54px 1.2fr 54px 1fr;
+				align-items: center;
+				gap: 8px;
+				text-align: center;
+			"
+		>
+			<div style="border: 1px solid #cfd9d4; border-radius: 12px; padding: 18px; background: #fff">
+				<div style="font-size: 24px; margin-bottom: 6px">🧑‍💻</div>
+				<b>HomeFit browser</b>
+				<p style="margin: 6px 0 0; color: #66736d; font-size: 12px">
+					Clerk-authenticated user selects “Connect Google Health”
+				</p>
+			</div>
+			<div style="font-size: 25px; color: #398362">→</div>
+			<div
+				style="border: 2px solid #398362; border-radius: 12px; padding: 18px; background: #edf8f2"
+			>
+				<div style="font-size: 24px; margin-bottom: 6px">⬡</div>
+				<b>Convex backend</b>
+				<p style="margin: 6px 0 0; color: #52635b; font-size: 12px">
+					Creates one-time OAuth state and returns the Google consent URL
+				</p>
+			</div>
+			<div style="font-size: 25px; color: #398362">→</div>
+			<div style="border: 1px solid #cfd9d4; border-radius: 12px; padding: 18px; background: #fff">
+				<div style="font-size: 24px; margin-bottom: 6px">G</div>
+				<b>Google consent</b>
+				<p style="margin: 6px 0 0; color: #66736d; font-size: 12px">
+					Requests all available read-only health scopes and offline access
+				</p>
+			</div>
+		</div>
+
+		<div
+			style="
+				display: flex;
+				justify-content: flex-end;
+				margin: 10px 12% 10px 0;
+				font-size: 25px;
+				color: #398362;
+			"
+		>
+			↙
+		</div>
+
+		<div
+			style="
+				display: grid;
+				grid-template-columns: 1fr 54px 1.2fr 54px 1fr;
+				align-items: center;
+				gap: 8px;
+				text-align: center;
+			"
+		>
+			<div style="border: 1px solid #cfd9d4; border-radius: 12px; padding: 18px; background: #fff">
+				<div style="font-size: 24px; margin-bottom: 6px">📊</div>
+				<b>Category dashboard</b>
+				<p style="margin: 6px 0 0; color: #66736d; font-size: 12px">
+					Shows sync progress, then all available metrics by category
+				</p>
+			</div>
+			<div style="font-size: 25px; color: #398362">←</div>
+			<div
+				style="border: 2px solid #398362; border-radius: 12px; padding: 18px; background: #edf8f2"
+			>
+				<div style="font-size: 24px; margin-bottom: 6px">🔐</div>
+				<b>OAuth callback action</b>
+				<p style="margin: 6px 0 0; color: #52635b; font-size: 12px">
+					Consumes state once, exchanges code, encrypts refresh token, schedules backfill
+				</p>
+			</div>
+			<div style="font-size: 25px; color: #398362">←</div>
+			<div style="border: 1px solid #cfd9d4; border-radius: 12px; padding: 18px; background: #fff">
+				<div style="font-size: 24px; margin-bottom: 6px">↩</div>
+				<b>Google redirect</b>
+				<p style="margin: 6px 0 0; color: #66736d; font-size: 12px">
+					Returns an authorization code—never tokens—to the callback
+				</p>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="mockup" style="margin-top: 18px">
+	<div class="mockup-header">Continuous synchronization</div>
+	<div class="mockup-body" style="padding: 22px">
+		<div
+			style="
+				display: grid;
+				grid-template-columns: 1fr 50px 1.25fr 50px 1fr;
+				align-items: stretch;
+				gap: 8px;
+				text-align: center;
+			"
+		>
+			<div
+				style="
+					border: 1px solid #cfd9d4;
+					border-radius: 12px;
+					padding: 16px;
+					background: #fff;
+					display: flex;
+					flex-direction: column;
+					justify-content: center;
+				"
+			>
+				<b>Google Health API</b>
+				<p style="font-size: 12px; color: #66736d; margin: 7px 0 0">
+					Data points, corrections, deletions, pagination, subscriptions
+				</p>
+			</div>
+			<div
+				style="
+					display: flex;
+					align-items: center;
+					justify-content: center;
+					font-size: 22px;
+					color: #398362;
+				"
+			>
+				⇄
+			</div>
+			<div
+				style="border: 2px solid #398362; border-radius: 12px; padding: 16px; background: #edf8f2"
+			>
+				<b>Sync coordinator</b>
+				<div
+					style="
+						display: grid;
+						grid-template-columns: 1fr 1fr;
+						gap: 6px;
+						margin-top: 10px;
+						font-size: 11px;
+					"
+				>
+					<div style="background: white; border-radius: 7px; padding: 7px">
+						Verified webhook<br /><span style="color: #66736d">near-real-time</span>
+					</div>
+					<div style="background: white; border-radius: 7px; padding: 7px">
+						Daily reconcile<br /><span style="color: #66736d">missed events</span>
+					</div>
+					<div style="background: white; border-radius: 7px; padding: 7px">
+						Refresh access<br /><span style="color: #66736d">encrypted token</span>
+					</div>
+					<div style="background: white; border-radius: 7px; padding: 7px">
+						Idempotent upsert<br /><span style="color: #66736d">no duplicates</span>
+					</div>
+				</div>
+			</div>
+			<div
+				style="
+					display: flex;
+					align-items: center;
+					justify-content: center;
+					font-size: 22px;
+					color: #398362;
+				"
+			>
+				→
+			</div>
+			<div style="border: 1px solid #cfd9d4; border-radius: 12px; padding: 16px; background: #fff">
+				<b>Hybrid data model</b>
+				<div style="margin-top: 9px; text-align: left; font-size: 11px; display: grid; gap: 5px">
+					<span style="background: #f0f4f2; padding: 6px; border-radius: 5px"
+						>Connections + sync state</span
+					>
+					<span style="background: #f0f4f2; padding: 6px; border-radius: 5px"
+						>Normalized data points</span
+					>
+					<span style="background: #f0f4f2; padding: 6px; border-radius: 5px"
+						>Metric-specific payload</span
+					>
+					<span style="background: #f0f4f2; padding: 6px; border-radius: 5px"
+						>Daily chart summaries</span
+					>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="pros-cons" style="margin-top: 18px">
+	<div class="pros">
+		<h4>Security boundaries</h4>
+		<ul>
+			<li>Read-only Google scopes</li>
+			<li>Per-user Clerk ownership checks</li>
+			<li>Encrypted refresh tokens</li>
+			<li>Single-use, expiring OAuth state</li>
+			<li>Verified webhook authenticity</li>
+		</ul>
+	</div>
+	<div class="pros">
+		<h4>Reliability boundaries</h4>
+		<ul>
+			<li>All-history paginated backfill</li>
+			<li>Webhook-triggered incremental imports</li>
+			<li>Daily reconciliation</li>
+			<li>Idempotent external IDs</li>
+			<li>Visible sync status and failures</li>
+		</ul>
+	</div>
+</div>
+
+<div class="options" style="margin-top: 18px">
+	<div class="option" data-choice="architecture-approved" onclick="toggleSelect(this)">
+		<div class="letter">✓</div>
+		<div class="content">
+			<h3>Approve this architecture</h3>
+			<p>
+				Use Convex as the sole backend for OAuth, secure token storage, ingestion, webhooks,
+				schedules, and health records.
+			</p>
+		</div>
+	</div>
+</div>

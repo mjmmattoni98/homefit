@@ -22,16 +22,13 @@ You MUST use this tool whenever writing Svelte code before sending it to the use
 Generates a Svelte Playground link with the provided code.
 After completing the code, ask the user if they want a playground link. Only call this tool after user confirmation and NEVER if code was written to files in their project.
 
-<!-- convex-ai-start -->
+## Project conventions
 
-This project uses [Convex](https://convex.dev) as its backend.
+HomeFit is a self-hosted SvelteKit 3 app backed by PostgreSQL.
 
-When working on Convex code, **always read
-`src/convex/_generated/ai/guidelines.md` first** for important guidelines on
-how to correctly use Convex APIs and patterns. The file contains rules that
-override what you may have learned about Convex from training data.
-
-Convex agent skills for common tasks can be installed by running
-`npx convex ai-files install`.
-
-<!-- convex-ai-end -->
+- Data access uses Drizzle ORM. The schema lives in `src/lib/server/db/schema.ts`; after changing it, run `bun run db:generate` and commit the new migration in `drizzle/`. Migrations are applied automatically at startup.
+- Authentication uses Better Auth (`src/lib/server/auth.ts`). Its tables in `src/lib/server/db/auth.schema.ts` are generated with `bun run auth:schema`.
+- Client code talks to the server through remote functions in `src/lib/remote/*.remote.ts`. Server modules take a Drizzle `Database` argument so they can be tested against PGlite (`src/lib/server/testing/database.ts`).
+- Environment variables are declared and validated in `src/env.ts` and read through `$app/env/private`.
+- Background work (Google Health sync, webhooks, maintenance) runs on pg-boss (`src/lib/server/jobs.ts`). Google Health is optional and fully disabled when its variables are unset.
+- Before finishing, run `bun run check`, `bun run lint` and `bun run test:unit --run`.

@@ -1,19 +1,24 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api } from '$convex/_generated/api';
-	import { useAction, useAuth, useMutation, useQuery } from 'convex-svelte';
-	import * as m from '$lib/paraglide/messages';
-	import * as Alert from '$lib/components/ui/alert';
-	import * as AlertDialog from '$lib/components/ui/alert-dialog';
-	import * as Card from '$lib/components/ui/card';
-	import * as Field from '$lib/components/ui/field';
-	import { Badge } from '$lib/components/ui/badge';
-	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
-	import { Progress } from '$lib/components/ui/progress';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import { Spinner } from '$lib/components/ui/spinner';
-	import { formatDateLong } from '$lib/format';
+	import {
+		beginConnection,
+		deleteImportedData,
+		disconnect,
+		getConnectionStatus,
+		syncNow
+	} from '#lib/remote/health.remote.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import * as Alert from '#lib/components/ui/alert/index.js';
+	import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import * as Field from '#lib/components/ui/field/index.js';
+	import { Badge } from '#lib/components/ui/badge/index.js';
+	import { Button } from '#lib/components/ui/button/index.js';
+	import { Input } from '#lib/components/ui/input/index.js';
+	import { Progress } from '#lib/components/ui/progress/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import { Spinner } from '#lib/components/ui/spinner/index.js';
+	import { formatDateLong } from '#lib/format.js';
 	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
 	import HeartPulseIcon from '@lucide/svelte/icons/heart-pulse';
 	import InfoIcon from '@lucide/svelte/icons/info';
@@ -22,33 +27,41 @@
 	const IMPORT_RETURN_PATH = '/dashboard/import';
 	const DELETE_CONFIRMATION = 'DELETE GOOGLE DATA';
 	const SUPPORTED_METRIC_TYPES = 40;
+	const POLL_INTERVAL_MS = 5_000;
+	const STATUS_POLL_INTERVAL_MS = 30_000;
+	const ACTIVE_STATUSES = new Set<string>(['connecting', 'backfilling', 'delayed', 'deleting']);
 	type Props = { navigate?: (authorizationUrl: string) => void };
 
 	let { navigate = (authorizationUrl) => window.location.assign(authorizationUrl) }: Props =
 		$props();
 
-	const auth = useAuth();
-	const connectionQuery = useQuery(api.googleHealth.model.getConnectionStatus, () =>
-		auth.isAuthenticated ? {} : 'skip'
-	);
-	const beginConnection = useAction(api.googleHealth.oauth.beginConnection);
-	const syncNow = useMutation(api.googleHealth.account.syncNow);
-	const disconnect = useAction(api.googleHealth.account.disconnect);
-	const deleteImportedData = useAction(api.googleHealth.account.deleteImportedData);
+	const connectionQuery = getConnectionStatus();
 
 	let pending = $state<'connect' | 'sync' | 'disconnect' | 'delete' | null>(null);
 	let disconnectOpen = $state(false);
 	let deleteOpen = $state(false);
 	let deleteConfirmation = $state('');
 
-	const connection = $derived(connectionQuery.data);
-	const isLoading = $derived(auth.isLoading || !auth.isAuthenticated || connectionQuery.isLoading);
+	const connection = $derived(connectionQuery.current);
+	const status = $derived(connection?.status);
+	const isLoading = $derived(!connectionQuery.ready && connectionQuery.error === undefined);
 	const isPending = $derived(pending !== null);
 	const completedTypes = $derived(connection?.backfillCompletedTypes ?? 0);
 	const totalTypes = $derived(connection?.backfillTotalTypes ?? 0);
 	const hasPartialAccess = $derived(
 		connection !== null && connection !== undefined && totalTypes < SUPPORTED_METRIC_TYPES
 	);
+
+	// Progress is written by the background worker, and background syncs and other tabs change the
+	// connection too: poll often while the worker is in flight or retrying, slowly otherwise.
+	$effect(() => {
+		const interval =
+			status !== undefined && ACTIVE_STATUSES.has(status)
+				? POLL_INTERVAL_MS
+				: STATUS_POLL_INTERVAL_MS;
+		const timer = setInterval(() => void connectionQuery.refresh(), interval);
+		return () => clearInterval(timer);
+	});
 
 	onMount(() => {
 		const result = new URL(window.location.href).searchParams.get('googleHealth');
@@ -72,7 +85,7 @@
 		if (isPending) return;
 		pending = 'sync';
 		try {
-			await syncNow({});
+			await syncNow();
 			toast.success(m.google_health_feedback_sync());
 		} catch {
 			toast.error(m.google_health_action_error());
@@ -85,7 +98,7 @@
 		if (isPending) return;
 		pending = 'disconnect';
 		try {
-			await disconnect({});
+			await disconnect();
 			disconnectOpen = false;
 			toast.success(m.google_health_feedback_disconnected());
 		} catch {
@@ -153,7 +166,7 @@
 				<Skeleton class="h-4 w-3/4" />
 				<Skeleton class="h-7 w-40" />
 			</div>
-		{:else if connectionQuery.error}
+		{:else if connectionQuery.error !== undefined}
 			<Alert.Root variant="destructive">
 				<AlertCircleIcon aria-hidden="true" />
 				<Alert.Title>{m.google_health_error_title()}</Alert.Title>

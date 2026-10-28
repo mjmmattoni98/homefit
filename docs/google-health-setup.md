@@ -1,61 +1,41 @@
 # Google Health setup
 
-HomeFit uses one Google Cloud project-level subscriber and a separate OAuth connection for each signed-in user. Users grant read-only access. HomeFit performs the historical import in the background, then stays current through Google webhooks and daily reconciliation.
+The Google Health integration is optional. When `GOOGLE_HEALTH_CLIENT_ID`, `GOOGLE_HEALTH_CLIENT_SECRET` and `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY` are empty, HomeFit disables it completely: the import card, the OAuth and webhook endpoints and the background jobs are all turned off. Setting only some of them is treated as a mistake and stops the app from starting.
 
-The Google Health API must already be enabled in the same project as the OAuth client.
+When enabled, each HomeFit user connects their own Google account and grants read-only access. HomeFit imports the full history in the background, then keeps it current through a daily reconciliation at 03:15 UTC, the **Sync now** button and, if you configure them, Google webhooks. Refresh tokens are encrypted with AES-GCM before they are stored in PostgreSQL.
 
-## 1. Prepare the environment values
+The Google Health API must be enabled in the same Google Cloud project as the OAuth client.
 
-Copy `.env.example` into your preferred local or deployment secret store. Keep real values out of source control.
+## 1. Configure HomeFit
 
-Frontend and deployment URLs:
+Add these values to `.env` (see [`.env.example`](../.env.example)) and restart HomeFit (`docker compose up -d`):
 
-- `PUBLIC_CONVEX_URL`: the Convex client URL used by the web app.
-- `PUBLIC_CONVEX_SITE_URL`: the public Convex HTTP Actions origin, without a trailing slash.
-- `HOMEFIT_APP_URL`: the public HomeFit web origin, without a path or trailing slash. `http://localhost:<port>` is accepted only for local development.
+| Variable                                     | Value                                                                                      |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `ORIGIN`                                     | Public URL of HomeFit. Google redirects back to it.                                        |
+| `GOOGLE_HEALTH_CLIENT_ID`                    | OAuth client ID.                                                                           |
+| `GOOGLE_HEALTH_CLIENT_SECRET`                | OAuth client secret.                                                                       |
+| `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`         | `openssl rand -base64 32` (canonical base64 of exactly 32 bytes).                          |
+| `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION` | `v1` to start with.                                                                        |
+| `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS`          | `{}` to start with. Holds retired keys during a rotation.                                  |
+| `GOOGLE_HEALTH_REDIRECT_URI`                 | Optional. Defaults to `${ORIGIN}/api/google-health/oauth/callback`.                        |
+| `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`        | Optional. Enables webhooks (section 3), e.g. `Bearer ` followed by `openssl rand -hex 32`. |
 
-Google OAuth values:
+`GOOGLE_HEALTH_PROJECT_NUMBER` and `GOOGLE_HEALTH_SUBSCRIBER_ID` are only used while creating the webhook subscriber and are not read by the app.
 
-- `GOOGLE_HEALTH_CLIENT_ID`
-- `GOOGLE_HEALTH_CLIENT_SECRET`
-- `GOOGLE_HEALTH_REDIRECT_URI`
-
-Runtime security values:
-
-- `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`: canonical base64 for exactly 32 random bytes. Generate it with `openssl rand -base64 32`.
-- `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION`: start with `v1`.
-- `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS`: start with `{}`. During a later key rotation, retain old version-to-key mappings until all stored tokens have been re-encrypted.
-- `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`: an independent high-entropy value sent as the complete `Authorization` header. A suitable value is `Bearer ` followed by at least 32 random bytes encoded as hex or base64.
-
-Subscriber setup values, which are not required by the running application:
-
-- `GOOGLE_HEALTH_PROJECT_NUMBER`: the numeric Google Cloud project number, not the project ID.
-- `GOOGLE_HEALTH_SUBSCRIBER_ID`: use `homefit-health`.
-
-Set these eight values in the target Convex deployment through the Convex dashboard's Environment Variables page:
-
-1. `GOOGLE_HEALTH_CLIENT_ID`
-2. `GOOGLE_HEALTH_CLIENT_SECRET`
-3. `GOOGLE_HEALTH_REDIRECT_URI`
-4. `HOMEFIT_APP_URL`
-5. `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY`
-6. `GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION`
-7. `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS`
-8. `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION`
-
-Classify the Convex deployment as development or production before changing its environment. Never paste secret values into committed scripts or captured command output.
+Keep the encryption key safe: without it, stored tokens cannot be decrypted and every user has to reconnect.
 
 ## 2. Configure the OAuth client
 
-In Google Cloud Console, open the OAuth client of type **Web application** and add this exact authorized redirect URI:
+In Google Cloud Console, open an OAuth client of type **Web application** and add this authorized redirect URI:
 
 ```text
-${PUBLIC_CONVEX_SITE_URL}/google-health/oauth/callback
+${ORIGIN}/api/google-health/oauth/callback
 ```
 
-Set `GOOGLE_HEALTH_REDIRECT_URI` to that exact same value. Scheme, host, path, and trailing slash must match exactly.
+It must match `GOOGLE_HEALTH_REDIRECT_URI` (or its default) exactly, including scheme, port and path. Google accepts `http://localhost:<port>` for local development; every other host needs HTTPS.
 
-Configure the OAuth consent screen with the app name, support contact, privacy-policy details required for your publishing state, and these seven read-only scopes:
+Configure the OAuth consent screen with the app name, support contact, any privacy-policy details required for your publishing state, and these seven read-only scopes:
 
 ```text
 https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly
@@ -67,30 +47,31 @@ https://www.googleapis.com/auth/googlehealth.nutrition.readonly
 https://www.googleapis.com/auth/googlehealth.sleep.readonly
 ```
 
-The location scope is requested for API compatibility, but HomeFit does not import or store route/location records.
+The location scope is requested for API compatibility; HomeFit does not import or store route or location records.
 
-While the consent screen is in testing, add every person who will connect as a Google test user. An unverified external app is limited to test users and may be subject to Google's 100-user cap and shorter-lived testing refresh tokens. Complete Google's sensitive/restricted-scope verification and production security review before opening the integration to arbitrary users. See Google's [OAuth production readiness guide](https://developers.google.com/identity/protocols/oauth2/production-readiness/policy-compliance) and the [Google Health API documentation](https://developers.google.com/health-and-fitness/guides/health-api).
+While the consent screen is in testing, add every person who will connect as a Google test user. An unverified external app is limited to test users, may be subject to Google's 100-user cap, and receives shorter-lived refresh tokens. Complete Google's sensitive and restricted scope verification before opening the integration to arbitrary users. See Google's [OAuth production readiness guide](https://developers.google.com/identity/protocols/oauth2/production-readiness/policy-compliance) and the [Google Health API documentation](https://developers.google.com/health-and-fitness/guides/health-api).
 
-## 3. Configure the project subscriber
+## 3. Configure webhooks (optional)
+
+Without webhooks, data still arrives through the daily reconciliation and **Sync now**. Webhooks make updates near real time, but Google can only deliver them to a publicly reachable HTTPS `ORIGIN`.
 
 The webhook endpoint is:
 
 ```text
-${PUBLIC_CONVEX_SITE_URL}/google-health/webhook
+${ORIGIN}/api/google-health/webhook
 ```
 
-Use a principal with Google Health API Editor/Admin access. In the Google Health API subscriber create/update method or API Explorer, use:
+Set `GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION` and restart HomeFit before creating the subscriber, because Google verifies the endpoint while you create it. Then, with a principal that has Google Health API Editor or Admin access, call the subscriber create/update method (or use the API Explorer) with:
 
-- Parent project: `projects/${GOOGLE_HEALTH_PROJECT_NUMBER}`
+- Parent project: `projects/${GOOGLE_HEALTH_PROJECT_NUMBER}` — the numeric project number, not the project ID
 - Subscriber ID: `${GOOGLE_HEALTH_SUBSCRIBER_ID}`
 - One `AUTOMATIC` subscriber configuration
-- The numeric project number, never the human-readable project ID
 
-Submit this body after substituting values only in the authenticated request. Do not save the rendered body in the repository because it contains the webhook authorization secret.
+Substitute the values only in the authenticated request, and never commit the rendered body: it contains the webhook secret.
 
 ```json
 {
-	"endpointUri": "${PUBLIC_CONVEX_SITE_URL}/google-health/webhook",
+	"endpointUri": "${ORIGIN}/api/google-health/webhook",
 	"subscriberConfigs": [
 		{
 			"dataTypes": [
@@ -131,31 +112,27 @@ Submit this body after substituting values only in the authenticated request. Do
 }
 ```
 
-The other readable registry types do not currently support Google webhook subscriptions. HomeFit still imports them initially and refreshes them during scheduled reconciliation.
+The other readable data types do not support webhook subscriptions yet; HomeFit imports them initially and refreshes them during reconciliation.
 
-Google performs a two-step endpoint check when the subscriber is created or updated:
+Google checks the endpoint in two steps: the authorized `{"type":"verification"}` request must return HTTP `201`, and an unauthenticated challenge must return `401`. HomeFit rejects unauthorized requests before reading their body. Authenticated notifications are stored and acknowledged with `204`, then a background job verifies Google's signature against its public keyset before any data changes. Deliveries that cannot be verified yet (for example while the keyset is unreachable) are retried with backoff for up to seven days.
 
-1. The authorized `{"type":"verification"}` request must return HTTP `201`.
-2. Google's unauthenticated challenge must return HTTP `401`.
+## 4. Verify a connection
 
-HomeFit rejects unauthorized requests before reading their body. Authenticated notifications receive HTTP `204` after durable acceptance, then their Google signature is verified asynchronously before any user data is changed.
+1. Sign in to HomeFit with an account whose Google identity is a test user of your OAuth app.
+2. Open **Import data** and select **Connect Google Health**.
+3. Confirm Google requests only the seven read-only scopes above.
+4. After the redirect back, the card moves from **Importing** to **Connected**. Progress is counted in metric types because Google does not expose a total record count. You can leave the page; the import continues in the background.
+5. Open **Health**. Populated metrics appear in the overview, in their category and under **All metrics**.
+6. Select **Sync now** twice and confirm no records are duplicated.
+7. Disconnect and confirm imported data is still visible. Reconnect and confirm the import stays idempotent.
+8. Test **Delete imported data** with a disposable account only. It requires typing `DELETE GOOGLE DATA` and removes only Google-imported data, never Sleep Cycle or Hevy imports. Deleting a HomeFit account removes everything and revokes the Google grant.
 
-## 4. Verify a test-user connection
+## 5. Operations
 
-1. Sign in to HomeFit with a Clerk user whose email is also a Google OAuth test user.
-2. Open `/dashboard/import` and select **Connect Google Health**.
-3. Confirm the Google screen requests only the seven read-only scopes listed above.
-4. After the callback, confirm the card moves from **Importing** to **Connected**. Progress is measured by completed metric types because Google does not expose a reliable total-record count.
-5. Open `/dashboard/health`. Confirm populated metrics appear in the overview, their category, and **All metrics**.
-6. Select **Sync now** twice and confirm no duplicate records appear.
-7. Disconnect and confirm the imported data remains visible. Reconnect and confirm the import remains idempotent.
-8. Test permanent deletion only with a disposable user. It requires the exact phrase `DELETE GOOGLE DATA` and removes only Google-imported data, not Sleep Cycle or Hevy CSV imports.
-
-Automatic updates require a publicly reachable HTTPS Convex site URL and the successfully verified subscriber. Localhost can receive the OAuth return through the deployed Convex callback, but Google cannot deliver webhooks directly to a localhost endpoint.
-
-## 5. Rotation and incident notes
-
-- Rotate the webhook authorization value in Google and Convex as one coordinated change. Deliveries using mismatched values will receive `401`.
-- To rotate the token encryption key, create a new version such as `v2`, move the old version and key into `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS`, then set the new active key and version. Successful reads transparently re-encrypt old token envelopes.
-- Disconnect immediately clears the locally usable token even if Google's external revocation call fails.
-- If a connection shows **Action required**, the user must review access. **Delayed** imports retry automatically.
+- Jobs run on [pg-boss](https://github.com/timgit/pg-boss) in the `pgboss` schema of the same database. A dispatcher runs every minute and resumes any due or interrupted work, so restarts never lose an import.
+- Set `BACKGROUND_JOBS=false` on extra web replicas to keep one worker; every instance can still enqueue work.
+- Sync history is kept for 30 days (90 days for failures). Webhook bodies are erased once processed, and their digests are kept for eight days to deduplicate retries.
+- **Rotating the webhook secret:** update it in Google and in `.env` together; deliveries with a mismatched value receive `401`.
+- **Rotating the token encryption key:** choose a new version such as `v2`, move the old version and key into `GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS` (e.g. `{"v1":"<old key>"}`), set the new key and version, and restart. Tokens are re-encrypted with the new key the next time they are used; keep the old key until every connection has synced.
+- Disconnecting clears the stored token immediately, even if Google's revocation call fails.
+- **Action required** means the user must review access (for example after revoking it in their Google account). **Delayed** imports retry automatically with exponential backoff.

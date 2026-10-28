@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { AreaChart } from 'layerchart';
 	import { curveMonotoneX } from 'd3-shape';
-	import * as Chart from '$lib/components/ui/chart';
-	import * as m from '$lib/paraglide/messages';
-	import { CHART_COLORS } from '$lib/charts';
-	import { formatCompact, formatDateAxis } from '$lib/format';
-	import { metricLabel } from '$lib/google-health/labels';
-	import { summaryNumber, type HealthMetric, type HealthSummary } from '$lib/google-health/view';
+	import * as Chart from '#lib/components/ui/chart/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { CHART_COLORS, timeAxis, tooltipDate } from '#lib/charts.js';
+	import { formatCompact } from '#lib/format.js';
+	import { metricLabel } from '#lib/google-health/labels.js';
+	import { summaryNumber, type HealthMetric, type HealthSummary } from '#lib/google-health/view.js';
 
 	type Props = {
 		metric: Pick<HealthMetric, 'dataType' | 'aggregation' | 'primaryUnit'>;
@@ -63,10 +63,7 @@
 				}
 			]}
 			props={{
-				xAxis: {
-					format: (value: unknown) =>
-						value instanceof Date ? formatDateAxis(value.getTime()) : String(value)
-				},
+				xAxis: timeAxis(data),
 				yAxis: {
 					format: (value: unknown) =>
 						`${formatCompact(Number(value))}${chartUnit ? ` ${chartUnit}` : ''}`
@@ -74,7 +71,7 @@
 			}}
 		>
 			{#snippet tooltip()}
-				<Chart.Tooltip />
+				<Chart.Tooltip labelFormatter={tooltipDate} />
 			{/snippet}
 		</AreaChart>
 	</Chart.Container>

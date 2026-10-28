@@ -1,0 +1,32 @@
+.git
+.github
+node_modules
+build
+.svelte-kit
+.vercel
+.output
+test-results
+playwright-report
+coverage
+
+# Local secrets and tooling
+.env
+.env.*
+!.env.example
+.agents
+.claude
+.cursor
+.gemini
+.opencode
+.superpowers
+.vscode
+.mcp.json
+
+# Generated at build time
+src/lib/paraglide
+project.inlang/cache
+
+Dockerfile
+compose.yaml
+*.md
+!README.md

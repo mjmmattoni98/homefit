@@ -1,37 +1,28 @@
 <script lang="ts">
-	import type { Pathname } from '$app/types';
 	import { resolve } from '$app/paths';
-	import { api } from '$convex/_generated/api';
-	import { useAuth, useQuery } from 'convex-svelte';
-	import * as Card from '$lib/components/ui/card';
-	import * as Empty from '$lib/components/ui/empty';
-	import { Badge } from '$lib/components/ui/badge';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import { buttonVariants } from '$lib/components/ui/button';
-	import HealthMetricCard from '$lib/components/google-health/HealthMetricCard.svelte';
-	import HealthSyncBanner from '$lib/components/google-health/HealthSyncBanner.svelte';
-	import HealthTrendChart from '$lib/components/google-health/HealthTrendChart.svelte';
-	import { categoryLabel, metricLabel } from '$lib/google-health/labels';
-	import { summaryNumber } from '$lib/google-health/view';
-	import * as m from '$lib/paraglide/messages';
+	import { getCategories, getMetrics, getOverview } from '#lib/remote/health.remote.js';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import * as Empty from '#lib/components/ui/empty/index.js';
+	import { Badge } from '#lib/components/ui/badge/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import HealthMetricCard from '#lib/components/google-health/HealthMetricCard.svelte';
+	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
+	import HealthTrendChart from '#lib/components/google-health/HealthTrendChart.svelte';
+	import { categoryLabel, metricLabel } from '#lib/google-health/labels.js';
+	import { summaryNumber } from '#lib/google-health/view.js';
+	import * as m from '#lib/paraglide/messages.js';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
-	const auth = useAuth();
-	const overviewQuery = useQuery(api.googleHealth.records.getOverview, () =>
-		auth.isAuthenticated ? { days: 30 } : 'skip'
-	);
-	const categoriesQuery = useQuery(api.googleHealth.records.listCategories, () =>
-		auth.isAuthenticated ? {} : 'skip'
-	);
-	const activityQuery = useQuery(api.googleHealth.records.listMetrics, () =>
-		auth.isAuthenticated ? { category: 'activity' as const } : 'skip'
-	);
+	const overviewQuery = getOverview(30);
+	const categoriesQuery = getCategories();
+	const activityQuery = getMetrics('activity');
 
-	const overview = $derived(overviewQuery.data);
-	const categories = $derived(categoriesQuery.data ?? []);
+	const overview = $derived(overviewQuery.current);
+	const categories = $derived(categoriesQuery.current ?? []);
 	const recentActivity = $derived(
-		[...(activityQuery.data ?? [])]
+		[...(activityQuery.current ?? [])]
 			.sort(
 				(left, right) =>
 					(right.latestSummary.latestTimestamp ?? 0) - (left.latestSummary.latestTimestamp ?? 0)
@@ -43,19 +34,19 @@
 			metric.trend.some((summary) => summaryNumber(metric, summary) !== null)
 		)
 	);
-	const isLoading = $derived(
-		auth.isLoading ||
-			!auth.isAuthenticated ||
-			overviewQuery.isLoading ||
-			categoriesQuery.isLoading ||
-			activityQuery.isLoading
-	);
 	const hasError = $derived(
 		overviewQuery.error !== undefined ||
 			categoriesQuery.error !== undefined ||
 			activityQuery.error !== undefined
 	);
+	const isLoading = $derived(
+		!hasError && (!overviewQuery.ready || !categoriesQuery.ready || !activityQuery.ready)
+	);
 </script>
+
+<svelte:head>
+	<title>{m.health_overview_title()} · {m.app_name()}</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div>
@@ -88,19 +79,13 @@
 				<Empty.Description>{m.health_no_data_description()}</Empty.Description>
 			</Empty.Header>
 			<Empty.Content>
-				<a href={resolve('/dashboard/import' as Pathname)} class={buttonVariants()}>
-					{m.health_no_data_cta()}
-				</a>
+				<a href={resolve('/dashboard/import')} class={buttonVariants()}>{m.health_no_data_cta()}</a>
 			</Empty.Content>
 		</Empty.Root>
 	{:else}
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 			{#each overview.metrics as metric (metric.dataType)}
-				<HealthMetricCard
-					{metric}
-					trend={metric.trend}
-					href={`/dashboard/health/metrics/${encodeURIComponent(metric.dataType)}`}
-				/>
+				<HealthMetricCard {metric} trend={metric.trend} />
 			{/each}
 		</div>
 
@@ -132,9 +117,9 @@
 							{#each recentActivity as metric (metric.dataType)}
 								<li class="flex items-center justify-between gap-3 py-2.5">
 									<a
-										href={resolve(
-											`/dashboard/health/metrics/${encodeURIComponent(metric.dataType)}` as Pathname
-										)}
+										href={resolve('/dashboard/health/metrics/[dataType]', {
+											dataType: metric.dataType
+										})}
 										class="min-w-0 truncate font-medium hover:underline"
 									>
 										{metricLabel(metric.dataType)}
@@ -154,9 +139,8 @@
 				</Card.Header>
 				<Card.Content class="flex flex-col gap-1">
 					{#each categories as item (item.category)}
-						{@const href = `/dashboard/health/${item.category}`}
 						<a
-							href={resolve(href as Pathname)}
+							href={resolve('/dashboard/health/[category]', { category: item.category })}
 							class="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-accent"
 						>
 							<span class="font-medium">{categoryLabel(item.category)}</span>
@@ -167,7 +151,7 @@
 						</a>
 					{/each}
 					<a
-						href={resolve('/dashboard/health/metrics' as Pathname)}
+						href={resolve('/dashboard/health/metrics')}
 						class="mt-1 flex items-center gap-2 rounded-md px-2 py-2 font-medium hover:bg-accent"
 					>
 						{m.health_all_metrics_link()}

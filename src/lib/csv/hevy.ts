@@ -40,16 +40,38 @@ const MONTHS: Record<string, number> = {
 	dec: 11
 };
 
-/** Parses "17 jul 2026, 18:35" (Spanish or English month) into epoch ms. */
+// Hevy formats timestamps with the phone's locale, e.g. "17 jul 2026, 18:35" (day first) or
+// "Jul 17, 2026, 6:35 PM" (month first), optionally with an AM/PM or "a. m."/"p. m." suffix.
+const TIME = String.raw`(?<hour>\d{1,2}):(?<minute>\d{2})(?:\s*(?<meridiem>[ap])\.?\s*m\.?)?`;
+const DAY_FIRST = new RegExp(
+	String.raw`^(?<day>\d{1,2})\s+(?<month>[a-záéíóú]{3,})\.?\s+(?<year>\d{4}),?\s+${TIME}`,
+	'i'
+);
+const MONTH_FIRST = new RegExp(
+	String.raw`^(?<month>[a-záéíóú]{3,})\.?\s+(?<day>\d{1,2}),?\s+(?<year>\d{4}),?\s+${TIME}`,
+	'i'
+);
+
+/** Parses a Hevy timestamp (Spanish or English month, 12- or 24-hour clock) into epoch ms. */
 function toHevyTimestamp(value: string | undefined): number | undefined {
 	if (value == null) return undefined;
-	const match = new RegExp(/^(\d{1,2})\s+([A-Za-záéíóú]{3})\.?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})/i).exec(value
-		.trim());
-	if (!match) return undefined;
-	const [, d, mon, y, h, mi] = match;
-	const month = MONTHS[mon.toLowerCase().slice(0, 3)];
+	const text = value.trim();
+	const groups = (DAY_FIRST.exec(text) ?? MONTH_FIRST.exec(text))?.groups;
+	if (!groups) return undefined;
+	const month = MONTHS[groups.month.toLowerCase().slice(0, 3)];
 	if (month == null) return undefined;
-	const date = new Date(Number(y), month, Number(d), Number(h), Number(mi));
+	let hour = Number(groups.hour);
+	if (groups.meridiem) {
+		if (hour < 1 || hour > 12) return undefined;
+		hour = (hour % 12) + (groups.meridiem.toLowerCase() === 'p' ? 12 : 0);
+	}
+	const date = new Date(
+		Number(groups.year),
+		month,
+		Number(groups.day),
+		hour,
+		Number(groups.minute)
+	);
 	const time = date.getTime();
 	return Number.isFinite(time) ? time : undefined;
 }

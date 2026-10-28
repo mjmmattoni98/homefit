@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { AreaChart } from 'layerchart';
 	import { curveMonotoneX } from 'd3-shape';
-	import * as Chart from '$lib/components/ui/chart';
-	import * as m from '$lib/paraglide/messages';
-	import { formatDateAxis } from '$lib/format';
-	import { CHART_COLORS } from '$lib/charts';
+	import * as Chart from '#lib/components/ui/chart/index.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import { CHART_COLORS, timeAxis, tooltipDate } from '#lib/charts.js';
 
 	let { data }: { data: { date: Date; quality: number | undefined }[] } = $props();
 
@@ -31,14 +30,10 @@
 				}
 			}
 		]}
-		props={{
-			xAxis: {
-				format: (v: unknown) => (v instanceof Date ? formatDateAxis(v.getTime()) : String(v))
-			}
-		}}
+		props={{ xAxis: timeAxis(data) }}
 	>
 		{#snippet tooltip()}
-			<Chart.Tooltip />
+			<Chart.Tooltip labelFormatter={tooltipDate} />
 		{/snippet}
 	</AreaChart>
 </Chart.Container>

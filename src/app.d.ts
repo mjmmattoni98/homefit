@@ -1,11 +1,19 @@
+import type { Session, User } from 'better-auth';
+
 // See https://svelte.dev/docs/kit/types#app.d.ts
 // for information about these interfaces
-/// <reference types="svelte-clerk/env" />
 declare global {
 	namespace App {
+		interface Locals {
+			user?: User;
+			session?: Session;
+		}
+		interface PageData {
+			user: { name: string; email: string } | null;
+			signupEnabled: boolean;
+			googleHealthEnabled: boolean;
+		}
 		// interface Error {}
-		// interface Locals {}
-		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}
 	}

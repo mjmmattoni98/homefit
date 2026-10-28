@@ -1,102 +1,130 @@
 <script lang="ts">
-	import { api } from '$convex/_generated/api';
-	import { SvelteMap } from 'svelte/reactivity';
-	import { useAuth, useQuery } from 'convex-svelte';
-	import * as m from '$lib/paraglide/messages';
-	import * as Card from '$lib/components/ui/card';
-	import * as Select from '$lib/components/ui/select';
-	import { Skeleton } from '$lib/components/ui/skeleton';
-	import StatCard from '$lib/components/dashboard/StatCard.svelte';
-	import WeightChart from '$lib/components/dashboard/WeightChart.svelte';
-	import SessionVolumeChart from '$lib/components/dashboard/SessionVolumeChart.svelte';
-	import { formatDateAxis, formatNumber } from '$lib/format';
-	import { breakGaps } from '$lib/charts';
+	import { getExerciseSessions, getExercises } from '#lib/remote/imports.remote.js';
+	import type { ExerciseSession } from '#lib/server/workouts.js';
+	import * as m from '#lib/paraglide/messages.js';
+	import * as Card from '#lib/components/ui/card/index.js';
+	import * as Command from '#lib/components/ui/command/index.js';
+	import * as Popover from '#lib/components/ui/popover/index.js';
+	import { Button } from '#lib/components/ui/button/index.js';
+	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import StatCard from '#lib/components/dashboard/StatCard.svelte';
+	import WeightChart from '#lib/components/dashboard/WeightChart.svelte';
+	import VolumeChart from '#lib/components/dashboard/VolumeChart.svelte';
+	import { formatDate, formatDateLong, formatNumber } from '#lib/format.js';
 	import CalendarIcon from '@lucide/svelte/icons/calendar';
+	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
 	import WeightIcon from '@lucide/svelte/icons/weight';
 	import TrophyIcon from '@lucide/svelte/icons/trophy';
 
-	const auth = useAuth();
-	const exercisesQuery = useQuery(api.workouts.listExercises, () =>
-		auth.isAuthenticated ? {} : 'skip'
-	);
+	const exercisesQuery = getExercises();
 
-	const exercises = $derived(exercisesQuery.data ?? []);
+	const exercises = $derived(exercisesQuery.current ?? []);
 
+	let pickerOpen = $state(false);
 	let selected = $state<string | null>(null);
+	// Until one is picked, show the exercise trained most recently.
 	const activeExercise = $derived.by(() => {
 		if (selected && exercises.some((exercise) => exercise.exerciseTitle === selected)) {
 			return selected;
 		}
-		return exercises[0]?.exerciseTitle ?? '';
-	});
-
-	const historyQuery = useQuery(api.workouts.exerciseHistory, () =>
-		auth.isAuthenticated && activeExercise ? { exerciseTitle: activeExercise } : 'skip'
-	);
-
-	interface Session {
-		startTime: number;
-		maxWeight: number;
-		volume: number;
-		sets: number;
-	}
-
-	const sessions = $derived.by((): Session[] => {
-		const sets = historyQuery.data ?? [];
-		const bySession = new SvelteMap<number, Session>();
-		for (const set of sets) {
-			let session = bySession.get(set.startTime);
-			if (!session) {
-				session = { startTime: set.startTime, maxWeight: 0, volume: 0, sets: 0 };
-				bySession.set(set.startTime, session);
-			}
-			session.sets++;
-			if (set.weightKg != null) {
-				session.maxWeight = Math.max(session.maxWeight, set.weightKg);
-			}
-			if (set.weightKg != null && set.reps != null) {
-				session.volume += set.weightKg * set.reps;
-			}
+		let latest = exercises[0];
+		for (const exercise of exercises) {
+			if (exercise.lastPerformed > latest.lastPerformed) latest = exercise;
 		}
-		return [...bySession.values()].sort((a, b) => a.startTime - b.startTime);
+		return latest?.exerciseTitle ?? '';
 	});
 
-	const summary = $derived.by(() => ({
-		sessions: sessions.length,
-		maxWeight: sessions.reduce((max, s) => Math.max(max, s.maxWeight), 0),
-		bestVolume: sessions.reduce((max, s) => Math.max(max, s.volume), 0)
-	}));
+	const sessionsQuery = $derived(activeExercise ? getExerciseSessions(activeExercise) : null);
+	const sessions = $derived(sessionsQuery?.current ?? []);
+
+	// The first session reaching each record, so its date can be shown.
+	const summary = $derived.by(() => {
+		let heaviest: ExerciseSession | undefined;
+		let biggest: ExerciseSession | undefined;
+		for (const session of sessions) {
+			if (session.maxWeight > (heaviest?.maxWeight ?? 0)) heaviest = session;
+			if (session.volume > (biggest?.volume ?? 0)) biggest = session;
+		}
+		return { sessions: sessions.length, last: sessions.at(-1), heaviest, biggest };
+	});
 
 	const weightData = $derived(
-		breakGaps(
-			sessions
-				.filter((s) => s.maxWeight > 0)
-				.map((s) => ({ date: new Date(s.startTime), weight: s.maxWeight }))
-		)
+		sessions
+			.filter((s) => s.maxWeight > 0)
+			.map((s) => ({ date: new Date(s.startTime), weight: s.maxWeight }))
 	);
 	const volumeData = $derived(
-		sessions.map((s) => ({ label: formatDateAxis(s.startTime), volume: Math.round(s.volume) }))
+		sessions.map((s) => ({ date: new Date(s.startTime), volume: Math.round(s.volume) }))
 	);
 
-	const isLoading = $derived(auth.isLoading || (auth.isAuthenticated && exercisesQuery.isLoading));
+	const hasError = $derived(
+		exercisesQuery.error !== undefined || sessionsQuery?.error !== undefined
+	);
+	const isLoading = $derived(!hasError && !exercisesQuery.ready);
+	const sessionsLoading = $derived(sessionsQuery !== null && !sessionsQuery.ready);
+
+	function pick(exerciseTitle: string): void {
+		selected = exerciseTitle;
+		pickerOpen = false;
+	}
 </script>
+
+<svelte:head>
+	<title>{m.exercises_title()} · {m.app_name()}</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div class="flex flex-wrap items-center justify-between gap-4">
 		<h1 class="text-2xl font-bold tracking-tight">{m.exercises_title()}</h1>
 		{#if exercises.length > 0}
-			<Select.Root type="single" bind:value={() => activeExercise, (v) => (selected = v)}>
-				<Select.Trigger class="w-full max-w-sm">
-					{activeExercise || m.exercises_select()}
-				</Select.Trigger>
-				<Select.Content>
-					{#each exercises as exercise (exercise.exerciseTitle)}
-						<Select.Item value={exercise.exerciseTitle}>
-							{exercise.exerciseTitle}
-						</Select.Item>
-					{/each}
-				</Select.Content>
-			</Select.Root>
+			<Popover.Root bind:open={pickerOpen}>
+				<Popover.Trigger>
+					{#snippet child({ props })}
+						<Button
+							{...props}
+							variant="outline"
+							role="combobox"
+							aria-expanded={pickerOpen}
+							aria-label={m.exercises_select()}
+							class="w-full justify-between sm:w-80"
+						>
+							<span class="truncate">{activeExercise || m.exercises_select()}</span>
+							<ChevronsUpDownIcon class="opacity-50" aria-hidden="true" />
+						</Button>
+					{/snippet}
+				</Popover.Trigger>
+				<Popover.Content align="end" class="w-(--bits-popover-anchor-width) min-w-72 p-0">
+					<Command.Root>
+						<Command.Input placeholder={m.exercises_search()} />
+						<Command.List>
+							<Command.Empty>{m.exercises_no_match()}</Command.Empty>
+							<Command.Group>
+								{#each exercises as exercise (exercise.exerciseTitle)}
+									<Command.Item
+										value={exercise.exerciseTitle}
+										data-checked={exercise.exerciseTitle === activeExercise}
+										onSelect={() => pick(exercise.exerciseTitle)}
+									>
+										<div class="flex min-w-0 flex-col">
+											<span class="truncate">{exercise.exerciseTitle}</span>
+											<span class="text-xs text-muted-foreground">
+												{m.exercises_item_meta({
+													count: exercise.setsCount,
+													date: formatDate(exercise.lastPerformed, {
+														day: 'numeric',
+														month: 'short',
+														year: 'numeric'
+													})
+												})}
+											</span>
+										</div>
+									</Command.Item>
+								{/each}
+							</Command.Group>
+						</Command.List>
+					</Command.Root>
+				</Popover.Content>
+			</Popover.Root>
 		{/if}
 	</div>
 
@@ -107,50 +135,71 @@
 			{/each}
 		</div>
 		<Skeleton class="h-72 w-full" />
+	{:else if hasError}
+		<Card.Root>
+			<Card.Content class="py-12 text-center">
+				<p class="font-medium">{m.data_error_title()}</p>
+				<p class="text-sm text-muted-foreground">{m.data_error_description()}</p>
+			</Card.Content>
+		</Card.Root>
 	{:else if exercises.length === 0}
 		<Card.Root>
 			<Card.Content class="py-12 text-center text-muted-foreground">
 				{m.exercises_empty()}
 			</Card.Content>
 		</Card.Root>
+	{:else if sessionsLoading}
+		<div class="grid gap-4 sm:grid-cols-3">
+			{#each Array(3) as _, i (i)}
+				<Skeleton class="h-28 w-full" />
+			{/each}
+		</div>
+		<div class="grid gap-4 lg:grid-cols-2">
+			<Skeleton class="h-80 w-full" />
+			<Skeleton class="h-80 w-full" />
+		</div>
 	{:else}
 		<div class="grid gap-4 sm:grid-cols-3">
-			<StatCard title={m.ex_sessions()} value={String(summary.sessions)} icon={CalendarIcon} />
+			<StatCard
+				title={m.ex_sessions()}
+				value={String(summary.sessions)}
+				subtitle={summary.last &&
+					m.ex_last_session({ date: formatDateLong(summary.last.startTime) })}
+				icon={CalendarIcon}
+			/>
 			<StatCard
 				title={m.ex_max_weight()}
-				value="{formatNumber(summary.maxWeight, 1)} kg"
+				value="{formatNumber(summary.heaviest?.maxWeight ?? 0, 1)} kg"
+				subtitle={summary.heaviest && formatDateLong(summary.heaviest.startTime)}
 				icon={WeightIcon}
 			/>
 			<StatCard
 				title={m.ex_best_volume()}
-				value="{formatNumber(summary.bestVolume)} kg"
+				value="{formatNumber(summary.biggest?.volume ?? 0)} kg"
+				subtitle={summary.biggest && formatDateLong(summary.biggest.startTime)}
 				icon={TrophyIcon}
 			/>
 		</div>
 
-		{#if historyQuery.isLoading}
-			<Skeleton class="h-72 w-full" />
-		{:else}
-			<div class="grid gap-4 lg:grid-cols-2">
-				<Card.Root>
-					<Card.Header>
-						<Card.Title>{m.ex_weight_progression()}</Card.Title>
-						<Card.Description>{m.ex_weight_desc()}</Card.Description>
-					</Card.Header>
-					<Card.Content>
-						<WeightChart data={weightData} />
-					</Card.Content>
-				</Card.Root>
-				<Card.Root>
-					<Card.Header>
-						<Card.Title>{m.ex_volume_session()}</Card.Title>
-						<Card.Description>{m.ex_volume_desc()}</Card.Description>
-					</Card.Header>
-					<Card.Content>
-						<SessionVolumeChart data={volumeData} />
-					</Card.Content>
-				</Card.Root>
-			</div>
-		{/if}
+		<div class="grid gap-4 lg:grid-cols-2">
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>{m.ex_weight_progression()}</Card.Title>
+					<Card.Description>{m.ex_weight_desc()}</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					<WeightChart data={weightData} />
+				</Card.Content>
+			</Card.Root>
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>{m.ex_volume_session()}</Card.Title>
+					<Card.Description>{m.ex_volume_desc()}</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					<VolumeChart data={volumeData} />
+				</Card.Content>
+			</Card.Root>
+		</div>
 	{/if}
 </div>

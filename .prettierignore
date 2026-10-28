@@ -7,3 +7,17 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Agent tooling and generated files
+.agents/
+.claude/
+.cursor/
+.gemini/
+.opencode/
+.superpowers/
+skills-lock.json
+drizzle/
+src/lib/paraglide/
+.vscode/
+project.inlang/
+docs/superpowers/

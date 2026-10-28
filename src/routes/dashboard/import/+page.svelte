@@ -1,9 +1,15 @@
 <script lang="ts">
-	import * as m from '$lib/paraglide/messages';
-	import ImportCard from '$lib/components/ImportCard.svelte';
+	import { page } from '$app/state';
+	import * as m from '#lib/paraglide/messages.js';
+	import ImportCard from '#lib/components/ImportCard.svelte';
+	import GoogleHealthImportCard from '#lib/components/google-health/GoogleHealthImportCard.svelte';
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import DumbbellIcon from '@lucide/svelte/icons/dumbbell';
 </script>
+
+<svelte:head>
+	<title>{m.import_title()} · {m.app_name()}</title>
+</svelte:head>
 
 <div class="flex flex-col gap-6">
 	<div>
@@ -12,6 +18,9 @@
 	</div>
 
 	<div class="grid gap-4 md:grid-cols-2">
+		{#if page.data.googleHealthEnabled}
+			<GoogleHealthImportCard />
+		{/if}
 		<ImportCard
 			kind="sleep"
 			title={m.import_sleep_title()}

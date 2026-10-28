@@ -86,7 +86,12 @@ export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 			weatherType: emptyToUndefined(at(row, idx.weatherType)),
 			city: emptyToUndefined(at(row, idx.city)),
 			movementsPerHour: toNumber(at(row, idx.movements)),
-			notes: notesRaw ? notesRaw.split(':').map((n) => n.trim()).filter(Boolean) : [],
+			notes: notesRaw
+				? notesRaw
+						.split(':')
+						.map((n) => n.trim())
+						.filter(Boolean)
+				: [],
 			mood: emptyToUndefined(at(row, idx.mood))
 		});
 	}

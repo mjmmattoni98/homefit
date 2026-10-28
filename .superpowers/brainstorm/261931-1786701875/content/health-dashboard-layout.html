@@ -1,0 +1,390 @@
+<h2>How should every Google Health metric fit into HomeFit?</h2>
+<p class="subtitle">
+	Choose the information architecture that feels clearest. All three expose every imported metric;
+	they differ in how users move through the data.
+</p>
+
+<div
+	class="cards"
+	style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: stretch"
+>
+	<div class="card" data-choice="a" onclick="toggleSelect(this)">
+		<div
+			class="card-image"
+			style="padding: 0; min-height: 340px; overflow: hidden; background: #f8fafc"
+		>
+			<div
+				style="
+					display: flex;
+					min-height: 340px;
+					font: 11px/1.35 system-ui;
+					color: #172033;
+					text-align: left;
+				"
+			>
+				<aside style="width: 78px; background: #14231d; color: #d7e7df; padding: 14px 8px">
+					<div style="font-weight: 800; color: white; margin-bottom: 18px">HomeFit</div>
+					<div style="background: #284438; border-radius: 6px; padding: 6px; margin-bottom: 5px">
+						Overview
+					</div>
+					<div style="padding: 6px">Activity</div>
+					<div style="padding: 6px">Vitals</div>
+					<div style="padding: 6px">Sleep</div>
+					<div style="padding: 6px">Body</div>
+					<div style="padding: 6px">Nutrition</div>
+					<div style="padding: 6px">All metrics</div>
+				</aside>
+				<main style="flex: 1; padding: 14px">
+					<div
+						style="
+							display: flex;
+							justify-content: space-between;
+							align-items: center;
+							margin-bottom: 12px;
+						"
+					>
+						<strong style="font-size: 14px">Health overview</strong
+						><span style="font-size: 9px; color: #27805b">● Synced 2 min ago</span>
+					</div>
+					<div
+						style="
+							display: grid;
+							grid-template-columns: repeat(3, 1fr);
+							gap: 6px;
+							margin-bottom: 9px;
+						"
+					>
+						<div
+							style="background: white; border: 1px solid #e5e9e7; border-radius: 8px; padding: 8px"
+						>
+							<small>Steps</small><br /><b>8,462</b>
+							<div style="color: #27805b; font-size: 8px">↑ 12%</div>
+						</div>
+						<div
+							style="background: white; border: 1px solid #e5e9e7; border-radius: 8px; padding: 8px"
+						>
+							<small>Sleep</small><br /><b>7h 42m</b>
+							<div style="color: #64748b; font-size: 8px">82 score</div>
+						</div>
+						<div
+							style="background: white; border: 1px solid #e5e9e7; border-radius: 8px; padding: 8px"
+						>
+							<small>Heart rate</small><br /><b>62 bpm</b>
+							<div style="color: #64748b; font-size: 8px">Resting</div>
+						</div>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e5e9e7;
+							border-radius: 8px;
+							padding: 9px;
+							margin-bottom: 8px;
+						"
+					>
+						<div style="display: flex; justify-content: space-between">
+							<b>Today at a glance</b><span style="color: #64748b">Activity ▾</span>
+						</div>
+						<svg viewBox="0 0 210 60" style="width: 100%; height: 60px; margin-top: 5px">
+							<path
+								d="M2 48 C24 44,30 15,52 29 S80 50,102 24 S135 6,153 33 S184 45,208 13"
+								fill="none"
+								stroke="#2c8b62"
+								stroke-width="3"
+							/>
+							<path d="M2 50 H208" stroke="#dce4e0" />
+						</svg>
+					</div>
+					<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 7px">
+						<div style="background: #edf7f2; border-radius: 8px; padding: 8px">
+							<b>Recent workout</b><br /><span style="color: #52615a">Strength · 48 min</span>
+						</div>
+						<div style="background: #f2effb; border-radius: 8px; padding: 8px">
+							<b>Body metrics</b><br /><span style="color: #5e5770">Weight, fat, hydration →</span>
+						</div>
+					</div>
+				</main>
+			</div>
+		</div>
+		<div class="card-body">
+			<h3>
+				A — Category dashboard <span style="font-size: 11px; color: #27805b">Recommended</span>
+			</h3>
+			<p>
+				A useful overview plus category pages. Every metric is discoverable without turning the main
+				dashboard into a wall of charts.
+			</p>
+		</div>
+	</div>
+
+	<div class="card" data-choice="b" onclick="toggleSelect(this)">
+		<div
+			class="card-image"
+			style="padding: 0; min-height: 340px; overflow: hidden; background: #f8fafc"
+		>
+			<div style="padding: 14px; font: 11px/1.35 system-ui; color: #172033; text-align: left">
+				<div
+					style="
+						display: flex;
+						justify-content: space-between;
+						align-items: center;
+						margin-bottom: 14px;
+					"
+				>
+					<strong style="font-size: 15px">Health</strong
+					><span style="color: #27805b">Google connected ✓</span>
+				</div>
+				<div style="display: flex; gap: 4px; overflow: hidden; margin-bottom: 12px">
+					<span style="background: #193d30; color: white; padding: 6px 9px; border-radius: 99px"
+						>All</span
+					><span style="border: 1px solid #dbe3df; padding: 6px 9px; border-radius: 99px"
+						>Activity</span
+					><span style="border: 1px solid #dbe3df; padding: 6px 9px; border-radius: 99px"
+						>Sleep</span
+					><span style="border: 1px solid #dbe3df; padding: 6px 9px; border-radius: 99px"
+						>Vitals</span
+					><span style="border: 1px solid #dbe3df; padding: 6px 9px; border-radius: 99px"
+						>Body</span
+					>
+				</div>
+				<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px">
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 86px;
+						"
+					>
+						<small>Steps</small><br /><b style="font-size: 16px">8,462</b
+						><svg viewBox="0 0 90 24" style="width: 100%; height: 28px">
+							<path
+								d="M1 22 L14 18 L27 19 L38 8 L52 13 L67 4 L89 9"
+								fill="none"
+								stroke="#2c8b62"
+								stroke-width="2"
+							/>
+						</svg>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 86px;
+						"
+					>
+						<small>Heart rate</small><br /><b style="font-size: 16px">62 bpm</b
+						><svg viewBox="0 0 90 24" style="width: 100%; height: 28px">
+							<path
+								d="M1 14 H21 L27 3 L35 22 L43 10 L50 14 H89"
+								fill="none"
+								stroke="#d65454"
+								stroke-width="2"
+							/>
+						</svg>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 86px;
+						"
+					>
+						<small>Sleep</small><br /><b style="font-size: 16px">7h 42m</b>
+						<div style="margin-top: 10px; background: #eee9fa; border-radius: 8px; height: 10px">
+							<div style="width: 82%; height: 100%; background: #7259b5; border-radius: 8px"></div>
+						</div>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 86px;
+						"
+					>
+						<small>Weight</small><br /><b style="font-size: 16px">73.4 kg</b
+						><svg viewBox="0 0 90 24" style="width: 100%; height: 28px">
+							<path
+								d="M1 5 L20 9 L37 8 L54 15 L71 13 L89 19"
+								fill="none"
+								stroke="#3974bc"
+								stroke-width="2"
+							/>
+						</svg>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 46px;
+						"
+					>
+						<small>Blood oxygen</small><br /><b>97%</b>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							height: 46px;
+						"
+					>
+						<small>Hydration</small><br /><b>1.8 L</b>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="card-body">
+			<h3>B — Infinite metric grid</h3>
+			<p>
+				Every metric is visible as a card on one page, with category filters. Direct, but
+				increasingly dense as Google adds data types.
+			</p>
+		</div>
+	</div>
+
+	<div class="card" data-choice="c" onclick="toggleSelect(this)">
+		<div
+			class="card-image"
+			style="padding: 0; min-height: 340px; overflow: hidden; background: #f8fafc"
+		>
+			<div style="padding: 14px; font: 11px/1.35 system-ui; color: #172033; text-align: left">
+				<div
+					style="
+						display: flex;
+						justify-content: space-between;
+						align-items: center;
+						margin-bottom: 14px;
+					"
+				>
+					<strong style="font-size: 15px">Metric explorer</strong
+					><button
+						style="
+							border: 0;
+							background: #193d30;
+							color: white;
+							border-radius: 6px;
+							padding: 6px 9px;
+						"
+					>
+						Sync now
+					</button>
+				</div>
+				<div
+					style="
+						border: 1px solid #dbe3df;
+						background: white;
+						border-radius: 7px;
+						padding: 8px;
+						color: #718078;
+						margin-bottom: 10px;
+					"
+				>
+					⌕ Search steps, VO₂ max, sleep…
+				</div>
+				<div style="display: grid; grid-template-columns: 86px 1fr; gap: 9px">
+					<div style="border-right: 1px solid #dfe5e2; padding-right: 8px">
+						<div
+							style="
+								background: #e8f3ee;
+								color: #1f694b;
+								padding: 6px;
+								border-radius: 5px;
+								margin-bottom: 3px;
+							"
+						>
+							Favorites 8
+						</div>
+						<div style="padding: 6px">Activity 12</div>
+						<div style="padding: 6px">Vitals 18</div>
+						<div style="padding: 6px">Sleep 6</div>
+						<div style="padding: 6px">Body 14</div>
+						<div style="padding: 6px">Nutrition 9</div>
+						<div style="padding: 6px">Other 11</div>
+					</div>
+					<div>
+						<div style="display: flex; justify-content: space-between; margin-bottom: 8px">
+							<b>Favorite metrics</b><span style="color: #64748b">7 days ▾</span>
+						</div>
+						<table
+							style="
+								width: 100%;
+								border-collapse: collapse;
+								font-size: 10px;
+								background: white;
+								border: 1px solid #e3e8e6;
+							"
+						>
+							<tr style="color: #68766f">
+								<th style="text-align: left; padding: 7px; border-bottom: 1px solid #e3e8e6">
+									Metric
+								</th>
+								<th>Latest</th>
+								<th>Trend</th>
+							</tr>
+							<tr>
+								<td style="padding: 8px; border-bottom: 1px solid #edf0ef">★ Steps</td>
+								<td style="text-align: center; border-bottom: 1px solid #edf0ef"><b>8,462</b></td>
+								<td style="color: #27805b; text-align: center; border-bottom: 1px solid #edf0ef">
+									↗ 12%
+								</td>
+							</tr>
+							<tr>
+								<td style="padding: 8px; border-bottom: 1px solid #edf0ef">★ Resting HR</td>
+								<td style="text-align: center; border-bottom: 1px solid #edf0ef"><b>62 bpm</b></td>
+								<td style="color: #27805b; text-align: center; border-bottom: 1px solid #edf0ef">
+									↘ 3%
+								</td>
+							</tr>
+							<tr>
+								<td style="padding: 8px; border-bottom: 1px solid #edf0ef">★ Sleep duration</td>
+								<td style="text-align: center; border-bottom: 1px solid #edf0ef"><b>7h 42m</b></td>
+								<td style="color: #64748b; text-align: center; border-bottom: 1px solid #edf0ef">
+									→ 0%
+								</td>
+							</tr>
+							<tr>
+								<td style="padding: 8px; border-bottom: 1px solid #edf0ef">★ Weight</td>
+								<td style="text-align: center; border-bottom: 1px solid #edf0ef"><b>73.4 kg</b></td>
+								<td style="color: #27805b; text-align: center; border-bottom: 1px solid #edf0ef">
+									↘ 1%
+								</td>
+							</tr>
+							<tr>
+								<td style="padding: 8px">★ VO₂ max</td>
+								<td style="text-align: center"><b>46.2</b></td>
+								<td style="color: #27805b; text-align: center">↗ 2%</td>
+							</tr>
+						</table>
+						<div style="margin-top: 10px; padding: 9px; background: #edf7f2; border-radius: 7px">
+							<b>Select a metric</b><br /><span style="color: #5b6b63"
+								>Open its chart, records, source, and sync history.</span
+							>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="card-body">
+			<h3>C — Searchable metric explorer</h3>
+			<p>
+				Catalog-first and excellent for power users. It scales best, though it feels more like an
+				analytics tool than a daily health dashboard.
+			</p>
+		</div>
+	</div>
+</div>
+
+<p style="margin-top: 18px; color: #637068">
+	Click a layout to select it, then tell me what you like or want changed in the terminal.
+</p>

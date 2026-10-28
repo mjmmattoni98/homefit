@@ -1,0 +1,316 @@
+<h2>User experience: connect once, then let HomeFit stay current</h2>
+<p class="subtitle">
+	The Google Health card communicates exactly what is happening; the dashboard remains useful during
+	long backfills and partial failures.
+</p>
+
+<div class="section">
+	<div class="label">Connection states on the Import page</div>
+	<div
+		style="
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 10px;
+			margin-top: 10px;
+			align-items: stretch;
+		"
+	>
+		<div style="border: 1px solid #d5ded9; border-radius: 12px; background: #fff; padding: 15px">
+			<div style="display: flex; justify-content: space-between; align-items: center">
+				<b>Google Health</b><span style="font-size: 10px; color: #647168">NOT CONNECTED</span>
+			</div>
+			<div style="font-size: 26px; margin: 15px 0 8px">G</div>
+			<p style="font-size: 12px; color: #637068; min-height: 50px">
+				Import every available metric using read-only access. HomeFit never writes to Google Health.
+			</p>
+			<button
+				style="
+					width: 100%;
+					border: 0;
+					border-radius: 7px;
+					padding: 8px;
+					background: #193d30;
+					color: white;
+				"
+			>
+				Connect Google Health
+			</button>
+		</div>
+		<div style="border: 2px solid #398362; border-radius: 12px; background: #edf8f2; padding: 15px">
+			<div style="display: flex; justify-content: space-between; align-items: center">
+				<b>Google Health</b><span style="font-size: 10px; color: #398362">IMPORTING</span>
+			</div>
+			<div style="font-size: 26px; margin: 15px 0 8px">↻</div>
+			<p style="font-size: 12px; color: #52635b">
+				Importing all available history. You can leave this page safely.
+			</p>
+			<div style="height: 8px; background: #d5e6dd; border-radius: 99px; margin: 16px 0 6px">
+				<div style="width: 63%; height: 100%; background: #398362; border-radius: 99px"></div>
+			</div>
+			<div style="display: flex; justify-content: space-between; font-size: 10px; color: #637068">
+				<span>49 of 78 metrics</span><span>63%</span>
+			</div>
+		</div>
+		<div style="border: 1px solid #d5ded9; border-radius: 12px; background: #fff; padding: 15px">
+			<div style="display: flex; justify-content: space-between; align-items: center">
+				<b>Google Health</b><span style="font-size: 10px; color: #398362">● ACTIVE</span>
+			</div>
+			<div style="font-size: 26px; margin: 15px 0 8px">✓</div>
+			<p style="font-size: 12px; color: #637068">
+				78 metric types connected<br />Last synchronized 2 minutes ago
+			</p>
+			<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 13px">
+				<button
+					style="border: 1px solid #cad5cf; border-radius: 7px; padding: 7px; background: white"
+				>
+					Sync now</button
+				><button
+					style="border: 1px solid #cad5cf; border-radius: 7px; padding: 7px; background: white"
+				>
+					Manage
+				</button>
+			</div>
+		</div>
+		<div style="border: 1px solid #e5c59f; border-radius: 12px; background: #fffaf3; padding: 15px">
+			<div style="display: flex; justify-content: space-between; align-items: center">
+				<b>Google Health</b><span style="font-size: 10px; color: #a76018">ACTION NEEDED</span>
+			</div>
+			<div style="font-size: 26px; margin: 15px 0 8px">!</div>
+			<p style="font-size: 12px; color: #735a3d">
+				Google access expired. Existing data is safe; automatic updates are paused.
+			</p>
+			<button
+				style="
+					width: 100%;
+					border: 0;
+					border-radius: 7px;
+					padding: 8px;
+					background: #965816;
+					color: white;
+				"
+			>
+				Reconnect Google
+			</button>
+		</div>
+	</div>
+</div>
+
+<div class="split" style="margin-top: 20px; align-items: stretch">
+	<div class="mockup">
+		<div class="mockup-header">Category dashboard (approved Option A)</div>
+		<div class="mockup-body" style="padding: 0; min-height: 330px; background: #f8fafc">
+			<div
+				style="
+					display: flex;
+					min-height: 330px;
+					font: 11px/1.4 system-ui;
+					color: #172033;
+					text-align: left;
+				"
+			>
+				<aside style="width: 95px; background: #14231d; color: #d7e7df; padding: 14px 9px">
+					<b style="color: white; font-size: 13px">HomeFit</b>
+					<div style="background: #284438; border-radius: 6px; padding: 6px; margin-top: 18px">
+						Overview
+					</div>
+					<div style="padding: 6px">Activity</div>
+					<div style="padding: 6px">Vitals</div>
+					<div style="padding: 6px">Sleep</div>
+					<div style="padding: 6px">Body</div>
+					<div style="padding: 6px">Nutrition</div>
+					<div style="padding: 6px">Cycles</div>
+					<div style="padding: 6px">Other</div>
+					<div style="padding: 6px">All metrics</div>
+				</aside>
+				<main style="flex: 1; padding: 15px">
+					<div style="display: flex; justify-content: space-between">
+						<b style="font-size: 14px">Health overview</b
+						><span style="color: #398362">● Up to date</span>
+					</div>
+					<p style="color: #65736c; margin: 4px 0 12px">
+						Only categories with imported data appear.
+					</p>
+					<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px">
+						<div
+							style="background: white; border: 1px solid #e3e8e6; border-radius: 8px; padding: 9px"
+						>
+							<small>Steps</small><br /><b>8,462</b>
+							<div style="color: #398362; font-size: 9px">↑ 12%</div>
+						</div>
+						<div
+							style="background: white; border: 1px solid #e3e8e6; border-radius: 8px; padding: 9px"
+						>
+							<small>Sleep</small><br /><b>7h 42m</b>
+							<div style="color: #65736c; font-size: 9px">82 score</div>
+						</div>
+						<div
+							style="background: white; border: 1px solid #e3e8e6; border-radius: 8px; padding: 9px"
+						>
+							<small>Resting HR</small><br /><b>62 bpm</b>
+							<div style="color: #398362; font-size: 9px">↘ 3%</div>
+						</div>
+					</div>
+					<div
+						style="
+							background: white;
+							border: 1px solid #e3e8e6;
+							border-radius: 8px;
+							padding: 9px;
+							margin-top: 8px;
+						"
+					>
+						<b>Recent trends</b
+						><svg viewBox="0 0 240 70" style="width: 100%; height: 75px">
+							<path
+								d="M2 57 C24 54,31 19,54 36 S91 60,111 31 S146 12,166 39 S206 47,238 17"
+								fill="none"
+								stroke="#2c8b62"
+								stroke-width="3"
+							/>
+							<path d="M2 60 H238" stroke="#dce4e0" />
+						</svg>
+					</div>
+					<div
+						style="
+							margin-top: 8px;
+							background: #edf8f2;
+							padding: 8px;
+							border-radius: 7px;
+							color: #36644f;
+						"
+					>
+						Backfill continues quietly: 49 of 78 metric types imported
+					</div>
+				</main>
+			</div>
+		</div>
+	</div>
+	<div class="mockup">
+		<div class="mockup-header">Metric detail</div>
+		<div
+			class="mockup-body"
+			style="
+				padding: 16px;
+				min-height: 330px;
+				background: #f8fafc;
+				font: 11px/1.4 system-ui;
+				color: #172033;
+				text-align: left;
+				box-sizing: border-box;
+			"
+		>
+			<div style="display: flex; justify-content: space-between; align-items: start">
+				<div>
+					<span style="color: #637068">Vitals /</span>
+					<h3 style="margin: 3px 0">Heart rate</h3>
+					<span style="color: #637068">Google Health · Fitbit Charge 6</span>
+				</div>
+				<select
+					style="border: 1px solid #d7dfdb; border-radius: 6px; padding: 6px; background: white"
+				>
+					<option>Last 30 days</option>
+				</select>
+			</div>
+			<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 13px">
+				<div style="background: white; border: 1px solid #e3e8e6; border-radius: 7px; padding: 8px">
+					<small>Latest</small><br /><b>68 bpm</b>
+				</div>
+				<div style="background: white; border: 1px solid #e3e8e6; border-radius: 7px; padding: 8px">
+					<small>Resting avg.</small><br /><b>62 bpm</b>
+				</div>
+				<div style="background: white; border: 1px solid #e3e8e6; border-radius: 7px; padding: 8px">
+					<small>Range</small><br /><b>48–154</b>
+				</div>
+			</div>
+			<div
+				style="
+					background: white;
+					border: 1px solid #e3e8e6;
+					border-radius: 8px;
+					padding: 9px;
+					margin-top: 8px;
+				"
+			>
+				<svg viewBox="0 0 250 80" style="width: 100%; height: 90px">
+					<path
+						d="M2 54 L18 49 L35 62 L50 41 L68 46 L86 25 L102 58 L120 47 L138 51 L157 17 L174 44 L193 38 L212 55 L230 35 L248 40"
+						fill="none"
+						stroke="#d35a55"
+						stroke-width="2.5"
+					/>
+					<path d="M2 65 H248" stroke="#dce4e0" />
+				</svg>
+			</div>
+			<div
+				style="
+					background: white;
+					border: 1px solid #e3e8e6;
+					border-radius: 8px;
+					margin-top: 8px;
+					overflow: hidden;
+				"
+			>
+				<div style="padding: 7px; border-bottom: 1px solid #e3e8e6"><b>Recent records</b></div>
+				<div style="display: flex; justify-content: space-between; padding: 7px">
+					<span>Today, 10:42</span><b>68 bpm</b><span style="color: #637068">Charge 6</span>
+				</div>
+				<div
+					style="display: flex; justify-content: space-between; padding: 7px; background: #fafcfa"
+				>
+					<span>Today, 10:37</span><b>71 bpm</b><span style="color: #637068">Charge 6</span>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="section" style="margin-top: 20px">
+	<div class="label">Behavior and recovery rules</div>
+	<div
+		style="
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 8px;
+			margin-top: 9px;
+			font-size: 12px;
+		"
+	>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 10px; background: #fff">
+			<b>Partial consent</b><br /><span style="color: #637068"
+				>Import granted categories, identify missing permissions, and offer “Review access.”</span
+			>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 10px; background: #fff">
+			<b>Transient failure</b><br /><span style="color: #637068"
+				>Retry with backoff; keep serving existing data and show delayed status.</span
+			>
+		</div>
+		<div style="border: 1px solid #d6dfda; border-radius: 9px; padding: 10px; background: #fff">
+			<b>Disconnect</b><br /><span style="color: #637068"
+				>Revoke Google access, stop jobs, retain imported history.</span
+			>
+		</div>
+		<div style="border: 1px solid #e9c8c8; border-radius: 9px; padding: 10px; background: #fff8f8">
+			<b>Delete imported data</b><br /><span style="color: #765959"
+				>Separate typed confirmation; delete points, summaries, connection, and token.</span
+			>
+		</div>
+	</div>
+	<p style="font-size: 12px; color: #637068; margin-bottom: 0">
+		All connection states and health views use the app’s existing English/Spanish localization.
+		Unknown future metrics receive a generic detail view under “Other.”
+	</p>
+</div>
+
+<div class="options" style="margin-top: 18px">
+	<div class="option" data-choice="ui-flow-approved" onclick="toggleSelect(this)">
+		<div class="letter">✓</div>
+		<div class="content">
+			<h3>Approve UI flow and recovery behavior</h3>
+			<p>
+				Use these connection states, category navigation, detail pages, and disconnect/delete
+				semantics.
+			</p>
+		</div>
+	</div>
+</div>

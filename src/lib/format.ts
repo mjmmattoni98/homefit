@@ -45,6 +45,13 @@ export function formatNumber(n: number, maximumFractionDigits = 0): string {
 	return formatter.format(n);
 }
 
+/** Formats a change with its sign: "+5.4", "−1.1", or "±0" when it rounds to nothing. */
+export function formatSigned(n: number, maximumFractionDigits = 0): string {
+	const rounded = Number(n.toFixed(maximumFractionDigits));
+	if (rounded === 0) return '±0';
+	return `${rounded > 0 ? '+' : '−'}${formatNumber(Math.abs(rounded), maximumFractionDigits)}`;
+}
+
 /** Formats large numbers compactly for axis labels: 1200 -> "1.2k", 15000 -> "15k". */
 export function formatCompact(n: number): string {
 	const abs = Math.abs(n);

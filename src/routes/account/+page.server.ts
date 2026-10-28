@@ -54,6 +54,12 @@ export const actions: Actions = {
 	},
 	deleteAccount: async ({ request, locals }) => {
 		const form = await request.formData();
+		if (form.get('confirmation') !== 'delete-account') {
+			return fail(400, {
+				action: 'delete' as const,
+				message: m.account_delete_confirmation_required()
+			});
+		}
 		const password = String(form.get('password') ?? '');
 		if (password === '') {
 			return fail(400, { action: 'delete' as const, message: m.auth_error_required() });

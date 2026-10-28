@@ -36,6 +36,12 @@ export default defineConfig({
 						'@lucide/svelte/icons/arrow-right',
 						'@lucide/svelte/icons/heart-pulse',
 						'@lucide/svelte/icons/info',
+						'@lucide/svelte/icons/check',
+						'@lucide/svelte/icons/languages',
+						'@lucide/svelte/icons/log-out',
+						'@lucide/svelte/icons/moon',
+						'@lucide/svelte/icons/sun',
+						'@lucide/svelte/icons/user',
 						'@lucide/svelte/icons/trending-down',
 						'@lucide/svelte/icons/trending-up'
 					]

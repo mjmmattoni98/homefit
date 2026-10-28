@@ -11,30 +11,12 @@ import {
 	listExercises
 } from '#lib/server/workouts.js';
 import { TIME_ZONE_COOKIE } from '#lib/time-zone.js';
+import { sleepRecordSchema } from '#lib/csv/sleep-schema.js';
 
 const finite = v.pipe(v.number(), v.finite());
 const text = (max = 2_000) => v.pipe(v.string(), v.maxLength(max));
 const optionalFinite = v.optional(finite);
 const optionalText = (max?: number) => v.optional(text(max));
-
-const sleepRecordSchema = v.object({
-	wentToBed: finite,
-	wokeUp: finite,
-	sleepQuality: finite,
-	timeInBedSeconds: finite,
-	timeAsleepSeconds: finite,
-	asleepAfterSeconds: finite,
-	regularity: optionalFinite,
-	didSnore: v.boolean(),
-	snoreTimeSeconds: finite,
-	steps: optionalFinite,
-	weatherTempC: optionalFinite,
-	weatherType: optionalText(200),
-	city: optionalText(200),
-	movementsPerHour: optionalFinite,
-	notes: v.pipe(v.array(text(500)), v.maxLength(100)),
-	mood: optionalText(200)
-});
 
 const workoutSetSchema = v.object({
 	exerciseTitle: text(500),

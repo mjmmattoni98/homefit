@@ -7,7 +7,7 @@
 	import { Input } from '#lib/components/ui/input/index.js';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { parseSleepCsv, type ParsedSleepRecord } from '#lib/csv/sleep.js';
+	import { parseSleepCsv, SleepCsvError, type ParsedSleepRecord } from '#lib/csv/sleep.js';
 	import { parseHevyCsv, type ParsedWorkout } from '#lib/csv/hevy.js';
 	import { toast } from 'svelte-sonner';
 	import type { Component } from 'svelte';
@@ -29,7 +29,7 @@
 
 	let sleepRecords = $state<ParsedSleepRecord[] | null>(null);
 	let hevyWorkouts = $state<ParsedWorkout[] | null>(null);
-	let parseError = $state(false);
+	let parseError = $state<string | null>(null);
 	let importing = $state(false);
 	// Records sent so far while the file is imported in batches.
 	let sent = $state(0);
@@ -40,7 +40,7 @@
 	async function onFileChange(event: Event) {
 		const file = (event.currentTarget as HTMLInputElement).files?.[0];
 		if (!file) return;
-		parseError = false;
+		parseError = null;
 		result = null;
 		sleepRecords = null;
 		hevyWorkouts = null;
@@ -53,10 +53,13 @@
 				hevyWorkouts = parseHevyCsv(text);
 				if (hevyWorkouts.length === 0) throw new Error('No workouts found');
 			}
-		} catch {
+		} catch (error) {
 			sleepRecords = null;
 			hevyWorkouts = null;
-			parseError = true;
+			parseError =
+				error instanceof SleepCsvError
+					? m.import_invalid_sleep_row({ row: error.row })
+					: m.import_error();
 		}
 	}
 
@@ -118,7 +121,7 @@
 		/>
 
 		{#if parseError}
-			<p class="text-sm text-destructive">{m.import_error()}</p>
+			<p class="text-sm text-destructive" role="alert">{parseError}</p>
 		{:else if parsedCount > 0}
 			<p class="text-sm text-muted-foreground">
 				{m.import_file_ready({ count: parsedCount })}

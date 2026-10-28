@@ -77,9 +77,7 @@ export function toPercent(value: string | undefined): number | undefined {
 /** Parses "2025-05-11 23:34:36" (local time) into epoch ms. */
 export function toLocalTimestamp(value: string | undefined): number | undefined {
 	if (value == null) return undefined;
-	const match = new RegExp(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/).exec(
-		value.trim()
-	);
+	const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim());
 	if (!match) return undefined;
 	const [, y, mo, d, h, mi, s] = match;
 	const date = new Date(
@@ -91,5 +89,13 @@ export function toLocalTimestamp(value: string | undefined): number | undefined 
 		Number(s ?? '0')
 	);
 	const time = date.getTime();
-	return Number.isFinite(time) ? time : undefined;
+	return Number.isFinite(time) &&
+		date.getFullYear() === Number(y) &&
+		date.getMonth() === Number(mo) - 1 &&
+		date.getDate() === Number(d) &&
+		date.getHours() === Number(h) &&
+		date.getMinutes() === Number(mi) &&
+		date.getSeconds() === Number(s ?? '0')
+		? time
+		: undefined;
 }

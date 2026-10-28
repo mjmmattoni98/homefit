@@ -19,6 +19,15 @@
 
 	const user = $derived(page.data.user);
 
+	const confirmDeletion: SubmitFunction = (input) => {
+		if (input.formData.get('confirmation') !== 'delete-account') {
+			input.cancel();
+			deleteOpen = true;
+			return;
+		}
+		return track('delete')(input);
+	};
+
 	function track(action: string): SubmitFunction {
 		return () => {
 			pending = action;
@@ -137,7 +146,7 @@
 				id="delete-account-form"
 				method="POST"
 				action="?/deleteAccount"
-				use:enhance={track('delete')}
+				use:enhance={confirmDeletion}
 			>
 				<Field.Group>
 					{@render feedback('delete')}
@@ -151,15 +160,7 @@
 							required
 						/>
 					</Field.Field>
-					<Button
-						type="button"
-						variant="destructive"
-						class="w-fit"
-						disabled={pending !== null}
-						onclick={(event) => {
-							if (event.currentTarget.closest('form')?.reportValidity()) deleteOpen = true;
-						}}
-					>
+					<Button type="submit" variant="destructive" class="w-fit" disabled={pending !== null}>
 						{m.account_delete_button()}
 					</Button>
 				</Field.Group>
@@ -179,6 +180,8 @@
 			<AlertDialog.Action
 				type="submit"
 				form="delete-account-form"
+				name="confirmation"
+				value="delete-account"
 				variant="destructive"
 				disabled={pending !== null}
 			>

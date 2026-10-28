@@ -50,6 +50,7 @@
 		<AreaChart
 			{data}
 			x="date"
+			padding={{ left: 112, right: 16, top: 16, bottom: 24 }}
 			series={[
 				{
 					key: 'value',

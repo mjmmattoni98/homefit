@@ -1,22 +1,13 @@
+import * as v from 'valibot';
 import { parseDelimited, toLocalTimestamp, toNumber, toPercent } from './parse';
+import { sleepRecordSchema, type ParsedSleepRecord } from './sleep-schema';
 
-export interface ParsedSleepRecord {
-	wentToBed: number;
-	wokeUp: number;
-	sleepQuality: number;
-	timeInBedSeconds: number;
-	timeAsleepSeconds: number;
-	asleepAfterSeconds: number;
-	regularity?: number;
-	didSnore: boolean;
-	snoreTimeSeconds: number;
-	steps?: number;
-	weatherTempC?: number;
-	weatherType?: string;
-	city?: string;
-	movementsPerHour?: number;
-	notes: string[];
-	mood?: string;
+export type { ParsedSleepRecord } from './sleep-schema';
+
+export class SleepCsvError extends Error {
+	constructor(readonly row: number) {
+		super(`Invalid sleep data on CSV row ${row}`);
+	}
 }
 
 const HEADER_MAP = {
@@ -45,7 +36,7 @@ function emptyToUndefined(value: string | undefined): string | undefined {
 
 /**
  * Parses a Sleep Cycle CSV export (semicolon separated, first row headers).
- * Rows without valid dates or quality are skipped.
+ * Rejects a file containing an invalid row before any records can be imported.
  */
 export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 	const rows = parseDelimited(text, ';');
@@ -64,14 +55,16 @@ export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 	const at = (row: string[], i: number) => (i === -1 ? undefined : row[i]);
 	const records: ParsedSleepRecord[] = [];
 
-	for (const row of rows.slice(1)) {
+	for (const [index, row] of rows.slice(1).entries()) {
 		const wentToBed = toLocalTimestamp(at(row, idx.wentToBed));
 		const wokeUp = toLocalTimestamp(at(row, idx.wokeUp));
 		const sleepQuality = toPercent(at(row, idx.sleepQuality));
-		if (wentToBed == null || wokeUp == null || sleepQuality == null) continue;
+		if (wentToBed == null || wokeUp == null || sleepQuality == null) {
+			throw new SleepCsvError(index + 2);
+		}
 
 		const notesRaw = emptyToUndefined(at(row, idx.notes));
-		records.push({
+		const parsed = v.safeParse(sleepRecordSchema, {
 			wentToBed,
 			wokeUp,
 			sleepQuality,
@@ -94,6 +87,8 @@ export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 				: [],
 			mood: emptyToUndefined(at(row, idx.mood))
 		});
+		if (!parsed.success) throw new SleepCsvError(index + 2);
+		records.push(parsed.output);
 	}
 	return records;
 }

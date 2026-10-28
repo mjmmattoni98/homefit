@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	dateRange,
+	formatMetricValue,
 	formatSummaryValue,
 	isHealthCategory,
 	isHealthDataType,
@@ -42,6 +43,15 @@ describe('Google Health view helpers', () => {
 		expect(summaryNumber({ aggregation: 'average' }, baseSummary)).toBe(72);
 		expect(summaryNumber({ aggregation: 'latest' }, baseSummary)).toBe(72);
 		expect(summaryNumber({ aggregation: 'duration' }, baseSummary)).toBe(3600);
+	});
+
+	it('shows sleep stored in minutes as hours and leaves other minute metrics unchanged', () => {
+		expect(formatMetricValue(536, 'min', 'sleep')).toBe('8.9 h');
+		expect(formatMetricValue(298, 'min', 'sleep')).toBe('5.0 h');
+		expect(formatMetricValue(59, 'min', 'sleep')).toBe('1.0 h');
+		expect(formatMetricValue(54, 'min', 'sleep')).toBe('0.9 h');
+		expect(formatMetricValue(50, 'min', 'exercise')).toBe('50 min');
+		expect(formatMetricValue(30, 'min', 'active-minutes')).toBe('30 min');
 	});
 
 	it('formats scalar, duration, and complex recorded summaries', () => {

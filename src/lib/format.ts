@@ -34,12 +34,16 @@ export function formatHours(seconds: number): string {
 	return `${(seconds / 3600).toFixed(1)} h`;
 }
 
-export function formatNumber(n: number, maximumFractionDigits = 0): string {
+export function formatNumber(
+	n: number,
+	maximumFractionDigits = 0,
+	minimumFractionDigits = 0
+): string {
 	const locale = getLocale();
-	const key = `${locale}|${maximumFractionDigits}`;
+	const key = `${locale}|${maximumFractionDigits}|${minimumFractionDigits}`;
 	let formatter = numberFormatters.get(key);
 	if (formatter === undefined) {
-		formatter = new Intl.NumberFormat(locale, { maximumFractionDigits });
+		formatter = new Intl.NumberFormat(locale, { maximumFractionDigits, minimumFractionDigits });
 		numberFormatters.set(key, formatter);
 	}
 	return formatter.format(n);

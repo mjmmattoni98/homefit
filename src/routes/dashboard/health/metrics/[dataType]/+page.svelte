@@ -16,7 +16,7 @@
 	import {
 		dateRange,
 		formatDuration,
-		formatMetricNumber,
+		formatMetricValue,
 		formatSummaryValue,
 		isHealthDataType,
 		payloadPath,
@@ -85,9 +85,9 @@
 	}
 
 	function recordValue(primaryValue: number | null, primaryUnit: string | null): string {
-		return primaryValue === null
+		return primaryValue === null || dataType === null
 			? m.health_recorded()
-			: formatMetricNumber(primaryValue, primaryUnit);
+			: formatMetricValue(primaryValue, primaryUnit, dataType);
 	}
 </script>
 
@@ -157,7 +157,7 @@
 					<Card.Root size="sm">
 						<Card.Header><Card.Title>{m.health_average()}</Card.Title></Card.Header>
 						<Card.Content class="text-lg font-semibold">
-							{formatMetricNumber(metric.latestSummary.average, metric.primaryUnit)}
+							{formatMetricValue(metric.latestSummary.average, metric.primaryUnit, metric.dataType)}
 						</Card.Content>
 					</Card.Root>
 				{/if}
@@ -165,7 +165,7 @@
 					<Card.Root size="sm">
 						<Card.Header><Card.Title>{m.health_minimum()}</Card.Title></Card.Header>
 						<Card.Content class="text-lg font-semibold">
-							{formatMetricNumber(metric.latestSummary.min, metric.primaryUnit)}
+							{formatMetricValue(metric.latestSummary.min, metric.primaryUnit, metric.dataType)}
 						</Card.Content>
 					</Card.Root>
 				{/if}
@@ -173,7 +173,7 @@
 					<Card.Root size="sm">
 						<Card.Header><Card.Title>{m.health_maximum()}</Card.Title></Card.Header>
 						<Card.Content class="text-lg font-semibold">
-							{formatMetricNumber(metric.latestSummary.max, metric.primaryUnit)}
+							{formatMetricValue(metric.latestSummary.max, metric.primaryUnit, metric.dataType)}
 						</Card.Content>
 					</Card.Root>
 				{/if}
@@ -181,7 +181,7 @@
 					<Card.Root size="sm">
 						<Card.Header><Card.Title>{m.health_total()}</Card.Title></Card.Header>
 						<Card.Content class="text-lg font-semibold">
-							{formatMetricNumber(metric.latestSummary.sum, metric.primaryUnit)}
+							{formatMetricValue(metric.latestSummary.sum, metric.primaryUnit, metric.dataType)}
 						</Card.Content>
 					</Card.Root>
 				{/if}

@@ -81,6 +81,17 @@ export function formatMetricNumber(value: number, unit: string | null): string {
 	return unit === null || unit.length === 0 ? formatted : `${formatted} ${unit}`;
 }
 
+/**
+ * Formats a stored primary value. Sleep is kept in minutes, and shown in hours — including naps
+ * under an hour — so it matches the session duration.
+ */
+export function formatMetricValue(value: number, unit: string | null, dataType: string): string {
+	if (dataType === 'sleep' && unit === 'min') {
+		return `${formatNumber(value / 60, 1, 1)} h`;
+	}
+	return formatMetricNumber(value, unit);
+}
+
 export function formatSummaryValue(
 	metric: Pick<HealthMetric, 'aggregation' | 'primaryUnit'>,
 	summary: HealthSummary,

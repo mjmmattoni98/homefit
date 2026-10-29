@@ -32,3 +32,19 @@ HomeFit is a self-hosted SvelteKit 3 app backed by PostgreSQL. Production runs o
 - Environment variables are declared and validated in `src/env.ts` and read through `$app/env/private`.
 - Background work (Google Health sync, webhooks, maintenance) runs on pg-boss (`src/lib/server/jobs.ts`). Google Health is optional and fully disabled when its variables are unset.
 - Before finishing, run `bun run check`, `bun run lint` and `bun run test:unit --run`.
+
+## Local test stack
+
+The real data lives in the Compose project `homefit` (`docker compose up`). That database listens only on the Compose network. Leave it alone: do not start it, do not use `compose.dev.yaml` or `bun run db:start`, and do not read or copy `.env`.
+
+Use the disposable test stack:
+
+```sh
+docker compose -f compose.test.yaml up -d --build
+```
+
+- App: http://127.0.0.1:3300
+- Database: `homefit_test` at `127.0.0.1:5434`, user `homefit`, password `homefittest`
+- Create a new account there. Keep real Sleep Cycle, Hevy, and Google Health data out of it.
+
+`docker compose -f compose.test.yaml down -v` deletes only that volume. The test process starts only when `POSTGRES_DB` is `homefit_test` and Google Health credentials are empty.

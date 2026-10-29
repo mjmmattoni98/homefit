@@ -1,0 +1,6 @@
+# Publishes the main database on loopback for `bun run dev` and other tools on this machine.
+# `docker compose up` does not use this file, so the database stays on the Compose network.
+services:
+  db:
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'

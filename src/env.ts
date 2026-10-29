@@ -84,6 +84,18 @@ export const variables = defineEnvVars({
 			'Run the background job worker (Google Health sync and maintenance) in this process. Defaults to `true`.',
 		schema: booleanFlag(true)
 	},
+	HOMEFIT_INSTANCE: {
+		description:
+			'Deployment this process belongs to. `main` is your data. `test` is the disposable stack from `compose.test.yaml` and only starts when `POSTGRES_DB` is `homefit_test`.',
+		schema: v.pipe(
+			v.optional(v.string(), ''),
+			v.transform((value) => {
+				const trimmed = value.trim();
+				return trimmed === '' ? 'main' : trimmed;
+			}),
+			v.picklist(['main', 'test'], 'HOMEFIT_INSTANCE must be "main" or "test"')
+		)
+	},
 	GOOGLE_HEALTH_CLIENT_ID: {
 		description:
 			'Google OAuth client ID. Leave empty to disable the optional Google Health integration.',

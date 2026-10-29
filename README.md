@@ -42,11 +42,23 @@ Open `ORIGIN`, create your account and import your data from **Import data**. Da
 - Put HomeFit behind a reverse proxy that terminates HTTPS (Caddy, Traefik, nginx…) and set `ORIGIN` to the public `https://` URL. `ORIGIN` is read at runtime, so the same image works anywhere.
 - The app is published on `127.0.0.1:3000` only, so a proxy on the same host can reach it and nothing else can. If your proxy runs in Docker instead, attach it to HomeFit's network and remove the `ports` mapping. To serve other machines without a proxy (for example on a home network), set `APP_BIND_ADDRESS=0.0.0.0`.
 - Behind a proxy, also set `ADDRESS_HEADER=X-Forwarded-For` and `XFF_DEPTH=1` (the number of trusted proxies) so sign-in throttling sees each client's real address instead of the proxy's. Only do this while the proxy is the sole way in; a client that reaches the app directly could forge the header.
-- The database is only published on `127.0.0.1` for backups and local tooling. Back it up with `docker compose exec db pg_dump -U homefit homefit > homefit.sql`.
+- The database listens only on the Compose network. Back it up with `docker compose exec db pg_dump -U homefit homefit > homefit.sql`. `bun run db:start` publishes it on `127.0.0.1` for tools on this machine.
 - To update: `git pull && docker compose up -d --build`.
 - Every configuration option is listed with its purpose in [`.env.example`](.env.example) and validated at startup by [`src/env.ts`](src/env.ts).
 
 The image runs as an unprivileged user, exposes port 3000 and has a health check on `/api/health`. To scale out, run extra replicas with `BACKGROUND_JOBS=false` and keep one worker; migrations are serialized with an advisory lock.
+
+### Test stack
+
+A second Compose project for disposable use, including by coding agents. It has its own volume, password, and network, and it does not read `.env`.
+
+```sh
+docker compose -f compose.test.yaml up -d --build
+```
+
+Open http://127.0.0.1:3300 and create an account. The database is `homefit_test` on `127.0.0.1:5434` (user `homefit`, password `homefittest`). Google Health stays off. The process only starts when `POSTGRES_DB` is `homefit_test` and every Google Health credential is empty, so this stack cannot open your real database or sync your real health data.
+
+`docker compose -f compose.test.yaml down -v` deletes the disposable volume. The main stack is left as it is.
 
 ## Google Health (optional)
 
@@ -59,7 +71,7 @@ Requirements: [Bun](https://bun.com/) 1.4 or newer, plus Docker for the database
 ```sh
 bun install
 cp .env.example .env            # set ORIGIN=http://localhost:5173 and fill in the secrets
-docker compose up -d db         # PostgreSQL on localhost:5432
+bun run db:start                # PostgreSQL on 127.0.0.1:5432
 bun run dev
 ```
 

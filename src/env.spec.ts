@@ -39,3 +39,12 @@ describe('PostgreSQL environment variables', () => {
 		await expect(read(port, '65536')).rejects.toThrow(/POSTGRES_PORT/);
 	});
 });
+
+describe('HOMEFIT_INSTANCE', () => {
+	it('defaults to main and accepts test', async () => {
+		const instance = variables.HOMEFIT_INSTANCE.schema as EnvSchema;
+		expect(await read(instance, undefined)).toBe('main');
+		expect(await read(instance, ' test ')).toBe('test');
+		await expect(read(instance, 'production')).rejects.toThrow(/HOMEFIT_INSTANCE/);
+	});
+});

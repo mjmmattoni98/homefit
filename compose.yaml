@@ -1,7 +1,10 @@
 # HomeFit with PostgreSQL. Copy .env.example to .env, fill in the secrets, then:
 #
-#   docker compose up -d --build        # app on http://localhost:3000
-#   docker compose up -d db             # database only, for `bun run dev`
+#   docker compose up -d --build        # app on http://127.0.0.1:3000
+#   bun run db:start                    # publish the database for `bun run dev`
+#
+# The database listens only on the Compose network. compose.dev.yaml publishes it
+# on 127.0.0.1 for development on this machine. Agents use compose.test.yaml.
 name: homefit
 
 services:
@@ -19,9 +22,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    # Published on the loopback interface only, for local development and backups.
-    ports:
-      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
 
   app:
     build: .

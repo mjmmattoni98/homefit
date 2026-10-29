@@ -22,7 +22,7 @@
 		"test:e2e": "playwright install && playwright test",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
-		"db:start": "docker compose up -d db",
+		"db:start": "docker compose -f compose.yaml -f compose.dev.yaml up -d db",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
 		"db:push": "drizzle-kit push",

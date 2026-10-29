@@ -28,5 +28,7 @@ project.inlang/cache
 
 Dockerfile
 compose.yaml
+compose.dev.yaml
+compose.test.yaml
 *.md
 !README.md

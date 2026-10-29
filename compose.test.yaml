@@ -1,0 +1,64 @@
+# Disposable HomeFit stack for local experiments and coding agents.
+# Run this file by itself:
+#
+#   docker compose -f compose.test.yaml up -d --build
+#
+# App: http://127.0.0.1:3300
+# Database: homefit_test on 127.0.0.1:5434 (user homefit, password homefittest)
+#
+# Values below are literals. Do not introduce ${...} interpolation: Compose would
+# substitute values from the main .env file, including the real database password.
+# This file does not use env_file. The volume name is explicit so the disposable
+# data stays off the main data volume.
+name: homefit-test
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: homefit
+      POSTGRES_PASSWORD: homefittest
+      POSTGRES_DB: homefit_test
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U homefit -d homefit_test']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - '127.0.0.1:5434:5432'
+
+  app:
+    build: .
+    image: homefit:test
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      HOMEFIT_INSTANCE: test
+      POSTGRES_USER: homefit
+      POSTGRES_PASSWORD: homefittest
+      POSTGRES_DB: homefit_test
+      POSTGRES_HOST: db
+      POSTGRES_PORT: '5432'
+      ORIGIN: http://127.0.0.1:3300
+      BETTER_AUTH_SECRET: local-homefit-test-auth-secret-01
+      DISABLE_SIGNUP: 'false'
+      RUN_MIGRATIONS: 'true'
+      BACKGROUND_JOBS: 'true'
+      GOOGLE_HEALTH_CLIENT_ID: ''
+      GOOGLE_HEALTH_CLIENT_SECRET: ''
+      GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY: ''
+      GOOGLE_HEALTH_TOKEN_ENCRYPTION_KEY_VERSION: v1
+      GOOGLE_HEALTH_TOKEN_PREVIOUS_KEYS: '{}'
+      GOOGLE_HEALTH_REDIRECT_URI: ''
+      GOOGLE_HEALTH_WEBHOOK_AUTHORIZATION: ''
+    ports:
+      - '127.0.0.1:3300:3000'
+
+volumes:
+  pgdata:
+    name: homefit-test-pgdata

@@ -22,8 +22,6 @@
 @import './base.css' layer(base);
 
 @custom-variant dark (&:is(.dark *));
-@plugin '@tailwindcss/forms';
-@plugin '@tailwindcss/typography';
 
 /* shadcn's names, pointed at the day and night tokens. Dark needs no block of its own: the tokens
  * move under .dark and these follow. */

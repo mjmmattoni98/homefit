@@ -61,8 +61,13 @@ const handleParaglide: Handle = ({ event, resolve }) =>
 		);
 	});
 
+const LATIN_WIDTH_FONT =
+	'node_modules/@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2';
+
 const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
-	const response = await resolve(event);
+	const response = await resolve(event, {
+		preload: (asset) => asset.type !== 'font' || asset.filename === LATIN_WIDTH_FONT
+	});
 	try {
 		response.headers.set('x-content-type-options', 'nosniff');
 		response.headers.set('referrer-policy', 'strict-origin-when-cross-origin');

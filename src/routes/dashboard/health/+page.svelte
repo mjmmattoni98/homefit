@@ -1,7 +1,9 @@
 <script lang="ts">
+	import { browser } from '$app/env';
 	import { resolve } from '$app/paths';
-	import { getCategories, getMetrics, getOverview } from '#lib/remote/health.remote.js';
-	import { getDashboard } from '#lib/remote/imports.remote.js';
+	import { page } from '$app/state';
+	import { getCategories, getOverview } from '#lib/remote/health.remote.js';
+	import { getSleepWindow } from '#lib/remote/imports.remote.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { buttonVariants } from '#lib/components/ui/button/index.js';
@@ -23,47 +25,36 @@
 
 	const overviewQuery = getOverview(OVERVIEW_DAYS);
 	const categoriesQuery = getCategories();
-	const activityQuery = getMetrics('activity');
-	const dashboardQuery = getDashboard();
+	// Without a time zone cookie the server would date nights in UTC and the browser would ask again.
+	const sleepQuery = $derived(
+		page.data.timeZoneKnown || browser ? getSleepWindow(OVERVIEW_DAYS) : null
+	);
 
 	const overview = $derived(overviewQuery.current);
 	const categories = $derived(categoriesQuery.current ?? []);
-	const dashboard = $derived(dashboardQuery.current);
+	const sleep = $derived(sleepQuery?.current);
 
 	const sleepComparison = $derived.by(() => {
-		if (!dashboard || dashboard.nights.length === 0 || dashboard.googleSleepNights.length === 0) {
-			return null;
-		}
-		const from = dayFromNumber(dayNumber(dashboard.today) - OVERVIEW_DAYS + 1);
+		if (!sleep || sleep.nights.length === 0 || sleep.googleSleepNights.length === 0) return null;
+		const from = dayFromNumber(dayNumber(sleep.today) - OVERVIEW_DAYS + 1);
 		return compareSleepSources(
-			dashboard.nights,
-			dashboard.googleSleepNights,
-			dashboard.timeZone,
+			sleep.nights,
+			sleep.googleSleepNights,
+			sleep.timeZone,
 			from,
-			dashboard.today
+			sleep.today
 		);
 	});
-	const recentActivity = $derived(
-		[...(activityQuery.current ?? [])]
-			.sort(
-				(left, right) =>
-					(right.latestSummary.latestTimestamp ?? 0) - (left.latestSummary.latestTimestamp ?? 0)
-			)
-			.slice(0, 4)
-	);
+	const recentActivity = $derived(overview?.recentActivity ?? []);
 	const chartMetric = $derived(
 		overview?.metrics.find((metric) =>
 			metric.trend.some((summary) => summaryNumber(metric, summary) !== null)
 		)
 	);
 	const hasError = $derived(
-		overviewQuery.error !== undefined ||
-			categoriesQuery.error !== undefined ||
-			activityQuery.error !== undefined
+		overviewQuery.error !== undefined || categoriesQuery.error !== undefined
 	);
-	const isLoading = $derived(
-		!hasError && (!overviewQuery.ready || !categoriesQuery.ready || !activityQuery.ready)
-	);
+	const isLoading = $derived(!hasError && (!overviewQuery.ready || !categoriesQuery.ready));
 
 	// The day's measurements first; sleep hangs below them on the night field.
 	const dayMetrics = $derived(overview?.metrics.filter((metric) => metric.category !== 'sleep'));

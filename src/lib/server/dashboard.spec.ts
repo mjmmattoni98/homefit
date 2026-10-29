@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { loadDashboard, localDate, resolveTimeZone } from './dashboard';
+import { loadDashboard, loadSleepWindow, localDate, resolveTimeZone } from './dashboard';
 import { importSleepRecords } from './sleep';
 import { createTestDatabase, createUser, type TestDatabase } from './testing/database';
 import { importWorkouts } from './workouts';
@@ -76,5 +76,42 @@ describe('loadDashboard', () => {
 			nights: [{ night: '2026-10-26', sleepQuality: 80 }],
 			recentWorkouts: [{ title: 'Late session', setsCount: 1, volume: 500 }]
 		});
+	});
+});
+
+describe('loadSleepWindow', () => {
+	it('returns only nights inside the requested number of evenings', async () => {
+		const { db } = database;
+		const userId = await createUser(db);
+		const now = new Date(Date.UTC(2026, 9, 20, 12));
+		await importSleepRecords(db, userId, [
+			{
+				wentToBed: Date.UTC(2026, 9, 1, 22),
+				wokeUp: Date.UTC(2026, 9, 2, 6),
+				sleepQuality: 70,
+				timeInBedSeconds: 8 * 3600,
+				timeAsleepSeconds: 7 * 3600,
+				asleepAfterSeconds: 600,
+				didSnore: false,
+				snoreTimeSeconds: 0,
+				notes: []
+			},
+			{
+				wentToBed: Date.UTC(2026, 9, 19, 22),
+				wokeUp: Date.UTC(2026, 9, 20, 6),
+				sleepQuality: 90,
+				timeInBedSeconds: 8 * 3600,
+				timeAsleepSeconds: 7 * 3600,
+				asleepAfterSeconds: 600,
+				didSnore: false,
+				snoreTimeSeconds: 0,
+				notes: []
+			}
+		]);
+
+		const sleepWindow = await loadSleepWindow(db, userId, 'UTC', 7, now);
+		expect(sleepWindow.today).toBe('2026-10-20');
+		expect(sleepWindow.nights.map((night) => night.night)).toEqual(['2026-10-19']);
+		expect(sleepWindow.googleSleepNights).toEqual([]);
 	});
 });

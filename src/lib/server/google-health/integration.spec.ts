@@ -331,6 +331,7 @@ describe('Google Health synchronization', () => {
 
 		const overview = await getOverview(database.db, userId, 30);
 		expect(overview.metrics.map((metric) => metric.dataType)).toEqual(['weight', 'heart-rate']);
+		expect(overview.recentActivity).toEqual([]);
 		expect(overview.metrics[0].trend).toHaveLength(3);
 		const trend = await getMetricTrend(database.db, userId, {
 			dataType: 'weight',

@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, lte, sql } from 'drizzle-orm';
 import type { Database } from './db/types';
 import { healthDataPoint, sleepRecord } from './db/schema';
 
@@ -34,13 +34,15 @@ export interface SleepNight extends Pick<
 	wentToBed?: number;
 	asleepAfterSeconds?: number;
 	regularity?: number;
-	didSnore?: boolean;
 	snoreTimeSeconds?: number;
 	movementsPerHour?: number;
-	mood?: string;
-	steps?: number;
-	weatherTempC?: number;
 	city?: string;
+}
+
+/** Inclusive local dates (`YYYY-MM-DD`) of the evening a night began. */
+export interface NightRange {
+	from: string;
+	to: string;
 }
 
 /** A sleep session imported from Google Health, dated by the same 5 AM evening rule. */
@@ -59,6 +61,32 @@ export interface GoogleSleepNight {
 }
 
 const MAX_LISTED_RECORDS = 10_000;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function assertIsoDate(value: string): void {
+	if (!ISO_DATE.test(value)) throw new Error('Invalid night date');
+	const year = Number(value.slice(0, 4));
+	const month = Number(value.slice(5, 7));
+	const day = Number(value.slice(8, 10));
+	const date = new Date(Date.UTC(year, month - 1, day));
+	if (
+		date.getUTCFullYear() !== year ||
+		date.getUTCMonth() !== month - 1 ||
+		date.getUTCDate() !== day
+	) {
+		throw new Error('Invalid night date');
+	}
+}
+
+/** Timestamp bounds wide enough to cover the evening-date window in any offset, for the index. */
+function indexedNightBounds(timeZone: string, range: NightRange) {
+	assertIsoDate(range.from);
+	assertIsoDate(range.to);
+	return {
+		start: sql`(${range.from}::timestamp at time zone ${timeZone}::text) - interval '2 days'`,
+		end: sql`(${range.to}::timestamp at time zone ${timeZone}::text) + interval '3 days'`
+	};
+}
 
 /**
  * Imports Sleep Cycle records. Nights are deduplicated by wake-up time per user, so the same
@@ -92,11 +120,14 @@ export async function importSleepRecords(
 export async function listNights(
 	db: Database,
 	userId: string,
-	timeZone: string
+	timeZone: string,
+	range?: NightRange
 ): Promise<SleepNight[]> {
+	const night = sql<string>`to_char((${sleepRecord.wentToBed} at time zone ${timeZone}::text) - interval '5 hours', 'YYYY-MM-DD')`;
+	const bounds = range === undefined ? undefined : indexedNightBounds(timeZone, range);
 	const rows = await db
 		.select({
-			night: sql<string>`to_char((${sleepRecord.wentToBed} at time zone ${timeZone}::text) - interval '5 hours', 'YYYY-MM-DD')`,
+			night,
 			wentToBed: sleepRecord.wentToBed,
 			wokeUp: sleepRecord.wokeUp,
 			sleepQuality: sleepRecord.sleepQuality,
@@ -104,17 +135,21 @@ export async function listNights(
 			timeAsleepSeconds: sleepRecord.timeAsleepSeconds,
 			asleepAfterSeconds: sleepRecord.asleepAfterSeconds,
 			regularity: sleepRecord.regularity,
-			didSnore: sleepRecord.didSnore,
 			snoreTimeSeconds: sleepRecord.snoreTimeSeconds,
 			movementsPerHour: sleepRecord.movementsPerHour,
-			mood: sleepRecord.mood,
-			steps: sleepRecord.steps,
-			weatherTempC: sleepRecord.weatherTempC,
 			city: sleepRecord.city,
 			notes: sleepRecord.notes
 		})
 		.from(sleepRecord)
-		.where(eq(sleepRecord.userId, userId))
+		.where(
+			and(
+				eq(sleepRecord.userId, userId),
+				bounds === undefined ? undefined : gte(sleepRecord.wokeUp, bounds.start),
+				bounds === undefined ? undefined : lt(sleepRecord.wokeUp, bounds.end),
+				range === undefined ? undefined : gte(night, range.from),
+				range === undefined ? undefined : lte(night, range.to)
+			)
+		)
 		.orderBy(desc(sleepRecord.wokeUp))
 		.limit(MAX_LISTED_RECORDS);
 	return rows.reverse().map((row) => ({
@@ -126,160 +161,76 @@ export async function listNights(
 		timeAsleepSeconds: row.timeAsleepSeconds,
 		asleepAfterSeconds: row.asleepAfterSeconds,
 		regularity: row.regularity ?? undefined,
-		didSnore: row.didSnore,
 		snoreTimeSeconds: row.snoreTimeSeconds,
 		movementsPerHour: row.movementsPerHour ?? undefined,
-		mood: row.mood ?? undefined,
-		steps: row.steps ?? undefined,
-		weatherTempC: row.weatherTempC ?? undefined,
 		city: row.city ?? undefined,
 		notes: row.notes
 	}));
 }
 
-function readNumber(value: unknown): number | null {
-	if (typeof value === 'number' && Number.isFinite(value)) return value;
-	if (typeof value === 'string' && value.trim() !== '') {
-		const parsed = Number(value);
-		if (Number.isFinite(parsed)) return parsed;
-	}
-	return null;
-}
-
-function parseGoogleSleepStages(payload: unknown): {
-	minutesInBed: number | null;
-	minutesAwake: number | null;
-	deepSeconds: number | null;
-	lightSeconds: number | null;
-	remSeconds: number | null;
-} {
-	if (typeof payload !== 'object' || payload === null) {
-		return {
-			minutesInBed: null,
-			minutesAwake: null,
-			deepSeconds: null,
-			lightSeconds: null,
-			remSeconds: null
-		};
-	}
-	const summary = Reflect.get(payload, 'summary');
-	let minutesInBed: number | null = null;
-	let minutesAwake: number | null = null;
-	let deepSeconds: number | null = null;
-	let lightSeconds: number | null = null;
-	let remSeconds: number | null = null;
-
-	if (typeof summary === 'object' && summary !== null) {
-		minutesInBed = readNumber(Reflect.get(summary, 'minutesInBed'));
-		minutesAwake = readNumber(Reflect.get(summary, 'minutesAwake'));
-		const deep = readNumber(
-			Reflect.get(summary, 'minutesDeep') ?? Reflect.get(summary, 'deepMinutes')
-		);
-		const light = readNumber(
-			Reflect.get(summary, 'minutesLight') ?? Reflect.get(summary, 'lightMinutes')
-		);
-		const rem = readNumber(
-			Reflect.get(summary, 'minutesRem') ?? Reflect.get(summary, 'remMinutes')
-		);
-		if (deep !== null) deepSeconds = deep * 60;
-		if (light !== null) lightSeconds = light * 60;
-		if (rem !== null) remSeconds = rem * 60;
-	}
-
-	const stages = Reflect.get(payload, 'stages');
-	if (Array.isArray(stages) && stages.length <= 256) {
-		let awake = 0;
-		let deep = 0;
-		let light = 0;
-		let rem = 0;
-		let hasStage = false;
-		for (const item of stages) {
-			if (typeof item !== 'object' || item === null) continue;
-			const stageType = String(
-				Reflect.get(item, 'type') ?? Reflect.get(item, 'stage') ?? ''
-			).toUpperCase();
-			const startRaw = Reflect.get(item, 'startTime');
-			const endRaw = Reflect.get(item, 'endTime');
-			const startMs = typeof startRaw === 'string' ? Date.parse(startRaw) : NaN;
-			const endMs = typeof endRaw === 'string' ? Date.parse(endRaw) : NaN;
-			const seconds =
-				Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
-					? (endMs - startMs) / 1000
-					: (readNumber(Reflect.get(item, 'minutes')) ?? 0) * 60;
-			if (seconds <= 0) continue;
-			if (stageType.includes('AWAKE') || stageType.includes('WAKE')) {
-				awake += seconds;
-				hasStage = true;
-			} else if (stageType.includes('DEEP')) {
-				deep += seconds;
-				hasStage = true;
-			} else if (stageType.includes('LIGHT')) {
-				light += seconds;
-				hasStage = true;
-			} else if (stageType.includes('REM')) {
-				rem += seconds;
-				hasStage = true;
-			}
-		}
-		if (hasStage) {
-			if (minutesAwake === null && awake > 0) minutesAwake = awake / 60;
-			if (deepSeconds === null && deep > 0) deepSeconds = deep;
-			if (lightSeconds === null && light > 0) lightSeconds = light;
-			if (remSeconds === null && rem > 0) remSeconds = rem;
-		}
-	}
-
-	return { minutesInBed, minutesAwake, deepSeconds, lightSeconds, remSeconds };
-}
-
 /**
  * Lists sleep sessions imported from Google Health, oldest first, dated by the same 5 AM evening
  * rule as Sleep Cycle so overlapping nights align even when one source starts just before midnight
- * and the other just after.
+ * and the other just after. Stage totals come from columns filled at import, not the JSON payload.
  */
 export async function listGoogleSleepNights(
 	db: Database,
 	userId: string,
-	timeZone: string
+	timeZone: string,
+	range?: NightRange
 ): Promise<GoogleSleepNight[]> {
 	const startExpr = sql`coalesce(${healthDataPoint.startTime}, ${healthDataPoint.recordTimestamp})`;
+	const night = sql<string>`to_char((${startExpr} at time zone ${timeZone}::text) - interval '5 hours', 'YYYY-MM-DD')`;
+	const bounds = range === undefined ? undefined : indexedNightBounds(timeZone, range);
 	const rows = await db
 		.select({
-			night: sql<string>`to_char((${startExpr} at time zone ${timeZone}::text) - interval '5 hours', 'YYYY-MM-DD')`,
+			night,
 			recordTimestamp: healthDataPoint.recordTimestamp,
 			startTime: healthDataPoint.startTime,
 			endTime: healthDataPoint.endTime,
 			primaryValue: healthDataPoint.primaryValue,
 			sourceApplication: healthDataPoint.sourceApplication,
 			sourceDevice: healthDataPoint.sourceDevice,
-			payload: healthDataPoint.payload
+			sleepInBedSeconds: healthDataPoint.sleepInBedSeconds,
+			sleepAwakeSeconds: healthDataPoint.sleepAwakeSeconds,
+			sleepDeepSeconds: healthDataPoint.sleepDeepSeconds,
+			sleepLightSeconds: healthDataPoint.sleepLightSeconds,
+			sleepRemSeconds: healthDataPoint.sleepRemSeconds
 		})
 		.from(healthDataPoint)
-		.where(and(eq(healthDataPoint.userId, userId), eq(healthDataPoint.dataType, 'sleep')))
+		.where(
+			and(
+				eq(healthDataPoint.userId, userId),
+				eq(healthDataPoint.dataType, 'sleep'),
+				bounds === undefined ? undefined : gte(healthDataPoint.recordTimestamp, bounds.start),
+				bounds === undefined ? undefined : lt(healthDataPoint.recordTimestamp, bounds.end),
+				range === undefined ? undefined : gte(night, range.from),
+				range === undefined ? undefined : lte(night, range.to)
+			)
+		)
 		.orderBy(desc(healthDataPoint.recordTimestamp))
 		.limit(MAX_LISTED_RECORDS);
 
 	return rows.reverse().flatMap((row) => {
 		const startTime = (row.startTime ?? row.recordTimestamp).getTime();
-		const parsed = parseGoogleSleepStages(row.payload);
 		const endTime =
 			row.endTime?.getTime() ??
-			(parsed.minutesInBed !== null
-				? startTime + parsed.minutesInBed * 60_000
+			(row.sleepInBedSeconds !== null && row.sleepInBedSeconds > 0
+				? startTime + row.sleepInBedSeconds * 1000
 				: row.primaryValue !== null
 					? startTime + row.primaryValue * 60_000
 					: startTime);
 		const spanSeconds = Math.max(0, (endTime - startTime) / 1000);
 		const timeInBedSeconds =
-			parsed.minutesInBed !== null && parsed.minutesInBed > 0
-				? parsed.minutesInBed * 60
+			row.sleepInBedSeconds !== null && row.sleepInBedSeconds > 0
+				? row.sleepInBedSeconds
 				: spanSeconds;
 		const asleepFromMinutes =
 			row.primaryValue !== null && row.primaryValue > 0 ? row.primaryValue * 60 : null;
 		const timeAsleepSeconds =
 			asleepFromMinutes ??
-			(parsed.minutesAwake !== null && timeInBedSeconds > parsed.minutesAwake * 60
-				? timeInBedSeconds - parsed.minutesAwake * 60
+			(row.sleepAwakeSeconds !== null && timeInBedSeconds > row.sleepAwakeSeconds
+				? timeInBedSeconds - row.sleepAwakeSeconds
 				: spanSeconds);
 		if (timeAsleepSeconds <= 0 && timeInBedSeconds <= 0) return [];
 		return [
@@ -289,10 +240,10 @@ export async function listGoogleSleepNights(
 				endTime,
 				timeInBedSeconds: Math.max(timeInBedSeconds, timeAsleepSeconds),
 				timeAsleepSeconds,
-				awakeSeconds: parsed.minutesAwake !== null ? parsed.minutesAwake * 60 : undefined,
-				deepSeconds: parsed.deepSeconds ?? undefined,
-				lightSeconds: parsed.lightSeconds ?? undefined,
-				remSeconds: parsed.remSeconds ?? undefined,
+				awakeSeconds: row.sleepAwakeSeconds ?? undefined,
+				deepSeconds: row.sleepDeepSeconds ?? undefined,
+				lightSeconds: row.sleepLightSeconds ?? undefined,
+				remSeconds: row.sleepRemSeconds ?? undefined,
 				sourceApplication: row.sourceApplication ?? undefined,
 				sourceDevice: row.sourceDevice ?? undefined
 			}

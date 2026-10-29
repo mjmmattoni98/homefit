@@ -107,40 +107,61 @@ const HARD_SET = sql`(${WORKING_SET} and (lower(coalesce(${workoutSet.setType}, 
  * Imports Hevy workouts with their sets. Workouts are deduplicated by start time and title per
  * user, so the same export can be imported repeatedly.
  */
+const SET_INSERT_CHUNK = 2_000;
+
+function workoutKey(startTime: number, title: string): string {
+	return `${startTime}\0${title}`;
+}
+
 export async function importWorkouts(
 	db: Database,
 	userId: string,
 	workouts: readonly WorkoutInput[]
 ): Promise<{ imported: number; skipped: number; setsImported: number }> {
+	if (workouts.length === 0) return { imported: 0, skipped: 0, setsImported: 0 };
 	return await db.transaction(async (tx) => {
-		let imported = 0;
-		let setsImported = 0;
-		for (const { sets, ...input } of workouts) {
-			const [created] = await tx
-				.insert(workout)
-				.values({
-					...input,
-					userId,
-					startTime: new Date(input.startTime),
-					endTime: new Date(input.endTime)
-				})
-				.onConflictDoNothing({ target: [workout.userId, workout.startTime, workout.title] })
-				.returning({ id: workout.id, startTime: workout.startTime });
-			if (created === undefined) continue;
-			imported += 1;
-			if (sets.length > 0) {
-				await tx.insert(workoutSet).values(
-					sets.map((set) => ({
-						...set,
-						workoutId: created.id,
-						userId,
-						startTime: created.startTime
-					}))
-				);
-				setsImported += sets.length;
-			}
+		const pending: WorkoutInput[] = [];
+		const seen = new Set<string>();
+		for (const input of workouts) {
+			const key = workoutKey(input.startTime, input.title);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			pending.push(input);
 		}
-		return { imported, skipped: workouts.length - imported, setsImported };
+		const inserted = await tx
+			.insert(workout)
+			.values(
+				pending.map((input) => ({
+					userId,
+					title: input.title,
+					startTime: new Date(input.startTime),
+					endTime: new Date(input.endTime),
+					description: input.description ?? null
+				}))
+			)
+			.onConflictDoNothing({ target: [workout.userId, workout.startTime, workout.title] })
+			.returning({ id: workout.id, startTime: workout.startTime, title: workout.title });
+		const createdByKey = new Map(
+			inserted.map((row) => [workoutKey(row.startTime.getTime(), row.title), row])
+		);
+		const setRows = pending.flatMap((input) => {
+			const created = createdByKey.get(workoutKey(input.startTime, input.title));
+			if (created === undefined) return [];
+			return input.sets.map((set) => ({
+				...set,
+				workoutId: created.id,
+				userId,
+				startTime: created.startTime
+			}));
+		});
+		for (let index = 0; index < setRows.length; index += SET_INSERT_CHUNK) {
+			await tx.insert(workoutSet).values(setRows.slice(index, index + SET_INSERT_CHUNK));
+		}
+		return {
+			imported: inserted.length,
+			skipped: workouts.length - inserted.length,
+			setsImported: setRows.length
+		};
 	});
 }
 
@@ -150,13 +171,30 @@ export async function listWorkouts(
 	userId: string,
 	limit: number
 ): Promise<WorkoutSummary[]> {
+	// Pick the workouts first. Joining every historical set and only then limiting recounts years
+	// of training to return a handful of sessions.
+	const recent = db.$with('recent_workouts').as(
+		db
+			.select({
+				id: workout.id,
+				title: workout.title,
+				startTime: workout.startTime,
+				endTime: workout.endTime,
+				description: workout.description
+			})
+			.from(workout)
+			.where(eq(workout.userId, userId))
+			.orderBy(desc(workout.startTime))
+			.limit(limit)
+	);
 	const rows = await db
+		.with(recent)
 		.select({
-			id: workout.id,
-			title: workout.title,
-			startTime: workout.startTime,
-			endTime: workout.endTime,
-			description: workout.description,
+			id: recent.id,
+			title: recent.title,
+			startTime: recent.startTime,
+			endTime: recent.endTime,
+			description: recent.description,
 			setsCount: sql<number>`count(${workoutSet.id})::int`,
 			workingSets: sql<number>`count(${workoutSet.id}) filter (where ${WORKING_SET})::int`,
 			hardSets: sql<number>`count(${workoutSet.id}) filter (where ${HARD_SET})::int`,
@@ -169,12 +207,10 @@ export async function listWorkouts(
 				string[]
 			>`coalesce(array_agg(distinct ${workoutSet.exerciseTitle}) filter (where ${workoutSet.id} is not null), '{}')`
 		})
-		.from(workout)
-		.leftJoin(workoutSet, eq(workoutSet.workoutId, workout.id))
-		.where(eq(workout.userId, userId))
-		.groupBy(workout.id)
-		.orderBy(desc(workout.startTime))
-		.limit(limit);
+		.from(recent)
+		.leftJoin(workoutSet, eq(workoutSet.workoutId, recent.id))
+		.groupBy(recent.id, recent.title, recent.startTime, recent.endTime, recent.description)
+		.orderBy(desc(recent.startTime));
 	return rows.map((row) => ({
 		id: row.id,
 		title: row.title,

@@ -15,6 +15,13 @@
       "when": 1793131388727,
       "tag": "0001_oauth_state_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793276949549,
+      "tag": "0002_sleep_stage_columns",
+      "breakpoints": true
     }
   ]
 }

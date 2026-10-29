@@ -322,6 +322,15 @@ export const healthDataPoint = pgTable(
 		googleUpdateTime: instant('google_update_time'),
 		payloadDigest: text('payload_digest').notNull(),
 		payload: jsonb('payload').notNull(),
+		// Stage totals for sleep sessions, copied from the payload at write time. Null for other
+		// metrics. The dashboard reads these instead of the JSON document.
+		sleepInBedSeconds: doublePrecision('sleep_in_bed_seconds'),
+		sleepAwakeSeconds: doublePrecision('sleep_awake_seconds'),
+		sleepDeepSeconds: doublePrecision('sleep_deep_seconds'),
+		sleepLightSeconds: doublePrecision('sleep_light_seconds'),
+		sleepRemSeconds: doublePrecision('sleep_rem_seconds'),
+		// False until the columns above have been filled for a sleep row (including "nothing to copy").
+		sleepDurationsParsed: boolean('sleep_durations_parsed').notNull().default(false),
 		seenEpoch: integer('seen_epoch').notNull().default(0),
 		lastSeenSyncId: text('last_seen_sync_id').notNull()
 	},
@@ -342,7 +351,11 @@ export const healthDataPoint = pgTable(
 			table.connectionId,
 			table.dataType,
 			table.civilCoverageTime
-		)
+		),
+		// Empty once startup has copied stage totals, so that lookup stays an index probe.
+		index('health_data_point_unparsed_sleep_idx')
+			.on(table.id)
+			.where(sql`${table.dataType} = 'sleep' and ${table.sleepDurationsParsed} = false`)
 	]
 );
 

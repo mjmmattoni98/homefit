@@ -3,9 +3,10 @@ import type { Executor } from '../db/types';
 import { googleHealthRecordTombstone, healthDailySummary, healthDataPoint } from '../db/schema';
 import { canonicalJson, sha256Base64Url } from './normalize';
 import { getMetricDefinition } from './registry';
+import { googleSleepDurations } from './sleep-durations';
 import type { HealthCategory, NormalizedHealthPoint } from './types';
 
-// node-postgres allows 65 535 bind parameters per statement; a point uses 27 of them.
+// node-postgres allows 65 535 bind parameters per statement; a point uses 32 of them.
 const WRITE_CHUNK_SIZE = 500;
 
 // Every column except the conflict target and primary key is replaced by the incoming row.
@@ -42,6 +43,8 @@ function chunks<T>(items: readonly T[], size = WRITE_CHUNK_SIZE): T[][] {
 
 function toRow(owner: PointOwner, point: NormalizedHealthPoint, syncId: string, seenEpoch: number) {
 	const date = (value: number | undefined) => (value === undefined ? null : new Date(value));
+	const payload = JSON.parse(point.payloadJson) as unknown;
+	const sleep = point.dataType === 'sleep' ? googleSleepDurations(payload) : null;
 	return {
 		connectionId: owner.connectionId,
 		userId: owner.userId,
@@ -66,7 +69,13 @@ function toRow(owner: PointOwner, point: NormalizedHealthPoint, syncId: string, 
 		googleCreateTime: date(point.googleCreateTime),
 		googleUpdateTime: date(point.googleUpdateTime),
 		payloadDigest: point.payloadDigest,
-		payload: JSON.parse(point.payloadJson) as unknown,
+		payload,
+		sleepInBedSeconds: sleep?.inBedSeconds ?? null,
+		sleepAwakeSeconds: sleep?.awakeSeconds ?? null,
+		sleepDeepSeconds: sleep?.deepSeconds ?? null,
+		sleepLightSeconds: sleep?.lightSeconds ?? null,
+		sleepRemSeconds: sleep?.remSeconds ?? null,
+		sleepDurationsParsed: point.dataType === 'sleep',
 		seenEpoch,
 		lastSeenSyncId: syncId
 	};

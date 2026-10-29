@@ -1,8 +1,9 @@
 <script lang="ts">
+	import { browser } from '$app/env';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { getCategories, getMetrics } from '#lib/remote/health.remote.js';
-	import { getDashboard } from '#lib/remote/imports.remote.js';
+	import { getSleepWindow } from '#lib/remote/imports.remote.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import SleepSourcesChart from '#lib/components/dashboard/SleepSourcesChart.svelte';
@@ -21,7 +22,9 @@
 		return value !== undefined && isHealthCategory(value) ? value : null;
 	});
 	const metricsQuery = $derived(category === null ? null : getMetrics(category));
-	const dashboardQuery = $derived(category === 'sleep' ? getDashboard() : null);
+	const sleepQuery = $derived(
+		category === 'sleep' && (page.data.timeZoneKnown || browser) ? getSleepWindow(60) : null
+	);
 	const metrics = $derived(
 		[...(metricsQuery?.current ?? [])].sort((left, right) =>
 			metricLabel(left.dataType).localeCompare(metricLabel(right.dataType))
@@ -46,17 +49,17 @@
 	// Sleep is measured on the nights, so its category is a night panel.
 	const night = $derived(category === 'sleep');
 	const sleepComparison = $derived.by(() => {
-		const dash = dashboardQuery?.current;
-		if (!night || !dash || dash.nights.length === 0 || dash.googleSleepNights.length === 0) {
+		const sleep = sleepQuery?.current;
+		if (!night || !sleep || sleep.nights.length === 0 || sleep.googleSleepNights.length === 0) {
 			return null;
 		}
-		const from = dayFromNumber(dayNumber(dash.today) - 59);
+		const from = dayFromNumber(dayNumber(sleep.today) - 59);
 		return compareSleepSources(
-			dash.nights,
-			dash.googleSleepNights,
-			dash.timeZone,
+			sleep.nights,
+			sleep.googleSleepNights,
+			sleep.timeZone,
 			from,
-			dash.today
+			sleep.today
 		);
 	});
 </script>

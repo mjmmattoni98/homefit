@@ -1,6 +1,11 @@
 import * as v from 'valibot';
 import { command, getRequestEvent, query } from '$app/server';
-import { listScaleWeights, loadDashboard, resolveTimeZone } from '#lib/server/dashboard.js';
+import {
+	listScaleWeights,
+	loadDashboard,
+	loadSleepWindow,
+	resolveTimeZone
+} from '#lib/server/dashboard.js';
 import { db } from '#lib/server/db/index.js';
 import { requireUserId } from '#lib/server/session.js';
 import { importSleepRecords } from '#lib/server/sleep.js';
@@ -44,6 +49,15 @@ export const getDashboard = query(async () => {
 	const timeZone = resolveTimeZone(getRequestEvent().cookies.get(TIME_ZONE_COOKIE));
 	return await loadDashboard(db, userId, timeZone);
 });
+
+export const getSleepWindow = query(
+	v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(366)),
+	async (days) => {
+		const userId = requireUserId();
+		const timeZone = resolveTimeZone(getRequestEvent().cookies.get(TIME_ZONE_COOKIE));
+		return await loadSleepWindow(db, userId, timeZone, days);
+	}
+);
 
 export const getWorkout = query(v.pipe(v.string(), v.uuid()), async (workoutId) =>
 	getWorkoutDetail(db, requireUserId(), workoutId)

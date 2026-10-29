@@ -1,3 +1,4 @@
+import { getRequestEvent } from '$app/server';
 import { and, desc, eq, gte, lt, lte, or, sql } from 'drizzle-orm';
 import type { Database } from '../db/types';
 import { healthDailySummary, healthDataPoint } from '../db/schema';
@@ -63,6 +64,8 @@ export interface Overview {
 	fromDate: string | null;
 	toDate: string | null;
 	metrics: OverviewMetric[];
+	/** Newest activity metrics, for the health overview's recent list. */
+	recentActivity: CatalogMetric[];
 }
 
 export type MetricTrend =
@@ -262,6 +265,8 @@ function detailRecord(point: PointRow): DetailRecord {
 	};
 }
 
+const summaryCache = new WeakMap<object, Map<string, Promise<SummaryRow[]>>>();
+
 /** The newest daily summary of every metric the user has imported. */
 async function latestSummaries(db: Database, userId: string): Promise<SummaryRow[]> {
 	const rows = await db
@@ -276,12 +281,35 @@ async function latestSummaries(db: Database, userId: string): Promise<SummaryRow
 	return rows;
 }
 
-export async function listCategories(
-	db: Database,
-	userId: string
-): Promise<{ category: HealthCategory; count: number }[]> {
+/**
+ * One request's layout and page each ask for the catalog. Share the scan while that request runs;
+ * outside a request (tests) there is nothing to share.
+ */
+function cachedLatestSummaries(db: Database, userId: string): Promise<SummaryRow[]> {
+	let event: object | undefined;
+	try {
+		event = getRequestEvent();
+	} catch {
+		event = undefined;
+	}
+	if (event === undefined) return latestSummaries(db, userId);
+	let byUser = summaryCache.get(event);
+	if (byUser === undefined) {
+		byUser = new Map();
+		summaryCache.set(event, byUser);
+	}
+	const existing = byUser.get(userId);
+	if (existing !== undefined) return existing;
+	const pending = latestSummaries(db, userId);
+	byUser.set(userId, pending);
+	return pending;
+}
+
+function categoriesFromSummaries(
+	summaries: readonly SummaryRow[]
+): { category: HealthCategory; count: number }[] {
 	const counts = new Map<HealthCategory, number>();
-	for (const summary of await latestSummaries(db, userId)) {
+	for (const summary of summaries) {
 		const category = metricMetadata(summary.dataType).category;
 		counts.set(category, (counts.get(category) ?? 0) + 1);
 	}
@@ -291,12 +319,34 @@ export async function listCategories(
 	});
 }
 
+function recentActivityFromSummaries(summaries: readonly SummaryRow[]): CatalogMetric[] {
+	return summaries
+		.filter((summary) => metricMetadata(summary.dataType).category === 'activity')
+		.sort(
+			(left, right) =>
+				(right.latestTimestamp?.getTime() ?? 0) - (left.latestTimestamp?.getTime() ?? 0) ||
+				compareDataTypes(left.dataType, right.dataType)
+		)
+		.slice(0, 4)
+		.map((summary) => ({
+			...metricMetadata(summary.dataType),
+			latestSummary: summaryView(summary)
+		}));
+}
+
+export async function listCategories(
+	db: Database,
+	userId: string
+): Promise<{ category: HealthCategory; count: number }[]> {
+	return categoriesFromSummaries(await cachedLatestSummaries(db, userId));
+}
+
 export async function listMetrics(
 	db: Database,
 	userId: string,
 	category: HealthCategory | null
 ): Promise<CatalogMetric[]> {
-	return (await latestSummaries(db, userId))
+	return (await cachedLatestSummaries(db, userId))
 		.map((summary) => ({
 			...metricMetadata(summary.dataType),
 			latestSummary: summaryView(summary)
@@ -313,8 +363,16 @@ export async function getOverview(db: Database, userId: string, days: number): P
 	if (!Number.isSafeInteger(days) || days < 1 || days > 365) {
 		throw new Error('Invalid Google Health overview range');
 	}
-	const latest = await latestSummaries(db, userId);
-	if (latest.length === 0) return { anchorDate: null, fromDate: null, toDate: null, metrics: [] };
+	const latest = await cachedLatestSummaries(db, userId);
+	if (latest.length === 0) {
+		return {
+			anchorDate: null,
+			fromDate: null,
+			toDate: null,
+			metrics: [],
+			recentActivity: []
+		};
+	}
 	const anchorDate = latest.reduce(
 		(newest, summary) => (summary.localDate > newest ? summary.localDate : newest),
 		latest[0].localDate
@@ -340,7 +398,13 @@ export async function getOverview(db: Database, userId: string, days: number): P
 			)
 		}))
 	);
-	return { anchorDate, fromDate, toDate: anchorDate, metrics };
+	return {
+		anchorDate,
+		fromDate,
+		toDate: anchorDate,
+		metrics,
+		recentActivity: recentActivityFromSummaries(latest)
+	};
 }
 
 async function summariesBetween(

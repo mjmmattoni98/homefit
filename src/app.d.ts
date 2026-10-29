@@ -12,6 +12,7 @@ declare global {
 			user: { name: string; email: string } | null;
 			signupEnabled: boolean;
 			googleHealthEnabled: boolean;
+			timeZoneKnown: boolean;
 		}
 		// interface Error {}
 		// interface PageState {}

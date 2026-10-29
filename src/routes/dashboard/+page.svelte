@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { browser } from '$app/env';
 	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { getDashboard } from '#lib/remote/imports.remote.js';
 	import * as m from '#lib/paraglide/messages.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
@@ -41,11 +43,15 @@
 	// every night instead.
 	const MIN_FACTOR_NIGHTS = 60;
 
-	const dashboardQuery = getDashboard();
+	// Without a time zone cookie the server would date every night in UTC, then the browser would
+	// download the whole history a second time. Wait for the cookie the document sets first.
+	const dashboardQuery = $derived(page.data.timeZoneKnown || browser ? getDashboard() : null);
 
-	const dashboard = $derived(dashboardQuery.current);
-	const hasError = $derived(dashboardQuery.error !== undefined);
-	const isLoading = $derived(!hasError && !dashboardQuery.ready);
+	const dashboard = $derived(dashboardQuery?.current);
+	const hasError = $derived(dashboardQuery?.error !== undefined);
+	const isLoading = $derived(
+		dashboardQuery === null || (dashboardQuery.error === undefined && !dashboardQuery.ready)
+	);
 	const hasData = $derived(
 		(dashboard?.nights.length ?? 0) > 0 ||
 			(dashboard?.googleSleepNights.length ?? 0) > 0 ||
@@ -61,7 +67,7 @@
 		const timeZone = browserTimeZone();
 		if (dashboard.timeZone !== timeZone) {
 			rememberTimeZone(timeZone);
-			void dashboardQuery.refresh();
+			void dashboardQuery?.refresh();
 		}
 	});
 

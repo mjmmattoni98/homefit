@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
+import { dayFromNumber, dayNumber } from '#lib/days.js';
 import type { Database } from './db/types';
 import { healthDailySummary } from './db/schema';
 import { listGoogleSleepNights, listNights, type GoogleSleepNight, type SleepNight } from './sleep';
@@ -101,6 +102,29 @@ export async function listScaleWeights(
 		const weightKg = row.latestValue ?? row.average;
 		return weightKg !== null && weightKg > 0 ? [{ day: row.localDate, weightKg }] : [];
 	});
+}
+
+/**
+ * Sleep Cycle nights and Google sleep sessions whose evening falls in the last `days` local dates
+ * through today. Enough for the health pages' comparison, without the rest of the dashboard.
+ */
+export async function loadSleepWindow(
+	db: Database,
+	userId: string,
+	timeZone: string,
+	days: number,
+	now = new Date()
+): Promise<Pick<Dashboard, 'timeZone' | 'today' | 'nights' | 'googleSleepNights'>> {
+	if (!Number.isSafeInteger(days) || days < 1 || days > 366) {
+		throw new Error('Invalid sleep window');
+	}
+	const today = localDate(timeZone, now);
+	const range = { from: dayFromNumber(dayNumber(today) - days + 1), to: today };
+	const [nights, googleSleepNights] = await Promise.all([
+		listNights(db, userId, timeZone, range),
+		listGoogleSleepNights(db, userId, timeZone, range)
+	]);
+	return { timeZone, today, nights, googleSleepNights };
 }
 
 /** Everything the overview page charts, with days split at midnight in `timeZone`. */

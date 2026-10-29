@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { googleHealthConnection, healthDataPoint } from './db/schema';
+import { normalizeGooglePoint } from './google-health/normalize';
+import { getMetricDefinition } from './google-health/registry';
+import { backfillSleepDurations } from './google-health/sleep-durations';
+import { applyPoints } from './google-health/store';
 import {
 	importSleepRecords,
 	listGoogleSleepNights,
@@ -91,12 +95,8 @@ describe('sleep imports', () => {
 			timeAsleepSeconds: 7 * 3600,
 			asleepAfterSeconds: 600,
 			regularity: 88,
-			didSnore: false,
 			snoreTimeSeconds: 0,
 			movementsPerHour: 12,
-			mood: undefined,
-			steps: undefined,
-			weatherTempC: undefined,
 			city: 'Madrid',
 			notes: ['Coffee']
 		});
@@ -124,6 +124,22 @@ describe('sleep imports', () => {
 			'2026-10-11',
 			'2026-10-12'
 		]);
+	});
+
+	it('limits nights to an evening-date window', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		await importSleepRecords(db, owner, [
+			night(Date.UTC(2026, 9, 1, 7)),
+			night(Date.UTC(2026, 9, 12, 7)),
+			night(Date.UTC(2026, 9, 20, 7))
+		]);
+
+		expect(
+			(await listNights(db, owner, 'UTC', { from: '2026-10-10', to: '2026-10-12' })).map(
+				(record) => record.night
+			)
+		).toEqual(['2026-10-11']);
 	});
 
 	it('lists Google Health sleep sessions with asleep duration, in-bed span and stage breakdown', async () => {
@@ -165,6 +181,7 @@ describe('sleep imports', () => {
 			},
 			lastSeenSyncId: 'sync-1'
 		});
+		await backfillSleepDurations(db);
 
 		const ghNights = await listGoogleSleepNights(db, owner, 'UTC');
 		expect(ghNights).toEqual([
@@ -183,6 +200,56 @@ describe('sleep imports', () => {
 				sourceDevice: undefined
 			}
 		]);
+	});
+
+	it('copies stage totals onto the row when a Google sleep session is stored', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const [connection] = await db
+			.insert(googleHealthConnection)
+			.values({ userId: owner, status: 'active' })
+			.returning({ id: googleHealthConnection.id });
+		const definition = getMetricDefinition('sleep');
+		if (definition === null) throw new Error('sleep metric is missing');
+		const point = normalizeGooglePoint(definition, {
+			sleep: {
+				interval: {
+					startTime: '2026-10-11T22:00:00Z',
+					endTime: '2026-10-12T06:00:00Z'
+				},
+				type: 'STAGES',
+				summary: {
+					minutesAsleep: 430,
+					minutesInBed: 500,
+					minutesAwake: 50,
+					minutesDeep: 85,
+					minutesLight: 245,
+					minutesRem: 100
+				}
+			}
+		});
+
+		await applyPoints(
+			db,
+			{ connectionId: connection.id, userId: owner, generation: 1 },
+			'sleep',
+			[point],
+			{
+				syncId: 'sync-stored',
+				seenEpoch: 1
+			}
+		);
+
+		const [stored] = await listGoogleSleepNights(db, owner, 'UTC');
+		expect(stored).toMatchObject({
+			night: '2026-10-11',
+			timeInBedSeconds: 500 * 60,
+			timeAsleepSeconds: 430 * 60,
+			awakeSeconds: 50 * 60,
+			deepSeconds: 85 * 60,
+			lightSeconds: 245 * 60,
+			remSeconds: 100 * 60
+		});
 	});
 });
 
@@ -213,6 +280,31 @@ describe('workout imports', () => {
 			totalReps: 34
 		});
 		expect(summary.exerciseTitles.sort()).toEqual(['Bench Press', 'Push Up']);
+	});
+
+	it('summarizes only the newest workouts when the list is limited', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const earlier = Date.UTC(2026, 8, 1, 18);
+		const later = Date.UTC(2026, 9, 10, 18);
+		await importWorkouts(db, owner, [
+			{
+				title: 'Earlier',
+				startTime: earlier,
+				endTime: earlier + 3600_000,
+				sets: [{ exerciseTitle: 'Squat', setIndex: 0, setType: 'normal', weightKg: 100, reps: 5 }]
+			},
+			{
+				title: 'Later',
+				startTime: later,
+				endTime: later + 3600_000,
+				sets: [{ exerciseTitle: 'Row', setIndex: 0, setType: 'normal', weightKg: 40, reps: 8 }]
+			}
+		]);
+
+		const listed = await listWorkouts(db, owner, 1);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]).toMatchObject({ title: 'Later', setsCount: 1, volume: 320 });
 	});
 
 	it('sums every workout per local day, excluding warmups from working volume', async () => {

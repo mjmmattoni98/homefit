@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 import { command, getRequestEvent, query } from '$app/server';
-import { loadDashboard, resolveTimeZone } from '#lib/server/dashboard.js';
+import { listScaleWeights, loadDashboard, resolveTimeZone } from '#lib/server/dashboard.js';
 import { db } from '#lib/server/db/index.js';
 import { requireUserId } from '#lib/server/session.js';
 import { importSleepRecords } from '#lib/server/sleep.js';
@@ -54,6 +54,8 @@ export const getExercises = query(async () => await listExercises(db, requireUse
 export const getExerciseSessions = query(text(500), async (exerciseTitle) =>
 	exerciseSessions(db, requireUserId(), exerciseTitle)
 );
+
+export const getScaleWeights = query(async () => await listScaleWeights(db, requireUserId()));
 
 export const importSleepBatch = command(
 	v.object({ records: v.pipe(v.array(sleepRecordSchema), v.maxLength(500)) }),

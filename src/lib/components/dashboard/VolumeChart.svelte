@@ -7,17 +7,21 @@
 
 	let {
 		data,
+		unit,
 		tooltipLabel = tooltipDate
 	}: {
 		/** One bar per entry, oldest first. */
 		data: { date: Date; volume: number }[];
+		/** Custom label/unit for the bar series (defaults to localized volume kg). */
+		unit?: string;
 		/** Tooltip heading for a bar's date. */
 		tooltipLabel?: (date: Date) => string;
 	} = $props();
 
-	const config = {
-		volume: { label: m.volume_kg(), color: CHART_COLORS.volume }
-	} satisfies Chart.ChartConfig;
+	const seriesLabel = $derived(unit ?? m.volume_kg());
+	const config = $derived({
+		volume: { label: seriesLabel, color: CHART_COLORS.volume }
+	} satisfies Chart.ChartConfig);
 
 	const PADDING = { left: 44, right: 4, top: 8, bottom: 28 };
 	// d3's band scale with the chart's default padding of 0.4 on every side of each bar.
@@ -49,7 +53,7 @@
 			series={[
 				{
 					key: 'volume',
-					label: m.volume_kg(),
+					label: seriesLabel,
 					color: 'var(--color-volume)',
 					props: { radius: 0, rounded: 'none', stroke: 'none', width: barWidth }
 				}

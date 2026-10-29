@@ -35,29 +35,63 @@
 		kind: 'line' | 'bars';
 	};
 
-	const dayFigures = $derived<Figure[]>([
-		{
-			label: m.kpi_workouts(),
-			value: formatNumber(summary.workouts),
-			change: summary.workoutsChange,
-			unit: 'relative',
-			hint: m.kpi_training_days({ count: summary.trainingDays }),
-			spark: points.map((point) => point.workouts),
-			kind: 'bars'
-		},
-		{
-			label: m.kpi_volume(),
-			value: `${formatNumber(summary.volume)} kg`,
-			change: summary.volumeChange,
-			unit: 'relative',
-			hint:
-				summary.workouts === 0
-					? ''
-					: m.kpi_per_workout({ volume: formatNumber(summary.volume / summary.workouts) }),
-			spark: points.map((point) => point.volume),
-			kind: 'bars'
+	const acwrHint = $derived.by(() => {
+		if (summary.acwr === null) return '';
+		if (summary.acwr >= 0.8 && summary.acwr <= 1.3) return m.kpi_acwr_sweet_spot();
+		return summary.acwr > 1.3 ? m.kpi_acwr_high() : m.kpi_acwr_low();
+	});
+
+	const dayFigures = $derived.by<Figure[]>(() => {
+		const list: Figure[] = [
+			{
+				label: m.kpi_workouts(),
+				value: formatNumber(summary.workouts),
+				change: summary.workoutsChange,
+				unit: 'relative',
+				hint: m.kpi_training_days({ count: summary.trainingDays }),
+				spark: points.map((point) => point.workouts),
+				kind: 'bars'
+			},
+			{
+				label: m.kpi_volume(),
+				value: `${formatNumber(summary.volume)} kg`,
+				change: summary.volumeChange,
+				unit: 'relative',
+				hint:
+					summary.workouts === 0
+						? ''
+						: m.kpi_per_workout({ volume: formatNumber(summary.volume / summary.workouts) }),
+				spark: points.map((point) => point.volume),
+				kind: 'bars'
+			}
+		];
+		if (summary.acwr !== null) {
+			list.push({
+				label: m.kpi_acwr(),
+				value: `${summary.acwr.toFixed(2)} x`,
+				change: null,
+				unit: 'relative',
+				hint: acwrHint,
+				spark: points.map((point) => point.volume),
+				kind: 'line'
+			});
 		}
-	]);
+		return list;
+	});
+
+	const efficiencyHint = $derived.by(() => {
+		const reg = summary.regularity === null ? null : Math.round(summary.regularity);
+		const lat = summary.latencyMin === null ? null : Math.round(summary.latencyMin);
+		if (reg !== null && lat !== null) {
+			return m.kpi_regularity_latency({
+				regularity: formatNumber(reg),
+				latency: formatNumber(lat)
+			});
+		}
+		if (reg !== null) return m.kpi_regularity_only({ regularity: formatNumber(reg) });
+		if (lat !== null) return m.kpi_latency_only({ latency: formatNumber(lat) });
+		return m.kpi_efficiency_hint();
+	});
 
 	const nightFigures = $derived<Figure[]>([
 		{
@@ -83,7 +117,7 @@
 			value: summary.efficiency === null ? '—' : `${Math.round(summary.efficiency)}%`,
 			change: summary.efficiencyChange,
 			unit: 'points',
-			hint: m.kpi_efficiency_hint(),
+			hint: efficiencyHint,
 			spark: points.map((point) =>
 				point.asleep !== null && point.inBed ? (point.asleep / point.inBed) * 100 : null
 			),
@@ -126,7 +160,11 @@
 	aria-label={m.kpi_section_label()}
 	class={cn(
 		'grid gap-x-8 gap-y-7',
-		night ? 'grid-cols-2 sm:grid-cols-3 sm:gap-x-12' : 'grid-cols-2 sm:gap-x-12 lg:w-[36rem]'
+		night
+			? 'grid-cols-2 sm:grid-cols-3 sm:gap-x-12'
+			: figures.length >= 3
+				? 'grid-cols-2 sm:grid-cols-3 sm:gap-x-12'
+				: 'grid-cols-2 sm:gap-x-12 lg:w-[36rem]'
 	)}
 >
 	{#each figures as figure (figure.label)}
@@ -143,13 +181,15 @@
 				/>
 				{@render change(figure)}
 			</dd>
-			<dd class="mt-1.5 mb-0.5 max-w-[18rem]" aria-hidden="true">
-				<Sparkline
-					values={figure.spark}
-					kind={figure.kind}
-					color={night ? CHART_COLORS.quality : CHART_COLORS.volume}
-				/>
-			</dd>
+			{#if figure.spark.length > 0}
+				<dd class="mt-1.5 mb-0.5 max-w-[18rem]" aria-hidden="true">
+					<Sparkline
+						values={figure.spark}
+						kind={figure.kind}
+						color={night ? CHART_COLORS.quality : CHART_COLORS.volume}
+					/>
+				</dd>
+			{/if}
 			{#if figure.hint}
 				<dd class={cn('text-sm text-pretty', night ? 'text-moon-2' : 'text-ink-3')}>
 					{figure.hint}

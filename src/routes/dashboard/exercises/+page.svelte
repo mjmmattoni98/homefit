@@ -1,62 +1,95 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { getExerciseSessions, getExercises } from '#lib/remote/imports.remote.js';
-	import type { ExerciseSession, ExerciseSummary } from '#lib/server/workouts.js';
+	import {
+		getExerciseSessions,
+		getExercises,
+		getScaleWeights
+	} from '#lib/remote/imports.remote.js';
+	import type { ExerciseMode, ExerciseSummary } from '#lib/server/workouts.js';
+	import {
+		formatPaceMinPerKm,
+		primarySeriesForMode,
+		summarizeExerciseProgression
+	} from '#lib/progression.js';
 	import * as m from '#lib/paraglide/messages.js';
 	import * as Command from '#lib/components/ui/command/index.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import * as Popover from '#lib/components/ui/popover/index.js';
+	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
 	import { Button, buttonVariants } from '#lib/components/ui/button/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import Measure from '#lib/components/Measure.svelte';
 	import StatCard from '#lib/components/dashboard/StatCard.svelte';
 	import WeightChart from '#lib/components/dashboard/WeightChart.svelte';
 	import VolumeChart from '#lib/components/dashboard/VolumeChart.svelte';
-	import { formatDate, formatDateLong, formatNumber } from '#lib/format.js';
+	import { formatDate, formatDateLong, formatHours, formatNumber } from '#lib/format.js';
 	import { cn } from '#lib/utils.js';
 	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
 	const exercisesQuery = getExercises();
+	const scaleWeightsQuery = getScaleWeights();
 
 	const exercises = $derived(exercisesQuery.current ?? []);
+	const scaleWeights = $derived(scaleWeightsQuery.current ?? []);
 
 	let pickerOpen = $state(false);
 	let selected = $state<string | null>(null);
+	let weightedMetric = $state<'e1rm' | 'weight'>('e1rm');
+
 	// Until one is picked, show the exercise trained most recently.
-	const activeExercise = $derived.by(() => {
-		if (selected && exercises.some((exercise) => exercise.exerciseTitle === selected)) {
-			return selected;
+	const activeExerciseObj = $derived.by(() => {
+		if (selected) {
+			const match = exercises.find((exercise) => exercise.exerciseTitle === selected);
+			if (match) return match;
 		}
 		let latest = exercises[0];
 		for (const exercise of exercises) {
 			if (exercise.lastPerformed > latest.lastPerformed) latest = exercise;
 		}
-		return latest?.exerciseTitle ?? '';
+		return latest;
 	});
+	const activeExercise = $derived(activeExerciseObj?.exerciseTitle ?? '');
+	const mode = $derived<ExerciseMode>(activeExerciseObj?.mode ?? 'weighted');
 
 	const sessionsQuery = $derived(activeExercise ? getExerciseSessions(activeExercise) : null);
 	const sessions = $derived(sessionsQuery?.current ?? []);
 
-	// The first session reaching each record, so its date can be shown.
-	const summary = $derived.by(() => {
-		let heaviest: ExerciseSession | undefined;
-		let biggest: ExerciseSession | undefined;
-		for (const session of sessions) {
-			if (session.maxWeight > (heaviest?.maxWeight ?? 0)) heaviest = session;
-			if (session.volume > (biggest?.volume ?? 0)) biggest = session;
-		}
-		return { sessions: sessions.length, last: sessions.at(-1), heaviest, biggest };
+	const progression = $derived(summarizeExerciseProgression(sessions, scaleWeights));
+
+	const primaryData = $derived(primarySeriesForMode(progression.annotated, mode, weightedMetric));
+	const primaryUnit = $derived.by(() => {
+		if (mode === 'weighted') return 'kg';
+		if (mode === 'bodyweight') return 'reps';
+		if (mode === 'cardio') return 'min/km';
+		return 'min';
 	});
 
-	const weightData = $derived(
-		sessions
-			.filter((s) => s.maxWeight > 0)
-			.map((s) => ({ date: new Date(s.startTime), weight: s.maxWeight }))
-	);
-	const volumeData = $derived(
-		sessions.map((s) => ({ date: new Date(s.startTime), volume: Math.round(s.volume) }))
-	);
+	const barData = $derived.by(() => {
+		if (mode === 'bodyweight') {
+			return sessions.map((s) => ({ date: new Date(s.startTime), volume: s.totalReps }));
+		}
+		if (mode === 'cardio') {
+			return sessions.map((s) => ({
+				date: new Date(s.startTime),
+				volume: Number(s.distanceKm.toFixed(2))
+			}));
+		}
+		if (mode === 'duration') {
+			return sessions.map((s) => ({
+				date: new Date(s.startTime),
+				volume: Number((s.durationSeconds / 60).toFixed(1))
+			}));
+		}
+		return sessions.map((s) => ({ date: new Date(s.startTime), volume: Math.round(s.volume) }));
+	});
+	const barUnit = $derived.by(() => {
+		if (mode === 'bodyweight') return 'reps';
+		if (mode === 'cardio') return 'km';
+		if (mode === 'duration') return 'min';
+		return undefined;
+	});
 
 	const hasError = $derived(
 		exercisesQuery.error !== undefined || sessionsQuery?.error !== undefined
@@ -69,8 +102,6 @@
 		pickerOpen = false;
 	}
 
-	// The ledger beside the detail (lg and up) filters itself; the picker below lg filters inside
-	// its command menu.
 	let search = $state('');
 	const listed = $derived.by(() => {
 		const query = search.trim().toLocaleLowerCase();
@@ -80,11 +111,19 @@
 		);
 	});
 
+	function modeLabel(mType: ExerciseMode): string {
+		if (mType === 'bodyweight') return m.ex_mode_bodyweight();
+		if (mType === 'cardio') return m.ex_mode_cardio();
+		if (mType === 'duration') return m.ex_mode_duration();
+		return m.ex_mode_weighted();
+	}
+
 	function itemMeta(exercise: ExerciseSummary): string {
-		return m.exercises_item_meta({
+		const base = m.exercises_item_meta({
 			count: exercise.setsCount,
 			date: formatDate(exercise.lastPerformed, { day: 'numeric', month: 'short', year: 'numeric' })
 		});
+		return exercise.mode === 'weighted' ? base : `${base}, ${modeLabel(exercise.mode)}`;
 	}
 </script>
 
@@ -230,7 +269,12 @@
 		</div>
 
 		<section class="min-w-0" aria-labelledby="exercise-name">
-			<h2 id="exercise-name" class="text-2xl">{activeExercise}</h2>
+			<div class="flex flex-wrap items-baseline justify-between gap-4">
+				<h2 id="exercise-name" class="text-2xl">{activeExercise}</h2>
+				{#if progression.prCount > 0}
+					<p class="text-sm text-ink-3">{m.ex_prs_logged({ count: progression.prCount })}</p>
+				{/if}
+			</div>
 
 			{#if hasError}
 				<Empty.Root class="mt-6 border border-rule">
@@ -248,43 +292,181 @@
 				<dl class="mt-6 grid grid-cols-2 gap-x-8 gap-y-6 sm:flex sm:flex-wrap sm:gap-x-14">
 					<StatCard
 						title={m.ex_sessions()}
-						value={String(summary.sessions)}
-						subtitle={summary.last &&
-							m.ex_last_session({ date: formatDateLong(summary.last.startTime) })}
+						value={String(progression.sessions)}
+						subtitle={progression.last &&
+							m.ex_last_session({ date: formatDateLong(progression.last.startTime) })}
 					/>
-					<StatCard
-						title={m.ex_max_weight()}
-						value="{formatNumber(summary.heaviest?.maxWeight ?? 0, 1)} kg"
-						subtitle={summary.heaviest && formatDateLong(summary.heaviest.startTime)}
-					/>
-					<StatCard
-						title={m.ex_best_volume()}
-						value="{formatNumber(summary.biggest?.volume ?? 0)} kg"
-						subtitle={summary.biggest && formatDateLong(summary.biggest.startTime)}
-					/>
+
+					{#if mode === 'weighted'}
+						<StatCard
+							title={m.ex_est_1rm()}
+							value="{formatNumber(progression.bestE1rm?.e1rm ?? 0, 1)} kg"
+							subtitle={progression.bestE1rm && formatDateLong(progression.bestE1rm.startTime)}
+						/>
+						<StatCard
+							title={m.ex_max_weight()}
+							value="{formatNumber(progression.heaviest?.maxWeight ?? 0, 1)} kg"
+							subtitle={progression.heaviest && formatDateLong(progression.heaviest.startTime)}
+						/>
+						{#if progression.bestRelativeE1rm !== undefined}
+							<StatCard
+								title={m.ex_relative_strength()}
+								value="{progression.bestRelativeE1rm.ratio.toFixed(2)} x"
+								subtitle={m.ex_relative_sub({
+									weight: formatNumber(progression.bestRelativeE1rm.bodyweightKg, 1)
+								})}
+							/>
+						{/if}
+						<StatCard
+							title={m.ex_best_volume()}
+							value="{formatNumber(progression.biggestVolume?.volume ?? 0)} kg"
+							subtitle={progression.biggestVolume &&
+								formatDateLong(progression.biggestVolume.startTime)}
+						/>
+					{:else if mode === 'bodyweight'}
+						<StatCard
+							title={m.ex_max_reps()}
+							value={m.ex_reps_unit({ count: progression.mostReps?.maxReps ?? 0 })}
+							subtitle={progression.mostReps && formatDateLong(progression.mostReps.startTime)}
+						/>
+					{:else if mode === 'cardio'}
+						<StatCard
+							title={m.ex_best_distance()}
+							value="{formatNumber(progression.longestDistance?.distanceKm ?? 0, 2)} km"
+							subtitle={progression.longestDistance &&
+								formatDateLong(progression.longestDistance.startTime)}
+						/>
+						{#if progression.fastestPaceMinPerKm !== undefined}
+							<StatCard
+								title={m.ex_best_pace()}
+								value={formatPaceMinPerKm(progression.fastestPaceMinPerKm.value)}
+								subtitle={formatDateLong(progression.fastestPaceMinPerKm.session.startTime)}
+							/>
+						{/if}
+					{:else}
+						<StatCard
+							title={m.ex_best_duration()}
+							value={formatHours(progression.longestDuration?.durationSeconds ?? 0)}
+							subtitle={progression.longestDuration &&
+								formatDateLong(progression.longestDuration.startTime)}
+						/>
+					{/if}
 				</dl>
 
-				<section class="mt-14" aria-labelledby="exercise-weight-title">
-					<h3 id="exercise-weight-title" class="text-xl">{m.ex_weight_progression()}</h3>
-					<p class="mt-1.5 flex items-center gap-2 text-sm text-ink-2">
-						<span class="h-0.5 w-4 bg-sun" aria-hidden="true"></span>
-						{m.ex_weight_desc()}
-					</p>
-					<div class="mt-4">
-						<WeightChart data={weightData} />
-					</div>
-				</section>
+				{#if mode === 'weighted' && progression.repMaxes.length > 0}
+					<section class="mt-12" aria-labelledby="exercise-repmax-title">
+						<h3 id="exercise-repmax-title" class="text-xl">{m.ex_rep_maxes_title()}</h3>
+						<p class="mt-1.5 text-sm text-ink-3">{m.ex_rep_maxes_desc()}</p>
+						<dl class="mt-4 grid grid-cols-3 border-t border-ink sm:grid-cols-6">
+							{#each progression.repMaxes as entry (entry.reps)}
+								<div class="border-b border-rule py-3 pr-4">
+									<dt class="text-xs font-medium text-ink-3">
+										{m.ex_reps_target({ reps: entry.reps })}
+									</dt>
+									<dd class="mt-1">
+										<Measure
+											value="{formatNumber(entry.weight, 1)} kg"
+											class="text-2xl font-figure"
+											unitClass="ml-[0.15em] text-[0.5em] font-medium text-ink-3"
+										/>
+									</dd>
+									<dd class="mt-0.5 text-xs text-ink-3">
+										{formatDate(entry.startTime, { day: 'numeric', month: 'short' })}
+									</dd>
+								</div>
+							{/each}
+						</dl>
+					</section>
+				{/if}
 
-				<section class="mt-12" aria-labelledby="exercise-volume-title">
-					<h3 id="exercise-volume-title" class="text-xl">{m.ex_volume_session()}</h3>
-					<p class="mt-1.5 flex items-center gap-2 text-sm text-ink-2">
-						<span class="size-2.5 bg-sun" aria-hidden="true"></span>
-						{m.ex_volume_desc()}
-					</p>
-					<div class="mt-4">
-						<VolumeChart data={volumeData} />
-					</div>
-				</section>
+				{#if primaryData.length > 0}
+					<section class="mt-14" aria-labelledby="exercise-primary-title">
+						<div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+							<div>
+								<h3 id="exercise-primary-title" class="text-xl">
+									{#if mode === 'weighted'}
+										{weightedMetric === 'e1rm' ? m.ex_est_1rm() : m.ex_weight_progression()}
+									{:else if mode === 'bodyweight'}
+										{m.ex_max_reps()}
+									{:else if mode === 'cardio'}
+										{m.ex_pace_progression()}
+									{:else}
+										{m.ex_duration_progression()}
+									{/if}
+								</h3>
+								<p class="mt-1.5 flex items-center gap-2 text-sm text-ink-2">
+									<span class="h-0.5 w-4 bg-sun" aria-hidden="true"></span>
+									{#if mode === 'weighted'}
+										{weightedMetric === 'e1rm' ? m.ex_est_1rm_desc() : m.ex_weight_desc()}
+									{:else if mode === 'bodyweight'}
+										{m.ex_max_reps_desc()}
+									{:else if mode === 'cardio'}
+										{m.ex_pace_desc()}
+									{:else}
+										{m.ex_duration_desc()}
+									{/if}
+								</p>
+							</div>
+
+							{#if mode === 'weighted'}
+								<ToggleGroup.Root
+									type="single"
+									bind:value={
+										() => weightedMetric,
+										(next) => {
+											if (next === 'e1rm' || next === 'weight') weightedMetric = next;
+										}
+									}
+									variant="outline"
+									aria-label={m.ex_weight_progression()}
+									class="w-full data-[variant=outline]:shadow-none sm:w-auto"
+								>
+									<ToggleGroup.Item value="e1rm" class="h-8 flex-1 px-2.5 text-xs sm:flex-none">
+										{m.ex_metric_e1rm()}
+									</ToggleGroup.Item>
+									<ToggleGroup.Item value="weight" class="h-8 flex-1 px-2.5 text-xs sm:flex-none">
+										{m.ex_metric_weight()}
+									</ToggleGroup.Item>
+								</ToggleGroup.Root>
+							{/if}
+						</div>
+
+						<div class="mt-4">
+							<WeightChart data={primaryData} unit={primaryUnit} />
+						</div>
+					</section>
+				{/if}
+
+				{#if barData.some((d) => d.volume > 0)}
+					<section class="mt-12" aria-labelledby="exercise-volume-title">
+						<h3 id="exercise-volume-title" class="text-xl">
+							{#if mode === 'bodyweight'}
+								{m.ex_total_reps()}
+							{:else if mode === 'cardio'}
+								{m.ex_distance_session()}
+							{:else if mode === 'duration'}
+								{m.ex_duration_progression()}
+							{:else}
+								{m.ex_volume_session()}
+							{/if}
+						</h3>
+						<p class="mt-1.5 flex items-center gap-2 text-sm text-ink-2">
+							<span class="size-2.5 bg-sun" aria-hidden="true"></span>
+							{#if mode === 'bodyweight'}
+								{m.ex_total_reps_desc()}
+							{:else if mode === 'cardio'}
+								{m.ex_distance_desc()}
+							{:else if mode === 'duration'}
+								{m.ex_duration_desc()}
+							{:else}
+								{m.ex_volume_desc()}
+							{/if}
+						</p>
+						<div class="mt-4">
+							<VolumeChart data={barData} unit={barUnit} />
+						</div>
+					</section>
+				{/if}
 			{/if}
 		</section>
 	</div>

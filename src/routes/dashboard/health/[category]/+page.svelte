@@ -2,13 +2,17 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { getCategories, getMetrics } from '#lib/remote/health.remote.js';
+	import { getDashboard } from '#lib/remote/imports.remote.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
+	import SleepSourcesChart from '#lib/components/dashboard/SleepSourcesChart.svelte';
 	import HealthMetricCard from '#lib/components/google-health/HealthMetricCard.svelte';
 	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
+	import { dayFromNumber, dayNumber } from '#lib/days.js';
 	import { categoryLabel, metricLabel } from '#lib/google-health/labels.js';
 	import { isHealthCategory } from '#lib/google-health/view.js';
 	import * as m from '#lib/paraglide/messages.js';
+	import { compareSleepSources } from '#lib/sleep-sources.js';
 	import { cn } from '#lib/utils.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
@@ -17,6 +21,7 @@
 		return value !== undefined && isHealthCategory(value) ? value : null;
 	});
 	const metricsQuery = $derived(category === null ? null : getMetrics(category));
+	const dashboardQuery = $derived(category === 'sleep' ? getDashboard() : null);
 	const metrics = $derived(
 		[...(metricsQuery?.current ?? [])].sort((left, right) =>
 			metricLabel(left.dataType).localeCompare(metricLabel(right.dataType))
@@ -40,6 +45,20 @@
 
 	// Sleep is measured on the nights, so its category is a night panel.
 	const night = $derived(category === 'sleep');
+	const sleepComparison = $derived.by(() => {
+		const dash = dashboardQuery?.current;
+		if (!night || !dash || dash.nights.length === 0 || dash.googleSleepNights.length === 0) {
+			return null;
+		}
+		const from = dayFromNumber(dayNumber(dash.today) - 59);
+		return compareSleepSources(
+			dash.nights,
+			dash.googleSleepNights,
+			dash.timeZone,
+			from,
+			dash.today
+		);
+	});
 </script>
 
 <svelte:head>
@@ -149,4 +168,10 @@
 			</ul>
 		</div>
 	</div>
+
+	{#if sleepComparison !== null}
+		<div class="mt-12">
+			<SleepSourcesChart comparison={sleepComparison} />
+		</div>
+	{/if}
 {/if}

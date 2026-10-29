@@ -36,3 +36,29 @@ export function relativeChange(current: number | null, previous: number | null):
 	if (current === null || previous === null || previous === 0) return null;
 	return (current - previous) / previous;
 }
+
+/**
+ * Pearson correlation coefficient `r` in `[-1, 1]` across paired `(x, y)` observations, or null
+ * when fewer than `minimum` pairs exist or either series has zero variance.
+ */
+export function pearsonCorrelation(
+	pairs: readonly { x: number; y: number }[],
+	minimum = 5
+): number | null {
+	if (pairs.length < Math.max(3, minimum)) return null;
+	const meanX = mean(pairs.map((p) => p.x)) ?? 0;
+	const meanY = mean(pairs.map((p) => p.y)) ?? 0;
+	let cov = 0;
+	let varX = 0;
+	let varY = 0;
+	for (const { x, y } of pairs) {
+		const dx = x - meanX;
+		const dy = y - meanY;
+		cov += dx * dy;
+		varX += dx * dx;
+		varY += dy * dy;
+	}
+	const denom = Math.sqrt(varX * varY);
+	if (denom === 0) return null;
+	return Math.max(-1, Math.min(1, cov / denom));
+}

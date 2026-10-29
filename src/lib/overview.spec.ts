@@ -10,25 +10,43 @@ import {
 	recordsByDay,
 	rollingQuality,
 	sleepFactors,
+	sleepReadiness,
+	summarizeCircadian,
 	summarizePeriod,
-	workoutNights
+	workloadRatio,
+	workoutNights,
+	workoutTimingImpact
 } from './overview';
 
 const HOUR = 3600;
 
-function night(day: string, quality: number, asleepHours = 7, notes: string[] = []): SleepNight {
+function night(
+	day: string,
+	quality: number,
+	asleepHours = 7,
+	notes: string[] = [],
+	overrides: Partial<SleepNight> = {}
+): SleepNight {
+	const wokeUp = Date.parse(`${day}T06:00:00Z`) + 86_400_000;
 	return {
 		night: day,
-		wokeUp: Date.parse(`${day}T06:00:00Z`) + 86_400_000,
+		wentToBed: wokeUp - (asleepHours + 1) * HOUR * 1000,
+		wokeUp,
 		sleepQuality: quality,
 		timeAsleepSeconds: asleepHours * HOUR,
 		timeInBedSeconds: (asleepHours + 1) * HOUR,
-		notes
+		notes,
+		...overrides
 	};
 }
 
-function training(day: string, volume: number, workouts = 1): TrainingDay {
-	return { day, workouts, volume };
+function training(
+	day: string,
+	volume: number,
+	workouts = 1,
+	overrides: Partial<TrainingDay> = {}
+): TrainingDay {
+	return { day, workouts, volume, ...overrides };
 }
 
 describe('mainNights and recordsByDay', () => {
@@ -120,6 +138,22 @@ describe('summarizePeriod', () => {
 	});
 });
 
+describe('workloadRatio', () => {
+	it('computes 7-day acute load against 28-day weekly baseline', () => {
+		const records = recordsByDay(
+			[],
+			[
+				training('2026-10-01', 2000),
+				training('2026-10-08', 2000),
+				training('2026-10-15', 2000),
+				training('2026-10-24', 3000)
+			]
+		);
+		// Total 28d = 9000 -> weekly baseline = 2250; acute 7d = 3000 -> ACWR = 3000 / 2250 = 1.333...
+		expect(workloadRatio(records, '2026-10-28')).toBeCloseTo(3000 / 2250);
+	});
+});
+
 describe('chartGranularity', () => {
 	it('uses days up to 90 days, weeks up to two years and months beyond', () => {
 		expect(chartGranularity('2026-07-31', '2026-10-28')).toBe('day');
@@ -202,6 +236,19 @@ describe('sleepFactors', () => {
 		expect(trainingFactor?.difference).not.toBeNull();
 	});
 
+	it('flips improvement sign for latency so shorter fall-asleep time is better', () => {
+		const nights = [
+			night('2026-10-01', 80, 7, ['Read'], { asleepAfterSeconds: 480 }),
+			night('2026-10-02', 80, 7, ['Read'], { asleepAfterSeconds: 540 }),
+			night('2026-10-03', 80, 7, [], { asleepAfterSeconds: 1500 }),
+			night('2026-10-04', 80, 7, [], { asleepAfterSeconds: 1620 })
+		];
+		const factors = sleepFactors(nights, recordsByDay(nights, []), 'latency');
+		const readFactor = factors.find((f) => f.note === 'Read');
+		expect(readFactor?.difference).toBeLessThan(0);
+		expect(readFactor?.improvement).toBeGreaterThan(0);
+	});
+
 	it('leaves training uncompared with fewer than ten nights on either side', () => {
 		const nights = [night('2026-10-01', 80), night('2026-10-02', 70)];
 		const [trainingFactor] = sleepFactors(nights, recordsByDay(nights, []));
@@ -209,15 +256,83 @@ describe('sleepFactors', () => {
 	});
 });
 
+describe('summarizeCircadian, sleepReadiness and workoutTimingImpact', () => {
+	it('computes weekend social jetlag in minutes', () => {
+		// 2026-10-05 Mon .. 2026-10-09 Fri (weekend night), 2026-10-10 Sat (weekend night)
+		const nights = [
+			night('2026-10-05', 80, 7, [], {
+				wentToBed: Date.parse('2026-10-05T23:00:00Z'),
+				wokeUp: Date.parse('2026-10-06T07:00:00Z')
+			}),
+			night('2026-10-06', 80, 7, [], {
+				wentToBed: Date.parse('2026-10-06T23:00:00Z'),
+				wokeUp: Date.parse('2026-10-07T07:00:00Z')
+			}),
+			night('2026-10-09', 80, 7, [], {
+				wentToBed: Date.parse('2026-10-10T01:00:00Z'),
+				wokeUp: Date.parse('2026-10-10T09:00:00Z')
+			}),
+			night('2026-10-10', 80, 7, [], {
+				wentToBed: Date.parse('2026-10-11T01:00:00Z'),
+				wokeUp: Date.parse('2026-10-11T09:00:00Z')
+			})
+		];
+		const circ = summarizeCircadian(nights, 'UTC');
+		expect(circ.socialJetlagMin).toBe(120);
+		expect(circ.meanBedtime).toBe('00:00');
+		expect(circ.meanWakeTime).toBe('08:00');
+	});
+
+	it('pairs training volume with the preceding night for readiness and evening gap for timing', () => {
+		const nights = [
+			night('2026-10-01', 85, 7.5),
+			night('2026-10-02', 55, 5.5, [], {
+				wentToBed: Date.parse('2026-10-02T23:00:00Z'),
+				asleepAfterSeconds: 1800
+			}),
+			night('2026-10-03', 88, 7.5, [], {
+				wentToBed: Date.parse('2026-10-03T23:00:00Z'),
+				asleepAfterSeconds: 600
+			}),
+			night('2026-10-04', 60, 5.5, [], {
+				wentToBed: Date.parse('2026-10-04T23:00:00Z'),
+				asleepAfterSeconds: 1500
+			})
+		];
+		const days = [
+			training('2026-10-02', 6000, 1, { latestEndTime: Date.parse('2026-10-02T21:30:00Z') }),
+			training('2026-10-03', 4000, 1, { latestEndTime: Date.parse('2026-10-03T15:00:00Z') }),
+			training('2026-10-04', 6200, 1, { latestEndTime: Date.parse('2026-10-04T21:00:00Z') }),
+			training('2026-10-05', 3800, 1)
+		];
+		const records = recordsByDay(nights, days);
+		const readiness = sleepReadiness(records);
+		expect(readiness?.restedDays).toBe(2);
+		expect(readiness?.tiredDays).toBe(2);
+		expect(readiness?.restedMeanVolume).toBe(6100);
+		expect(readiness?.tiredMeanVolume).toBe(3900);
+
+		const timing = workoutTimingImpact(records);
+		expect(timing.find((b) => b.band === 'early')?.nights).toBe(1);
+		expect(timing.find((b) => b.band === 'late')?.nights).toBe(2);
+	});
+});
+
 describe('workoutNights', () => {
-	it('matches each workout with the night that began on its local day', () => {
-		const records = recordsByDay([night('2026-10-27', 88)], []);
+	it('matches each workout with the night before it and the night that began on its local day', () => {
+		const records = recordsByDay([night('2026-10-26', 72), night('2026-10-27', 88)], []);
 		const workout = (startTime: number) =>
 			({ id: String(startTime), startTime }) as unknown as WorkoutSummary;
 		// 23:30 UTC on Oct 26 is already Oct 27 in Madrid, but still Oct 26 in New York.
 		const late = workout(Date.parse('2026-10-26T23:30:00Z'));
-		expect(workoutNights([late], records, 'Europe/Madrid')[0].quality).toBe(88);
-		expect(workoutNights([late], records, 'America/New_York')[0].quality).toBeNull();
+		expect(workoutNights([late], records, 'Europe/Madrid')[0]).toMatchObject({
+			priorQuality: 72,
+			quality: 88
+		});
+		expect(workoutNights([late], records, 'America/New_York')[0]).toMatchObject({
+			priorQuality: null,
+			quality: 72
+		});
 	});
 });
 

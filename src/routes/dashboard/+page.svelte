@@ -6,9 +6,12 @@
 	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import CircadianSleepChart from '#lib/components/dashboard/CircadianSleepChart.svelte';
 	import KpiStrip from '#lib/components/dashboard/KpiStrip.svelte';
 	import SleepFactors from '#lib/components/dashboard/SleepFactors.svelte';
+	import SleepSourcesChart from '#lib/components/dashboard/SleepSourcesChart.svelte';
 	import SleepTrainingChart from '#lib/components/dashboard/SleepTrainingChart.svelte';
+	import TrainingReadiness from '#lib/components/dashboard/TrainingReadiness.svelte';
 	import WorkoutNights from '#lib/components/dashboard/WorkoutNights.svelte';
 	import WorkoutSheet from '#lib/components/dashboard/WorkoutSheet.svelte';
 	import { dayToDate } from '#lib/days.js';
@@ -21,10 +24,16 @@
 		mainNights,
 		recordsByDay,
 		sleepFactors,
+		sleepReadiness,
+		summarizeCircadian,
 		summarizePeriod,
+		summarizeVitals,
 		workoutNights,
-		type Period
+		workoutTimingImpact,
+		type Period,
+		type SleepFactorTarget
 	} from '#lib/overview.js';
+	import { compareSleepSources } from '#lib/sleep-sources.js';
 	import { browserTimeZone, rememberTimeZone } from '#lib/time-zone.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
@@ -38,7 +47,9 @@
 	const hasError = $derived(dashboardQuery.error !== undefined);
 	const isLoading = $derived(!hasError && !dashboardQuery.ready);
 	const hasData = $derived(
-		(dashboard?.nights.length ?? 0) > 0 || (dashboard?.trainingDays.length ?? 0) > 0
+		(dashboard?.nights.length ?? 0) > 0 ||
+			(dashboard?.googleSleepNights.length ?? 0) > 0 ||
+			(dashboard?.trainingDays.length ?? 0) > 0
 	);
 
 	// The server dates days in the time zone from a cookie. On the first visit (or after
@@ -55,12 +66,42 @@
 	});
 
 	let period = $state<Period>(30);
+	let factorTarget = $state<SleepFactorTarget>('quality');
 
 	const records = $derived(recordsByDay(dashboard?.nights ?? [], dashboard?.trainingDays ?? []));
 	const summary = $derived(dashboard && summarizePeriod(records, dashboard.today, period));
 	const granularity = $derived(summary ? chartGranularity(summary.from, summary.to) : 'day');
 	const points = $derived(
 		summary ? chartPoints(records, summary.from, summary.to, granularity) : []
+	);
+
+	const sleepComparison = $derived(
+		dashboard && summary
+			? compareSleepSources(
+					dashboard.nights,
+					dashboard.googleSleepNights,
+					dashboard.timeZone,
+					summary.from,
+					summary.to
+				)
+			: null
+	);
+	const showSleepSources = $derived(
+		(dashboard?.googleSleepNights.length ?? 0) > 0 &&
+			(dashboard?.nights.length ?? 0) > 0 &&
+			sleepComparison !== null
+	);
+
+	const circadian = $derived(
+		dashboard && summary && summary.nights.length >= 2
+			? summarizeCircadian(summary.nights, dashboard.timeZone)
+			: null
+	);
+
+	const readiness = $derived(sleepReadiness(records));
+	const timingBuckets = $derived(workoutTimingImpact(records));
+	const vitals = $derived(
+		dashboard && summary ? summarizeVitals(dashboard.vitalsDays, summary.from, summary.to) : null
 	);
 
 	const comparedWith = $derived(period === 'all' ? '' : m.vs_previous_days({ days: period }));
@@ -81,7 +122,7 @@
 	const allNights = $derived(mainNights(dashboard?.nights ?? []));
 	const factorsFromPeriod = $derived((summary?.nights.length ?? 0) >= MIN_FACTOR_NIGHTS);
 	const factors = $derived(
-		sleepFactors(factorsFromPeriod && summary ? summary.nights : allNights, records)
+		sleepFactors(factorsFromPeriod && summary ? summary.nights : allNights, records, factorTarget)
 	);
 	const factorsDescription = $derived(
 		factorsFromPeriod
@@ -227,15 +268,32 @@
 				</ul>
 				<KpiStrip side="night" {summary} {points} {comparedWith} />
 			</div>
+
+			{#if showSleepSources && sleepComparison !== null}
+				<SleepSourcesChart comparison={sleepComparison} embedded />
+			{/if}
+
+			{#if circadian !== null}
+				<CircadianSleepChart {circadian} />
+			{/if}
 		</div>
 	</section>
+
+	<div class="mt-16">
+		<TrainingReadiness {readiness} timing={timingBuckets} {vitals} />
+	</div>
 
 	<div class="mt-16 grid items-start gap-x-14 gap-y-14 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
 		{#if workoutRows.length > 0}
 			<WorkoutNights rows={workoutRows} onselect={showWorkout} />
 		{/if}
 		{#if allNights.length > 0}
-			<SleepFactors {factors} description={factorsDescription} />
+			<SleepFactors
+				{factors}
+				description={factorsDescription}
+				target={factorTarget}
+				ontargetchange={(next) => (factorTarget = next)}
+			/>
 		{/if}
 	</div>
 {/if}

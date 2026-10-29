@@ -4,11 +4,25 @@
 	import * as Chart from '#lib/components/ui/chart/index.js';
 	import { CHART_COLORS, timeAxis, tooltipDate } from '#lib/charts.js';
 
-	let { data }: { data: { date: Date; weight: number }[] } = $props();
+	let {
+		data,
+		unit = 'kg'
+	}: {
+		data: { date: Date; weight?: number; value?: number; pr?: boolean }[];
+		unit?: string;
+	} = $props();
 
-	const config = {
-		weight: { label: 'kg', color: CHART_COLORS.weight }
-	} satisfies Chart.ChartConfig;
+	const normalized = $derived(
+		data.map((point) => ({
+			date: point.date,
+			value: point.value ?? point.weight ?? 0,
+			pr: point.pr ?? false
+		}))
+	);
+
+	const config = $derived({
+		value: { label: unit, color: CHART_COLORS.weight }
+	} satisfies Chart.ChartConfig);
 </script>
 
 <Chart.Container
@@ -20,22 +34,22 @@
 	     marks each session, including ones far apart from the rest; a ring of the day ground keeps
 	     neighbours apart. -->
 	<LineChart
-		{data}
+		data={normalized}
 		x="date"
 		yBaseline={undefined}
 		yNice={3}
 		padding={{ left: 44, right: 8, top: 8, bottom: 28 }}
-		points={{ r: 3, stroke: 'var(--color-day)', strokeWidth: 1.5 }}
+		points={{ r: 3.5, stroke: 'var(--color-day)', strokeWidth: 1.5 }}
 		series={[
 			{
-				key: 'weight',
-				label: 'kg',
-				color: 'var(--color-weight)',
+				key: 'value',
+				label: unit,
+				color: 'var(--color-value)',
 				props: { curve: curveMonotoneX, class: 'stroke-2' }
 			}
 		]}
 		props={{
-			xAxis: { tickLength: 8, ...timeAxis(data) },
+			xAxis: { tickLength: 8, ...timeAxis(normalized) },
 			yAxis: { ticks: 3, tickLength: 8 },
 			grid: { yTicks: 3 }
 		}}

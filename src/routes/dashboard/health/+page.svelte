@@ -1,16 +1,21 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { getCategories, getMetrics, getOverview } from '#lib/remote/health.remote.js';
+	import { getDashboard } from '#lib/remote/imports.remote.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import SleepSourcesChart from '#lib/components/dashboard/SleepSourcesChart.svelte';
+	import HealthCompareSection from '#lib/components/google-health/HealthCompareSection.svelte';
 	import HealthMetricCard from '#lib/components/google-health/HealthMetricCard.svelte';
 	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
 	import HealthTrendChart from '#lib/components/google-health/HealthTrendChart.svelte';
+	import { dayFromNumber, dayNumber } from '#lib/days.js';
 	import { formatDateLong } from '#lib/format.js';
 	import { categoryLabel, metricLabel } from '#lib/google-health/labels.js';
 	import { summaryNumber } from '#lib/google-health/view.js';
 	import * as m from '#lib/paraglide/messages.js';
+	import { compareSleepSources } from '#lib/sleep-sources.js';
 	import { cn } from '#lib/utils.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
@@ -19,9 +24,25 @@
 	const overviewQuery = getOverview(OVERVIEW_DAYS);
 	const categoriesQuery = getCategories();
 	const activityQuery = getMetrics('activity');
+	const dashboardQuery = getDashboard();
 
 	const overview = $derived(overviewQuery.current);
 	const categories = $derived(categoriesQuery.current ?? []);
+	const dashboard = $derived(dashboardQuery.current);
+
+	const sleepComparison = $derived.by(() => {
+		if (!dashboard || dashboard.nights.length === 0 || dashboard.googleSleepNights.length === 0) {
+			return null;
+		}
+		const from = dayFromNumber(dayNumber(dashboard.today) - OVERVIEW_DAYS + 1);
+		return compareSleepSources(
+			dashboard.nights,
+			dashboard.googleSleepNights,
+			dashboard.timeZone,
+			from,
+			dashboard.today
+		);
+	});
 	const recentActivity = $derived(
 		[...(activityQuery.current ?? [])]
 			.sort(
@@ -236,4 +257,12 @@
 			{/if}
 		</section>
 	</div>
+
+	{#if sleepComparison !== null}
+		<div class="mt-16">
+			<SleepSourcesChart comparison={sleepComparison} />
+		</div>
+	{/if}
+
+	<HealthCompareSection metrics={overview.metrics} />
 {/if}

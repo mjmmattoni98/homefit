@@ -1,0 +1,4 @@
+[run]
+# Package scripts run on Bun even when a tool's shebang names Node.
+# adapter-bun calls Bun's APIs during `vite build`, so the build cannot run on Node.
+bun = true

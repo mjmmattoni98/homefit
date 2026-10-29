@@ -1,6 +1,6 @@
 # HomeFit
 
-A self-hosted dashboard for your sleep, training and health data. Import your Sleep Cycle and Hevy exports, optionally connect Google Health, and see how rest and workouts affect each other. Everything runs on your own server: one Node.js app and one PostgreSQL database.
+A self-hosted dashboard for your sleep, training and health data. Import your Sleep Cycle and Hevy exports, optionally connect Google Health, and see how rest and workouts affect each other. Everything runs on your own server: one Bun app and one PostgreSQL database.
 
 - **Sleep** — quality, time in bed, regularity and notes from Sleep Cycle CSV exports.
 - **Training** — volume, sets and per-exercise progression from Hevy CSV exports.
@@ -10,7 +10,7 @@ A self-hosted dashboard for your sleep, training and health data. Import your Sl
 
 ## Stack
 
-[SvelteKit 3](https://svelte.dev/docs/kit) with remote functions · [PostgreSQL 18](https://www.postgresql.org/) · [Drizzle ORM](https://orm.drizzle.team/) · [Better Auth](https://www.better-auth.com/) (email and password) · [pg-boss](https://github.com/timgit/pg-boss) for background jobs · [shadcn-svelte](https://shadcn-svelte.com/) and Tailwind CSS · [Paraglide](https://inlang.com/m/gerre34r/library-inlang-paraglideJs) for translations.
+[SvelteKit 3](https://svelte.dev/docs/kit) with remote functions · [Bun](https://bun.com/) · [PostgreSQL 18](https://www.postgresql.org/) · [Drizzle ORM](https://orm.drizzle.team/) · [Better Auth](https://www.better-auth.com/) (email and password) · [pg-boss](https://github.com/timgit/pg-boss) for background jobs · [shadcn-svelte](https://shadcn-svelte.com/) and Tailwind CSS · [Paraglide](https://inlang.com/m/gerre34r/library-inlang-paraglideJs) for translations.
 
 ## Run it with Docker
 
@@ -54,7 +54,7 @@ Leave the `GOOGLE_HEALTH_*` variables empty and the integration is disabled enti
 
 ## Local development
 
-Requirements: [Bun](https://bun.sh) 1.4+ and Node.js 22.17+ (24 LTS recommended), plus Docker for the database.
+Requirements: [Bun](https://bun.com/) 1.4 or newer, plus Docker for the database.
 
 ```sh
 bun install
@@ -68,7 +68,7 @@ The app builds its PostgreSQL connection string from `POSTGRES_USER`, `POSTGRES_
 | Command                           | Purpose                                                         |
 | --------------------------------- | --------------------------------------------------------------- |
 | `bun run dev`                     | Development server with hot reload                              |
-| `bun run build && bun start`      | Production build served by `server.js`                          |
+| `bun run build && bun start`      | Production build, then the Bun server (`server.js`)             |
 | `bun run check`                   | Type-check Svelte and TypeScript                                |
 | `bun run lint` / `bun run format` | Prettier and ESLint                                             |
 | `bun run test:unit`               | Unit, PGlite integration and browser component tests            |
@@ -76,7 +76,7 @@ The app builds its PostgreSQL connection string from `POSTGRES_USER`, `POSTGRES_
 | `bun run db:studio`               | Browse the database with Drizzle Studio                         |
 | `bun run auth:schema`             | Regenerate the Better Auth tables after changing auth options   |
 
-Server tests run against an in-process PostgreSQL ([PGlite](https://pglite.dev/)), so no database is needed to run them. Component tests run in Chromium through Playwright (`bunx playwright install chromium` once).
+Server tests run against an in-process PostgreSQL ([PGlite](https://pglite.dev/)), so no database is needed to run them. Component tests run in Chromium through Playwright (`bunx --bun playwright install chromium` once).
 
 ### Project layout
 
@@ -90,7 +90,7 @@ src/
   lib/server/jobs.ts        pg-boss queues and schedules
   routes/                   Pages, auth forms and API endpoints
 drizzle/                    SQL migrations (committed)
-server.js                   Production entry point
+server.js                   Production entry point (Bun)
 ```
 
 ## License

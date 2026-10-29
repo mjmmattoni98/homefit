@@ -1,57 +1,36 @@
-// Production entry point (`node server.js`).
+// Production entry point (`bun server.js`).
 //
-// Wraps the adapter-node request handler so the public origin can be set at runtime through
-// the ORIGIN environment variable. adapter-node 6 only accepts an origin at build time and
-// otherwise assumes HTTPS, which breaks CSRF checks for plain-HTTP and pre-built deployments.
-import http from 'node:http';
-import process from 'node:process';
-
-const PROTOCOL_HEADER = 'x-homefit-origin-protocol';
-const HOST_HEADER = 'x-homefit-origin-host';
+// adapter-bun can only bake the public origin in at build time, and otherwise
+// treats every request as HTTPS. ORIGIN is chosen when the process starts so the
+// same image works for plain HTTP and for any host. Stamp it onto each request
+// before the generated server reads PROTOCOL_HEADER and HOST_HEADER.
 
 const origin = process.env.ORIGIN ? new URL(process.env.ORIGIN) : null;
+
 if (origin !== null) {
-	process.env.PROTOCOL_HEADER = PROTOCOL_HEADER;
-	process.env.HOST_HEADER = HOST_HEADER;
+	const protocolHeader = 'x-homefit-origin-protocol';
+	const hostHeader = 'x-homefit-origin-host';
+	process.env.PROTOCOL_HEADER = protocolHeader;
+	process.env.HOST_HEADER = hostHeader;
+
+	const protocol = origin.protocol.slice(0, -1);
+	const host = origin.host;
+	const serve = Bun.serve.bind(Bun);
+
+	Bun.serve = (options) => {
+		const fetch = options.fetch;
+		if (typeof fetch === 'function') {
+			options.fetch = (request, server) => {
+				const headers = new Headers(request.headers);
+				headers.set(protocolHeader, protocol);
+				headers.set(hostHeader, host);
+				return fetch(new Request(request, { headers }), server);
+			};
+		}
+		return serve(options);
+	};
+
+	console.info(`HomeFit public origin ${origin.origin}`);
 }
 
-const { handler } = await import('./build/handler.js');
-
-const port = Number(process.env.PORT ?? 3000);
-const host = process.env.HOST ?? '0.0.0.0';
-const shutdownTimeoutMs = Number(process.env.SHUTDOWN_TIMEOUT ?? 30) * 1000;
-
-const server = http.createServer((request, response) => {
-	if (origin !== null) {
-		request.headers[PROTOCOL_HEADER] = origin.protocol.slice(0, -1);
-		request.headers[HOST_HEADER] = origin.host;
-	}
-	handler(request, response, () => {
-		response.statusCode = 404;
-		response.end('Not found');
-	});
-});
-
-server.listen(port, host, () => {
-	console.info(
-		`HomeFit listening on http://${host}:${port}${origin ? ` (public origin ${origin.origin})` : ''}`
-	);
-});
-
-let shuttingDown = false;
-
-function shutdown(reason) {
-	if (shuttingDown) return;
-	shuttingDown = true;
-	const forceClose = setTimeout(() => server.closeAllConnections(), shutdownTimeoutMs);
-	server.close(() => {
-		clearTimeout(forceClose);
-		// Lets the app stop background jobs and close database pools (see src/hooks.server.ts).
-		process.emit('sveltekit:shutdown', reason);
-		setTimeout(() => process.exit(0), shutdownTimeoutMs).unref();
-	});
-	server.closeIdleConnections();
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+await import('./build/index.js');

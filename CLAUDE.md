@@ -24,7 +24,7 @@ After completing the code, ask the user if they want a playground link. Only cal
 
 ## Project conventions
 
-HomeFit is a self-hosted SvelteKit 3 app backed by PostgreSQL.
+HomeFit is a self-hosted SvelteKit 3 app backed by PostgreSQL. Production runs on Bun via `@sveltejs/adapter-bun`; `bun run build` must run on Bun.
 
 - Data access uses Drizzle ORM. The schema lives in `src/lib/server/db/schema.ts`; after changing it, run `bun run db:generate` and commit the new migration in `drizzle/`. Migrations are applied automatically at startup.
 - Authentication uses Better Auth (`src/lib/server/auth.ts`). Its tables in `src/lib/server/db/auth.schema.ts` are generated with `bun run auth:schema`.

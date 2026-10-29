@@ -101,7 +101,7 @@ describe('Google Health API client', () => {
 	});
 
 	it('keeps page tokens separate from filter syntax and rejects injected time literals', async () => {
-		const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ dataPoints: [] }));
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ dataPoints: [] }));
 		vi.stubGlobal('fetch', fetchMock);
 		const pageToken = 'opaque&filter=steps.count>0';
 
@@ -144,7 +144,7 @@ describe('Google Health API client', () => {
 	});
 
 	it('emits ECG as a registry-owned one-sided physical lower bound and rejects field injection', async () => {
-		const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ dataPoints: [] }));
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ dataPoints: [] }));
 		vi.stubGlobal('fetch', fetchMock);
 		await fetchGoogleHealthDataPage({
 			accessToken: 'access-token',
@@ -223,7 +223,7 @@ describe('Google Health API client', () => {
 	});
 
 	it('exchanges an authorization code with the exact form contract and validates granted scopes', async () => {
-		const fetchMock = vi.fn<typeof fetch>(async () =>
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
 			jsonResponse({
 				access_token: 'access-token',
 				refresh_token: 'refresh-token',
@@ -266,7 +266,7 @@ describe('Google Health API client', () => {
 	});
 
 	it('refreshes with stored scope fallback and preserves a rotated refresh-token contract', async () => {
-		const fetchMock = vi.fn<typeof fetch>(async () =>
+		const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
 			jsonResponse({
 				access_token: 'new-access-token',
 				expires_in: 3600,

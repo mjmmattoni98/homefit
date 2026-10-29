@@ -6,13 +6,13 @@
 	"license": "MIT",
 	"type": "module",
 	"engines": {
-		"node": ">=22.17"
+		"bun": ">=1.4.0"
 	},
 	"scripts": {
-		"dev": "vite dev",
-		"build": "vite build",
-		"preview": "vite preview",
-		"start": "node server.js",
+		"dev": "bun --bun vite dev",
+		"build": "bun --bun vite build",
+		"preview": "bun --bun vite preview",
+		"start": "bun server.js",
 		"prepare": "svelte-kit sync || echo ''",
 		"i18n": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide",
 		"check": "bun run i18n && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -44,7 +44,7 @@
 		"@internationalized/date": "^3.12.4",
 		"@lucide/svelte": "^1.60.0",
 		"@playwright/test": "^1.64.1",
-		"@sveltejs/adapter-node": "^6.0.0",
+		"@sveltejs/adapter-bun": "^1.0.0",
 		"@sveltejs/kit": "^3.1.0",
 		"@sveltejs/vite-plugin-svelte": "^7.3.1",
 		"@tailwindcss/forms": "^0.5.11",

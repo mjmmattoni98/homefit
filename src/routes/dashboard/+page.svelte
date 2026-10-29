@@ -11,7 +11,6 @@
 	import SleepTrainingChart from '#lib/components/dashboard/SleepTrainingChart.svelte';
 	import WorkoutNights from '#lib/components/dashboard/WorkoutNights.svelte';
 	import WorkoutSheet from '#lib/components/dashboard/WorkoutSheet.svelte';
-	import { CHART_COLORS } from '#lib/charts.js';
 	import { dayToDate } from '#lib/days.js';
 	import { formatDate } from '#lib/format.js';
 	import {
@@ -126,49 +125,51 @@
 </script>
 
 <svelte:head>
-	<title>{m.dashboard_title()} · {m.app_name()}</title>
+	<title>{m.dashboard_title()}: {m.app_name()}</title>
 </svelte:head>
 
-<!-- One period drives every figure below, so it stays in view while scrolling. -->
-<div
-	class="sticky top-12 z-20 -mx-4 -mt-4 mb-4 flex flex-col gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur sm:flex-row sm:items-center sm:justify-between md:-mx-6 md:px-6"
->
-	<div class="min-w-0">
-		<h1 class="text-lg font-semibold tracking-tight">{m.dashboard_title()}</h1>
-		<p class="truncate text-xs text-muted-foreground tabular-nums">{caption}</p>
-	</div>
-	<ToggleGroup.Root
-		type="single"
-		value={String(period)}
-		variant="outline"
-		size="sm"
-		aria-label={m.period_label()}
-		class="w-full sm:w-auto"
+<div class="pt-7">
+	<h1 class="text-4xl">{m.dashboard_title()}</h1>
+</div>
+
+<!-- One period drives every figure below, so its tabs and dates stay in view while scrolling. -->
+<div class="sticky top-(--bar-height) z-20 bleed bg-day">
+	<div
+		class="flex flex-col-reverse gap-x-6 gap-y-1 border-b border-rule pt-2 sm:flex-row sm:items-end sm:justify-between"
 	>
-		{#each PERIODS as option (option)}
-			<ToggleGroup.Item
-				value={String(option)}
-				aria-label={periodName(option)}
-				class="flex-1 px-3 tabular-nums sm:flex-none"
-				onclick={() => (period = option)}
-			>
-				{periodLabel(option)}
-			</ToggleGroup.Item>
-		{/each}
-	</ToggleGroup.Root>
+		<p class="min-w-0 truncate pb-2 text-sm text-ink-3 sm:pb-2.5">{caption}</p>
+		<ToggleGroup.Root
+			type="single"
+			value={String(period)}
+			variant="outline"
+			aria-label={m.period_label()}
+			class="w-full data-[variant=outline]:shadow-none sm:w-auto"
+		>
+			{#each PERIODS as option (option)}
+				<ToggleGroup.Item
+					value={String(option)}
+					aria-label={periodName(option)}
+					class="h-10 flex-1 px-3 text-[0.9375rem] sm:flex-none"
+					onclick={() => (period = option)}
+				>
+					{periodLabel(option)}
+				</ToggleGroup.Item>
+			{/each}
+		</ToggleGroup.Root>
+	</div>
 </div>
 
 {#if isLoading}
-	<div class="flex flex-col gap-4">
-		<Skeleton class="h-36 w-full" />
-		<Skeleton class="h-80 w-full" />
-		<div class="grid gap-4 lg:grid-cols-2">
-			<Skeleton class="h-72 w-full" />
-			<Skeleton class="h-72 w-full" />
+	<!-- The horizon's shape while the records load: the day above, the night below. -->
+	<div class="bleed" aria-busy="true">
+		<div class="flex gap-14 pt-10 pb-8">
+			<Skeleton class="h-20 w-40" />
+			<Skeleton class="h-20 w-56" />
 		</div>
+		<div class="bleed h-80 bg-night"></div>
 	</div>
 {:else if hasError}
-	<Empty.Root class="border">
+	<Empty.Root class="mt-10 border border-rule">
 		<Empty.Header>
 			<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
 			<Empty.Title>{m.data_error_title()}</Empty.Title>
@@ -176,7 +177,7 @@
 		</Empty.Header>
 	</Empty.Root>
 {:else if !hasData || summary === undefined}
-	<Empty.Root class="border">
+	<Empty.Root class="mt-10 border border-rule">
 		<Empty.Header>
 			<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
 			<Empty.Title>{m.empty_title()}</Empty.Title>
@@ -187,56 +188,55 @@
 		</Empty.Content>
 	</Empty.Root>
 {:else}
-	<div class="flex flex-col gap-4">
-		<KpiStrip {summary} {points} {comparedWith} />
-
-		<section class="rounded-lg border bg-card p-4" aria-labelledby="sleep-training-title">
-			<div class="mb-3 flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
-				<div>
-					<h2 id="sleep-training-title" class="font-semibold tracking-tight">
-						{m.chart_title()}
-					</h2>
-					<p class="text-xs text-muted-foreground">{m.chart_hint()}</p>
-				</div>
-				<ul class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-					<li class="flex items-center gap-1.5">
-						<span class="size-2 rounded-full opacity-50" style:background={CHART_COLORS.quality}
-						></span>
+	<!-- The horizon: the period's training above the line, its nights below it. -->
+	<section class="bleed" aria-labelledby="sleep-training-title">
+		<div class="flex flex-col gap-8 pt-9 pb-7 lg:flex-row lg:items-end lg:justify-between">
+			<div class="min-w-0 lg:max-w-[22rem]">
+				<h2 id="sleep-training-title" class="text-2xl">{m.chart_title()}</h2>
+				<p class="mt-2 text-sm text-ink-3">{m.chart_hint()}</p>
+			</div>
+			<KpiStrip side="day" {summary} {points} {comparedWith} />
+		</div>
+		<p class="flex items-center gap-2 pb-3 text-sm text-ink-2">
+			<span class="size-2.5 bg-sun" aria-hidden="true"></span>
+			{m.chart_volume()}
+		</p>
+		{#if points.some((point) => point.quality !== null || point.volume > 0)}
+			<SleepTrainingChart {points} {granularity} average={summary.quality} />
+		{:else}
+			<div class="bleed">
+				<div class="flex h-40 items-end pb-3 text-sm text-ink-3">{m.no_data_in_range()}</div>
+				<div class="bleed h-44 bg-night"></div>
+			</div>
+		{/if}
+		<div class="bleed bg-night text-moon">
+			<div class="flex flex-col gap-8 pt-4 pb-12">
+				<ul class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-moon-2">
+					<li class="flex items-center gap-2">
+						<span class="size-2.5 bg-sleep" aria-hidden="true"></span>
 						{qualityLegend}
 					</li>
-					<li class="flex items-center gap-1.5">
-						<span class="h-0.5 w-4 rounded" style:background={CHART_COLORS.quality}></span>
+					<li class="flex items-center gap-2">
+						<span class="h-[3px] w-4 bg-moon" aria-hidden="true"></span>
 						{trendLegend}
 					</li>
-					<li class="flex items-center gap-1.5">
-						<span class="w-4 border-t border-dashed border-foreground/60"></span>
+					<li class="flex items-center gap-2">
+						<span class="h-px w-4 bg-moon" aria-hidden="true"></span>
 						{m.chart_period_average()}
 					</li>
-					<li class="flex items-center gap-1.5">
-						<span class="size-2 rounded-sm" style:background={CHART_COLORS.volume}></span>
-						{m.chart_volume()}
-					</li>
 				</ul>
+				<KpiStrip side="night" {summary} {points} {comparedWith} />
 			</div>
-			{#if points.some((point) => point.quality !== null || point.volume > 0)}
-				<SleepTrainingChart {points} {granularity} average={summary.quality} />
-			{:else}
-				<div
-					class="flex h-[300px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground"
-				>
-					{m.no_data_in_range()}
-				</div>
-			{/if}
-		</section>
-
-		<div class="grid gap-4 lg:grid-cols-2">
-			{#if allNights.length > 0}
-				<SleepFactors {factors} description={factorsDescription} />
-			{/if}
-			{#if workoutRows.length > 0}
-				<WorkoutNights rows={workoutRows} onselect={showWorkout} />
-			{/if}
 		</div>
+	</section>
+
+	<div class="mt-16 grid items-start gap-x-14 gap-y-14 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
+		{#if workoutRows.length > 0}
+			<WorkoutNights rows={workoutRows} onselect={showWorkout} />
+		{/if}
+		{#if allNights.length > 0}
+			<SleepFactors {factors} description={factorsDescription} />
+		{/if}
 	</div>
 {/if}
 

@@ -1,0 +1,57 @@
+[
+ {
+  "mode": "redesign",
+  "depth": "full",
+  "scope": "app",
+  "shape": "app screen",
+  "theme": "custom",
+  "axes": "light/display-condensed/warm",
+  "hero": "Horizon (/dashboard), Split (/)",
+  "nav": "top bar: wordmark and four text links, current one underlined in sun",
+  "footer": "none",
+  "imagery": "none, type and the product charts",
+  "photos": [],
+  "entry": "none",
+  "fingerprint": "app/custom-day-night/topbar/horizon+ledgers+night-panels",
+  "sections": [
+   "period row",
+   "horizon band (day figures, mirrored chart, night figures)",
+   "workouts and the night after ledger",
+   "sleep factors night panel"
+  ],
+  "signature": "the horizon: each day volume rising above the line and that night sleep hanging below it",
+  "waived": [
+   "39b",
+   "23"
+  ],
+  "prompt": "self-hosted dashboard for your own sleep quality, training volume and health metrics",
+  "date": "2026-10-29"
+ },
+ {
+  "mode": "redesign",
+  "depth": "full",
+  "scope": "app",
+  "shape": "app screen",
+  "theme": "coral",
+  "axes": "light/grotesk-sans/warm",
+  "hero": "Settled (/)",
+  "nav": "kept: icon rail and breadcrumb bar",
+  "footer": "none",
+  "imagery": "none, type and the product charts",
+  "photos": [],
+  "entry": "none",
+  "fingerprint": "app/coral/rail/sheets+ruled-tables",
+  "sections": [
+   "period bar",
+   "kpi sheet",
+   "sleep and training chart",
+   "ruled factor and workout tables"
+  ],
+  "signature": "sleep quality as the one coral series over grey training volume",
+  "waived": [
+   "39b"
+  ],
+  "prompt": "self-hosted dashboard for your own sleep quality, training volume and health metrics",
+  "date": "2026-10-28"
+ }
+]

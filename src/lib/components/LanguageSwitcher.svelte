@@ -8,7 +8,7 @@
 </script>
 
 <div
-	class="flex items-center gap-0.5 rounded-md border border-border p-0.5 text-xs font-medium"
+	class="flex items-center gap-1 text-sm shadow-[inset_0_-1px_0_var(--color-rule)]"
 	role="group"
 	aria-label={m.language_label()}
 >
@@ -20,10 +20,10 @@
 			title={names[locale]}
 			lang={locale}
 			class={cn(
-				'rounded-sm px-2 py-1 transition-colors',
+				'h-8 px-2.5 whitespace-nowrap transition-colors duration-(--dur-micro)',
 				getLocale() === locale
-					? 'bg-primary text-primary-foreground'
-					: 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+					? 'text-foreground shadow-[inset_0_-2px_0_var(--color-sun)]'
+					: 'text-ink-3 hover:text-foreground'
 			)}
 		>
 			{labels[locale] ?? locale.toUpperCase()}

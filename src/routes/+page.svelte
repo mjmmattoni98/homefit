@@ -2,73 +2,101 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { buttonVariants } from '#lib/components/ui/button/index.js';
-	import * as Card from '#lib/components/ui/card/index.js';
 	import * as m from '#lib/paraglide/messages.js';
 	import SiteHeader from '#lib/components/SiteHeader.svelte';
-	import MoonIcon from '@lucide/svelte/icons/moon';
-	import DumbbellIcon from '@lucide/svelte/icons/dumbbell';
-	import ChartLineIcon from '@lucide/svelte/icons/chart-line';
+
+	// The title breaks after its comma ("Your sleep and training, / in one dashboard"), in every
+	// language that has one, so no line ends on a stub.
+	const titleLines = $derived(m.landing_title().split(/(?<=,)\s+/));
+
+	const training = $derived({
+		title: m.landing_feature_training_title(),
+		description: m.landing_feature_training_desc()
+	});
+	const sleep = $derived({
+		title: m.landing_feature_sleep_title(),
+		description: m.landing_feature_sleep_desc()
+	});
+	const correlations = $derived({
+		title: m.landing_feature_correlations_title(),
+		description: m.landing_feature_correlations_desc()
+	});
 </script>
 
+{#snippet feature(item: { title: string; description: string }, night: boolean)}
+	<div>
+		<h2 class="text-2xl md:text-3xl">{item.title}</h2>
+		<p class={night ? 'mt-3 max-w-[38ch] text-moon-2' : 'mt-3 max-w-[38ch] text-ink-2'}>
+			{item.description}
+		</p>
+	</div>
+{/snippet}
+
 <svelte:head>
-	<title>{m.app_name()} · {m.landing_title()}</title>
+	<title>{m.app_name()}: {m.landing_title()}</title>
 	<meta name="description" content={m.landing_subtitle()} />
 </svelte:head>
 
 <SiteHeader />
 
-<main class="mx-auto max-w-5xl px-4">
-	<section class="flex flex-col items-center gap-6 py-20 text-center">
-		<h1 class="max-w-2xl text-4xl font-bold tracking-tight sm:text-5xl">
-			{m.landing_title()}
-		</h1>
-		<p class="max-w-xl text-lg text-muted-foreground">
-			{m.landing_subtitle()}
-		</p>
-		<!-- Signed-in visitors are sent to the dashboard by the page's server load. -->
-		<div class="flex flex-wrap justify-center gap-2">
-			<a href={resolve('sign-in')} class={buttonVariants({ size: 'lg' })}>{m.landing_signin()}</a>
-			{#if page.data.signupEnabled}
-				<a href={resolve('sign-up')} class={buttonVariants({ size: 'lg', variant: 'outline' })}>
-					{m.sign_up()}
-				</a>
-			{/if}
+<main>
+	<!-- The page is one day: the claim and what HomeFit reads from your training on the day
+	     ground, then down past the horizon into the night, where the way in, your sleep and how
+	     the two meet are set in moonlight. -->
+	<section aria-labelledby="landing-title">
+		<div
+			class="mx-auto grid w-full max-w-(--container) gap-10 px-4 pt-16 pb-10 md:min-h-[min(30rem,calc(100svh-24rem))] md:px-8 md:pt-20 md:pb-12 lg:grid-cols-[minmax(0,8fr)_minmax(0,4fr)] lg:items-end lg:gap-16"
+		>
+			<h1
+				id="landing-title"
+				class="text-[clamp(3rem,7.4vw,7rem)] leading-[0.92] font-figure tracking-[-0.01em]"
+			>
+				{#each titleLines as line, index (index)}
+					<span class="block">{line}</span>
+				{/each}
+			</h1>
+			{@render feature(training, false)}
 		</div>
-	</section>
 
-	<section class="grid gap-4 pb-20 sm:grid-cols-3">
-		<Card.Root>
-			<Card.Header>
-				<div
-					class="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"
-				>
-					<MoonIcon class="size-5" />
+		<div class="border-t border-ink bg-night text-moon">
+			<div
+				class="mx-auto grid w-full max-w-(--container) gap-12 px-4 pt-10 pb-20 md:px-8 md:pt-12 md:pb-28 lg:grid-cols-[minmax(0,8fr)_minmax(0,4fr)] lg:gap-16"
+			>
+				<div class="flex flex-col gap-8">
+					<p class="max-w-[44ch] text-lg text-moon-2 md:text-xl">{m.landing_subtitle()}</p>
+					<!-- Signed-in visitors are sent to the dashboard by the page's server load. -->
+					<div class="flex flex-wrap gap-3">
+						<a
+							href={resolve('sign-in')}
+							class={buttonVariants({
+								size: 'lg',
+								class: 'bg-moon text-night hover:bg-moon/90 focus-visible:ring-offset-night'
+							})}
+						>
+							{m.landing_signin()}
+						</a>
+						{#if page.data.signupEnabled}
+							<a
+								href={resolve('sign-up')}
+								class={buttonVariants({
+									size: 'lg',
+									variant: 'outline',
+									class:
+										'border-moon-2/60 bg-transparent text-moon hover:border-moon hover:bg-night-2 focus-visible:ring-offset-night'
+								})}
+							>
+								{m.sign_up()}
+							</a>
+						{/if}
+					</div>
 				</div>
-				<Card.Title>{m.landing_feature_sleep_title()}</Card.Title>
-				<Card.Description>{m.landing_feature_sleep_desc()}</Card.Description>
-			</Card.Header>
-		</Card.Root>
-		<Card.Root>
-			<Card.Header>
-				<div
-					class="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"
-				>
-					<DumbbellIcon class="size-5" />
+				<div class="flex flex-col gap-8">
+					{@render feature(sleep, true)}
+					<div class="border-t border-night-rule pt-8">
+						{@render feature(correlations, true)}
+					</div>
 				</div>
-				<Card.Title>{m.landing_feature_training_title()}</Card.Title>
-				<Card.Description>{m.landing_feature_training_desc()}</Card.Description>
-			</Card.Header>
-		</Card.Root>
-		<Card.Root>
-			<Card.Header>
-				<div
-					class="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"
-				>
-					<ChartLineIcon class="size-5" />
-				</div>
-				<Card.Title>{m.landing_feature_correlations_title()}</Card.Title>
-				<Card.Description>{m.landing_feature_correlations_desc()}</Card.Description>
-			</Card.Header>
-		</Card.Root>
+			</div>
+		</div>
 	</section>
 </main>

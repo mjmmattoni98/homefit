@@ -13,12 +13,12 @@
 </script>
 
 <div data-slot="command-input-wrapper" class="p-1 pb-0">
-	<InputGroup.Root class="h-8! bg-input/20 dark:bg-input/30">
+	<InputGroup.Root class="h-8! bg-card dark:bg-card">
 		<CommandPrimitive.Input
 			{value}
 			data-slot="command-input"
 			class={cn(
-				'w-full text-xs/relaxed outline-hidden disabled:cursor-not-allowed disabled:opacity-50',
+				'w-full text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50',
 				className
 			)}
 			{...restProps}

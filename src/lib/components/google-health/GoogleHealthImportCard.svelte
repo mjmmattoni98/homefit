@@ -8,20 +8,15 @@
 		syncNow
 	} from '#lib/remote/health.remote.js';
 	import * as m from '#lib/paraglide/messages.js';
-	import * as Alert from '#lib/components/ui/alert/index.js';
 	import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
-	import * as Card from '#lib/components/ui/card/index.js';
 	import * as Field from '#lib/components/ui/field/index.js';
-	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import { formatDateLong } from '#lib/format.js';
-	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
-	import HeartPulseIcon from '@lucide/svelte/icons/heart-pulse';
-	import InfoIcon from '@lucide/svelte/icons/info';
+	import { cn } from '#lib/utils.js';
 	import { toast } from 'svelte-sonner';
 
 	const IMPORT_RETURN_PATH = '/dashboard/import';
@@ -129,16 +124,42 @@
 	}
 </script>
 
-<Card.Root>
-	<Card.Header>
-		<div class="flex items-start justify-between gap-3">
-			<div class="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-				<HeartPulseIcon aria-hidden="true" />
+<!-- One row of the import ledger: Google Health named on the left; its state, progress, last sync
+     and actions on the right. The state is a plain word at the head of the column, never a badge,
+     and the row's one filled button is whatever moves the connection forward. -->
+<div class="grid gap-x-14 gap-y-5 py-8 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
+	<div class="min-w-0">
+		<h2 class="text-xl">{m.google_health_title()}</h2>
+		<p class="mt-1.5 max-w-[48ch] text-sm text-ink-3">{m.google_health_description()}</p>
+	</div>
+
+	<div class="flex min-w-0 flex-col items-start gap-5" aria-busy={isLoading || isPending}>
+		{#if isLoading}
+			<p class="sr-only" aria-live="polite">{m.google_health_loading()}</p>
+			<div class="flex w-full flex-col gap-2.5">
+				<Skeleton class="h-5 w-28" />
+				<Skeleton class="h-4 w-3/4 max-w-sm" />
+				<Skeleton class="mt-2.5 h-9 w-44" />
 			</div>
-			{#if connection === null}
-				<Badge variant="outline">{m.google_health_status_not_connected()}</Badge>
-			{:else if connection !== undefined}
-				<Badge variant={connection.status === 'action_required' ? 'destructive' : 'secondary'}>
+		{:else if connectionQuery.error !== undefined}
+			<div role="alert">
+				<p class="font-medium text-error">{m.google_health_error_title()}</p>
+				<p class="mt-1 text-sm text-ink-3">{m.google_health_error_description()}</p>
+			</div>
+		{:else if connection === null}
+			<div>
+				<p class="font-medium">{m.google_health_status_not_connected()}</p>
+				<p class="mt-1 text-sm text-ink-3">{m.google_health_not_connected_description()}</p>
+			</div>
+			<Button disabled={isPending} onclick={startConnection} class="w-full sm:w-fit">
+				{#if pending === 'connect'}
+					<Spinner data-icon="inline-start" stroke="currentColor" />
+				{/if}
+				{m.google_health_connect()}
+			</Button>
+		{:else if connection !== undefined}
+			<div class="w-full">
+				<p class={cn('font-medium', connection.status === 'action_required' && 'text-error')}>
 					{#if connection.status === 'connecting' || connection.status === 'backfilling'}
 						{m.google_health_status_importing()}
 					{:else if connection.status === 'active'}
@@ -152,122 +173,84 @@
 					{:else}
 						{m.google_health_status_deleting()}
 					{/if}
-				</Badge>
-			{/if}
-		</div>
-		<Card.Title>{m.google_health_title()}</Card.Title>
-		<Card.Description>{m.google_health_description()}</Card.Description>
-	</Card.Header>
+				</p>
 
-	<Card.Content class="flex flex-col gap-4" aria-busy={isLoading || isPending}>
-		{#if isLoading}
-			<p class="sr-only" aria-live="polite">{m.google_health_loading()}</p>
-			<div class="flex flex-col gap-3">
-				<Skeleton class="h-4 w-3/4" />
-				<Skeleton class="h-7 w-40" />
-			</div>
-		{:else if connectionQuery.error !== undefined}
-			<Alert.Root variant="destructive">
-				<AlertCircleIcon aria-hidden="true" />
-				<Alert.Title>{m.google_health_error_title()}</Alert.Title>
-				<Alert.Description>{m.google_health_error_description()}</Alert.Description>
-			</Alert.Root>
-		{:else if connection === null}
-			<p class="text-sm text-muted-foreground">
-				{m.google_health_not_connected_description()}
-			</p>
-			<Button disabled={isPending} onclick={startConnection} class="w-full sm:w-fit">
-				{#if pending === 'connect'}
-					<Spinner data-icon="inline-start" />
-				{/if}
-				{m.google_health_connect()}
-			</Button>
-		{:else if connection !== undefined}
-			{#if connection.status === 'connecting' || connection.status === 'backfilling'}
-				<div class="flex flex-col gap-3">
-					<div>
-						<p class="text-sm font-medium">
-							{connection.status === 'connecting'
-								? m.google_health_connecting_title()
-								: m.google_health_importing_title()}
+				{#if connection.status === 'connecting' || connection.status === 'backfilling'}
+					<p class="mt-1 text-sm text-ink-2">
+						{connection.status === 'connecting'
+							? m.google_health_connecting_title()
+							: m.google_health_importing_title()}
+					</p>
+					<p class="text-sm text-ink-3">
+						{connection.status === 'connecting'
+							? m.google_health_connecting_description()
+							: m.google_health_importing_description()}
+					</p>
+					<div class="mt-4 flex max-w-md flex-col gap-2">
+						<p id="google-health-progress-label" class="text-sm">
+							{m.google_health_progress({ completed: completedTypes, total: totalTypes })}
 						</p>
-						<p class="text-sm text-muted-foreground">
-							{connection.status === 'connecting'
-								? m.google_health_connecting_description()
-								: m.google_health_importing_description()}
-						</p>
+						<Progress
+							value={completedTypes}
+							max={Math.max(totalTypes, 1)}
+							aria-labelledby="google-health-progress-label"
+							class="rounded-none bg-rule"
+						/>
 					</div>
-					<p id="google-health-progress-label" class="text-sm">
-						{m.google_health_progress({ completed: completedTypes, total: totalTypes })}
-					</p>
-					<Progress
-						value={completedTypes}
-						max={Math.max(totalTypes, 1)}
-						aria-labelledby="google-health-progress-label"
-					/>
-				</div>
-			{:else if connection.status === 'delayed'}
-				<Alert.Root>
-					<InfoIcon aria-hidden="true" />
-					<Alert.Title>{m.google_health_delayed_title()}</Alert.Title>
-					<Alert.Description>{m.google_health_delayed_description()}</Alert.Description>
-				</Alert.Root>
-			{:else if connection.status === 'action_required'}
-				<Alert.Root variant="destructive">
-					<AlertCircleIcon aria-hidden="true" />
-					<Alert.Title>{m.google_health_action_required_title()}</Alert.Title>
-					<Alert.Description>
-						{m.google_health_action_required_description()}
-					</Alert.Description>
-				</Alert.Root>
-			{:else if connection.status === 'disconnected'}
-				<Alert.Root>
-					<InfoIcon aria-hidden="true" />
-					<Alert.Title>{m.google_health_retained_title()}</Alert.Title>
-					<Alert.Description>{m.google_health_retained_description()}</Alert.Description>
-				</Alert.Root>
-			{:else if connection.status === 'deleting'}
-				<div class="flex items-start gap-2" aria-live="polite">
-					<Spinner />
-					<p class="text-sm text-muted-foreground">
-						{m.google_health_deleting_description()}
-					</p>
-				</div>
-			{:else}
-				<div class="flex flex-col gap-1">
-					<p class="text-sm font-medium">
+				{:else if connection.status === 'delayed'}
+					<p class="mt-1 text-sm text-ink-2">{m.google_health_delayed_title()}</p>
+					<p class="text-sm text-ink-3">{m.google_health_delayed_description()}</p>
+				{:else if connection.status === 'action_required'}
+					<p class="mt-1 text-sm text-ink-2">{m.google_health_action_required_title()}</p>
+					<p class="text-sm text-ink-3">{m.google_health_action_required_description()}</p>
+				{:else if connection.status === 'disconnected'}
+					<p class="mt-1 text-sm text-ink-2">{m.google_health_retained_title()}</p>
+					<p class="text-sm text-ink-3">{m.google_health_retained_description()}</p>
+				{:else if connection.status === 'deleting'}
+					<div class="mt-1 flex items-start gap-2" aria-live="polite">
+						<Spinner class="mt-0.5 shrink-0 text-ink-3" stroke="currentColor" />
+						<p class="text-sm text-ink-3">{m.google_health_deleting_description()}</p>
+					</div>
+				{:else}
+					<p class="mt-1 text-sm text-ink-2">
 						{m.google_health_metric_types_connected({ count: totalTypes })}
 					</p>
-					<p class="text-sm text-muted-foreground">
+					<p class="text-sm text-ink-3">
 						{connection.lastSuccessfulSyncAt === undefined
 							? m.google_health_never_synced()
 							: m.google_health_last_sync({
 									date: formatDateLong(connection.lastSuccessfulSyncAt)
 								})}
 					</p>
-				</div>
-				{#if hasPartialAccess}
-					<Alert.Root>
-						<InfoIcon aria-hidden="true" />
-						<Alert.Title>{m.google_health_partial_access_title()}</Alert.Title>
-						<Alert.Description>
-							{m.google_health_partial_access_description()}
-						</Alert.Description>
-					</Alert.Root>
+					{#if hasPartialAccess}
+						<p class="mt-4 text-sm text-ink-2">{m.google_health_partial_access_title()}</p>
+						<p class="text-sm text-ink-3">{m.google_health_partial_access_description()}</p>
+					{/if}
 				{/if}
-			{/if}
+			</div>
 
 			{#if connection.status !== 'deleting' && connection.status !== 'connecting' && connection.status !== 'backfilling'}
-				<div class="flex flex-wrap gap-2">
+				<div class="flex w-full flex-wrap items-center gap-2">
 					{#if connection.status === 'active'}
 						<Button disabled={isPending} onclick={requestSync}>
-							{#if pending === 'sync'}<Spinner data-icon="inline-start" />{/if}
+							{#if pending === 'sync'}<Spinner
+									data-icon="inline-start"
+									stroke="currentColor"
+								/>{/if}
 							{m.google_health_sync_now()}
 						</Button>
 					{/if}
 					{#if connection.status === 'action_required' || connection.status === 'disconnected' || hasPartialAccess}
-						<Button variant="outline" disabled={isPending} onclick={startConnection}>
-							{#if pending === 'connect'}<Spinner data-icon="inline-start" />{/if}
+						<!-- Without a sync to run, reviewing access or reconnecting is the way forward. -->
+						<Button
+							variant={connection.status === 'active' ? 'outline' : 'default'}
+							disabled={isPending}
+							onclick={startConnection}
+						>
+							{#if pending === 'connect'}<Spinner
+									data-icon="inline-start"
+									stroke="currentColor"
+								/>{/if}
 							{connection.status === 'disconnected'
 								? m.google_health_reconnect()
 								: m.google_health_review_access()}
@@ -278,14 +261,19 @@
 							{m.google_health_disconnect()}
 						</Button>
 					{/if}
-					<Button variant="destructive" disabled={isPending} onclick={() => (deleteOpen = true)}>
+					<Button
+						variant="destructive"
+						class="sm:ml-auto"
+						disabled={isPending}
+						onclick={() => (deleteOpen = true)}
+					>
 						{m.google_health_delete_data()}
 					</Button>
 				</div>
 			{/if}
 		{/if}
-	</Card.Content>
-</Card.Root>
+	</div>
+</div>
 
 <AlertDialog.Root bind:open={disconnectOpen}>
 	<AlertDialog.Content>
@@ -298,7 +286,10 @@
 		<AlertDialog.Footer>
 			<AlertDialog.Cancel disabled={isPending}>{m.google_health_cancel()}</AlertDialog.Cancel>
 			<AlertDialog.Action disabled={isPending} onclick={confirmDisconnect}>
-				{#if pending === 'disconnect'}<Spinner data-icon="inline-start" />{/if}
+				{#if pending === 'disconnect'}<Spinner
+						data-icon="inline-start"
+						stroke="currentColor"
+					/>{/if}
 				{m.google_health_disconnect_dialog_confirm()}
 			</AlertDialog.Action>
 		</AlertDialog.Footer>
@@ -338,7 +329,7 @@
 				disabled={isPending || deleteConfirmation !== DELETE_CONFIRMATION}
 				onclick={confirmDeletion}
 			>
-				{#if pending === 'delete'}<Spinner data-icon="inline-start" />{/if}
+				{#if pending === 'delete'}<Spinner data-icon="inline-start" stroke="currentColor" />{/if}
 				{m.google_health_delete_dialog_confirm()}
 			</AlertDialog.Action>
 		</AlertDialog.Footer>

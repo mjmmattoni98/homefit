@@ -1,12 +1,11 @@
 <script lang="ts">
+	import Measure from '#lib/components/Measure.svelte';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { getMetricRecords, getMetricTrend, getMetrics } from '#lib/remote/health.remote.js';
 	import type { RecordsCursor } from '#lib/server/google-health/records.js';
-	import * as Card from '#lib/components/ui/card/index.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
-	import * as Table from '#lib/components/ui/table/index.js';
 	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
-	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
@@ -24,6 +23,7 @@
 	} from '#lib/google-health/view.js';
 	import { formatDateLong } from '#lib/format.js';
 	import * as m from '#lib/paraglide/messages.js';
+	import { cn } from '#lib/utils.js';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 
 	const RANGE_DAYS = [7, 30, 90, 365] as const;
@@ -89,219 +89,273 @@
 			? m.health_recorded()
 			: formatMetricValue(primaryValue, primaryUnit, dataType);
 	}
+
+	// The day the summary figures describe, besides the latest value.
+	const summaryFigures = $derived.by(() => {
+		if (metric === undefined) return [];
+		const summary = metric.latestSummary;
+		const format = (value: number) => formatMetricValue(value, metric.primaryUnit, metric.dataType);
+		return [
+			summary.average === null
+				? null
+				: { label: m.health_average(), value: format(summary.average) },
+			summary.min === null ? null : { label: m.health_minimum(), value: format(summary.min) },
+			summary.max === null ? null : { label: m.health_maximum(), value: format(summary.max) },
+			metric.aggregation === 'sum' && summary.sum !== null
+				? { label: m.health_total(), value: format(summary.sum) }
+				: null,
+			metric.aggregation === 'duration' && summary.durationSeconds !== null
+				? { label: m.health_duration(), value: formatDuration(summary.durationSeconds) }
+				: null,
+			{ label: m.health_count(), value: String(summary.count) }
+		].filter((figure) => figure !== null);
+	});
+	const lastRecorded = $derived(
+		metric === undefined
+			? null
+			: (metric.latestSummary.latestTimestamp ??
+					new Date(`${metric.latestSummary.localDate}T00:00:00.000Z`).getTime())
+	);
+
+	// Sleep is measured on the nights, so its trend is drawn on a night panel.
+	const night = $derived(metric?.category === 'sleep');
+
+	const rangeLabel = (days: number) =>
+		days === 365 ? m.period_short_year() : m.period_short_days({ days });
+
+	// The date stays pinned while the rest of a record scrolls sideways on a phone.
+	const PINNED =
+		'sticky left-0 z-10 bg-day pr-5 max-sm:shadow-[inset_-1px_0_0_var(--color-rule)] sm:pr-8';
 </script>
 
 <svelte:head>
 	<title>
-		{dataType === null ? m.health_not_found_title() : metricLabel(dataType)} · {m.app_name()}
+		{dataType === null ? m.health_not_found_title() : metricLabel(dataType)}: {m.app_name()}
 	</title>
 </svelte:head>
 
-<div class="flex flex-col gap-6">
-	<div>
-		<h1 class="text-2xl font-bold tracking-tight">
-			{metric === undefined
-				? dataType === null
-					? m.health_not_found_title()
-					: metricLabel(dataType)
-				: metricLabel(metric.dataType)}
-		</h1>
-		{#if metric !== undefined}
-			<div class="mt-1 flex flex-wrap items-center gap-2">
-				<Badge variant="secondary">{categoryLabel(metric.category)}</Badge>
-				<span class="text-sm text-muted-foreground">
-					{m.health_source()}: {metric.sourceLabel}
-				</span>
-			</div>
-		{/if}
-	</div>
-
-	<HealthSyncBanner />
-
-	{#if isLoading}
-		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			{#each [0, 1, 2, 3] as index (index)}
-				<Skeleton class="h-28 w-full" />
-			{/each}
-		</div>
-		<Skeleton class="h-80 w-full" />
-	{:else if hasError}
-		<Empty.Root class="border">
-			<Empty.Header>
-				<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
-				<Empty.Title>{m.health_query_error_title()}</Empty.Title>
-				<Empty.Description>{m.health_query_error_description()}</Empty.Description>
-			</Empty.Header>
-		</Empty.Root>
-	{:else if dataType === null || metric === undefined}
-		<Empty.Root class="border">
-			<Empty.Header>
-				<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
-				<Empty.Title>{m.health_not_found_title()}</Empty.Title>
-				<Empty.Description>{m.health_not_found_description()}</Empty.Description>
-			</Empty.Header>
-		</Empty.Root>
-	{:else}
-		<section aria-labelledby="health-summary-heading" class="flex flex-col gap-3">
-			<h2 id="health-summary-heading" class="text-lg font-semibold tracking-tight">
-				{m.health_stats_title()}
-			</h2>
-			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-				<Card.Root size="sm">
-					<Card.Header><Card.Title>{m.health_latest()}</Card.Title></Card.Header>
-					<Card.Content class="text-lg font-semibold">
-						{formatSummaryValue(metric, metric.latestSummary, m.health_recorded())}
-					</Card.Content>
-				</Card.Root>
-				{#if metric.latestSummary.average !== null}
-					<Card.Root size="sm">
-						<Card.Header><Card.Title>{m.health_average()}</Card.Title></Card.Header>
-						<Card.Content class="text-lg font-semibold">
-							{formatMetricValue(metric.latestSummary.average, metric.primaryUnit, metric.dataType)}
-						</Card.Content>
-					</Card.Root>
-				{/if}
-				{#if metric.latestSummary.min !== null}
-					<Card.Root size="sm">
-						<Card.Header><Card.Title>{m.health_minimum()}</Card.Title></Card.Header>
-						<Card.Content class="text-lg font-semibold">
-							{formatMetricValue(metric.latestSummary.min, metric.primaryUnit, metric.dataType)}
-						</Card.Content>
-					</Card.Root>
-				{/if}
-				{#if metric.latestSummary.max !== null}
-					<Card.Root size="sm">
-						<Card.Header><Card.Title>{m.health_maximum()}</Card.Title></Card.Header>
-						<Card.Content class="text-lg font-semibold">
-							{formatMetricValue(metric.latestSummary.max, metric.primaryUnit, metric.dataType)}
-						</Card.Content>
-					</Card.Root>
-				{/if}
-				{#if metric.aggregation === 'sum' && metric.latestSummary.sum !== null}
-					<Card.Root size="sm">
-						<Card.Header><Card.Title>{m.health_total()}</Card.Title></Card.Header>
-						<Card.Content class="text-lg font-semibold">
-							{formatMetricValue(metric.latestSummary.sum, metric.primaryUnit, metric.dataType)}
-						</Card.Content>
-					</Card.Root>
-				{/if}
-				{#if metric.aggregation === 'duration' && metric.latestSummary.durationSeconds !== null}
-					<Card.Root size="sm">
-						<Card.Header><Card.Title>{m.health_duration()}</Card.Title></Card.Header>
-						<Card.Content class="text-lg font-semibold">
-							{formatDuration(metric.latestSummary.durationSeconds)}
-						</Card.Content>
-					</Card.Root>
-				{/if}
-				<Card.Root size="sm">
-					<Card.Header><Card.Title>{m.health_count()}</Card.Title></Card.Header>
-					<Card.Content class="text-lg font-semibold">{metric.latestSummary.count}</Card.Content>
-				</Card.Root>
-			</div>
-		</section>
-
-		<Card.Root>
-			<Card.Header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-				<div>
-					<Card.Title>{m.health_trend_title()}</Card.Title>
-					<Card.Description>
-						{m.health_trend_description({ metric: metricLabel(metric.dataType) })}
-					</Card.Description>
-				</div>
-				<ToggleGroup.Root type="single" value={rangeValue} variant="outline" size="sm">
-					{#each RANGE_DAYS as days (days)}
-						<ToggleGroup.Item
-							value={String(days)}
-							aria-label={m.health_range_days({ days })}
-							onclick={() => (rangeValue = String(days))}
-						>
-							{days}
-						</ToggleGroup.Item>
-					{/each}
-				</ToggleGroup.Root>
-			</Card.Header>
-			<Card.Content>
-				{#if trendQuery !== null && !trendQuery.ready}
-					<Skeleton class="h-[260px] w-full" />
-				{:else}
-					<HealthTrendChart {metric} summaries={trend} />
-				{/if}
-			</Card.Content>
-		</Card.Root>
-
-		<Card.Root>
-			<Card.Header>
-				<Card.Title>{m.health_records_title()}</Card.Title>
-				<Card.Description>{m.health_records_description()}</Card.Description>
-			</Card.Header>
-			<Card.Content>
-				{#if records.length === 0}
-					<p class="text-sm text-muted-foreground">{m.health_no_records()}</p>
-				{:else}
-					<Table.Root>
-						<Table.Header>
-							<Table.Row>
-								<Table.Head>{m.health_date()}</Table.Head>
-								<Table.Head>{m.health_value()}</Table.Head>
-								<Table.Head>{m.health_application()}</Table.Head>
-								<Table.Head>{m.health_device()}</Table.Head>
-								<Table.Head>{m.health_method()}</Table.Head>
-								<Table.Head>{m.health_details()}</Table.Head>
-							</Table.Row>
-						</Table.Header>
-						<Table.Body>
-							{#each records as record, index (index)}
-								<Table.Row>
-									<Table.Cell class="whitespace-nowrap">
-										{formatDateLong(record.recordTimestamp)}
-									</Table.Cell>
-									<Table.Cell class="font-medium">
-										{recordValue(record.primaryValue, record.primaryUnit)}
-									</Table.Cell>
-									<Table.Cell>{record.sourceApplication ?? record.sourcePlatform ?? '−'}</Table.Cell
-									>
-									<Table.Cell>{record.sourceDevice ?? '−'}</Table.Cell>
-									<Table.Cell>{record.recordingMethod ?? '−'}</Table.Cell>
-									<Table.Cell class="min-w-56">
-										{#if record.payload.kind === 'fields' && record.payload.fields.length > 0}
-											<details>
-												<summary class="cursor-pointer font-medium">
-													{m.health_details()}
-												</summary>
-												<dl class="mt-2 grid gap-2">
-													{#each record.payload.fields as field (`${field.path.join('.')}:${String(field.value)}`)}
-														<div>
-															<dt class="text-xs text-muted-foreground">
-																{payloadPath(field.path, m.health_value())}
-															</dt>
-															<dd class="break-words">{payloadValue(field.value)}</dd>
-														</div>
-													{/each}
-												</dl>
-											</details>
-										{:else}
-											<span class="text-muted-foreground">{m.health_payload_unavailable()}</span>
-										{/if}
-									</Table.Cell>
-								</Table.Row>
-							{/each}
-						</Table.Body>
-					</Table.Root>
-				{/if}
-
-				{#if nextCursor !== null || loadingMore}
-					<div class="mt-4 flex justify-center">
-						<Button variant="outline" disabled={loadingMore} onclick={loadMore}>
-							{#if loadingMore}
-								<Spinner data-icon="inline-start" />
-								{m.health_loading_more()}
-							{:else}
-								{m.health_load_more()}
-							{/if}
-						</Button>
-					</div>
-				{/if}
-			</Card.Content>
-		</Card.Root>
+<div class="border-b border-rule pt-7 pb-3">
+	<nav aria-label={m.nav_breadcrumb()} class="mb-2 text-sm text-ink-3">
+		<ol class="flex flex-wrap items-center gap-x-2">
+			<li>
+				<a
+					href={resolve('/dashboard/health')}
+					class="underline-offset-4 transition-colors duration-(--dur-micro) hover:text-foreground hover:underline hover:decoration-sun"
+				>
+					{m.nav_health()}
+				</a>
+			</li>
+			{#if metric !== undefined}
+				<li class="flex items-center gap-x-2">
+					<span class="text-rule-2" aria-hidden="true">/</span>
+					<a
+						href={resolve('/dashboard/health/[category]', { category: metric.category })}
+						class="underline-offset-4 transition-colors duration-(--dur-micro) hover:text-foreground hover:underline hover:decoration-sun"
+					>
+						{categoryLabel(metric.category)}
+					</a>
+				</li>
+			{/if}
+		</ol>
+	</nav>
+	<h1 class="text-4xl">
+		{metric === undefined
+			? dataType === null
+				? m.health_not_found_title()
+				: metricLabel(dataType)
+			: metricLabel(metric.dataType)}
+	</h1>
+	{#if metric !== undefined}
+		<p class="mt-1.5 text-sm text-ink-3">{m.health_source()}: {metric.sourceLabel}</p>
 	{/if}
 </div>
+
+<HealthSyncBanner />
+
+{#if isLoading}
+	<div aria-busy="true">
+		<div class="flex flex-wrap items-end gap-x-14 gap-y-6 pt-9">
+			<Skeleton class="h-20 w-56" />
+			<Skeleton class="h-14 w-32" />
+			<Skeleton class="h-14 w-32" />
+		</div>
+		<Skeleton class="mt-16 h-[300px] w-full" />
+	</div>
+{:else if hasError}
+	<Empty.Root class="mt-10 border border-rule">
+		<Empty.Header>
+			<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
+			<Empty.Title>{m.health_query_error_title()}</Empty.Title>
+			<Empty.Description>{m.health_query_error_description()}</Empty.Description>
+		</Empty.Header>
+	</Empty.Root>
+{:else if dataType === null || metric === undefined}
+	<Empty.Root class="mt-10 border border-rule">
+		<Empty.Header>
+			<Empty.Media variant="icon"><DatabaseIcon /></Empty.Media>
+			<Empty.Title>{m.health_not_found_title()}</Empty.Title>
+			<Empty.Description>{m.health_not_found_description()}</Empty.Description>
+		</Empty.Header>
+	</Empty.Root>
+{:else}
+	<!-- The lead: the latest value, large, then the figures of the day it was recorded, without
+	     boxes. -->
+	<section aria-labelledby="health-summary-heading" class="pt-9">
+		<h2 id="health-summary-heading" class="text-2xl">{m.health_stats_title()}</h2>
+		<div class="mt-6 flex flex-col gap-x-14 gap-y-8 lg:flex-row lg:items-end">
+			<dl class="flex min-w-0 flex-col gap-1">
+				<dt class="text-sm text-ink-3">{m.health_latest()}</dt>
+				<dd>
+					<Measure
+						value={String(formatSummaryValue(metric, metric.latestSummary, m.health_recorded()))}
+						class="text-5xl font-figure"
+						unitClass="ml-[0.2em] text-[0.45em] font-medium text-ink-3"
+					/>
+				</dd>
+				{#if lastRecorded !== null}
+					<dd class="text-sm text-ink-3">
+						{m.health_last_recorded({ date: formatDateLong(lastRecorded) })}
+					</dd>
+				{/if}
+			</dl>
+			<dl
+				class="grid grid-cols-2 gap-x-8 gap-y-6 border-t border-rule pt-6 sm:flex sm:flex-wrap sm:gap-x-12 lg:border-t-0 lg:border-l lg:pt-0 lg:pb-6 lg:pl-14"
+			>
+				{#each summaryFigures as figure (figure.label)}
+					<div class="flex min-w-0 flex-col gap-1">
+						<dt class="text-sm text-ink-3">{figure.label}</dt>
+						<dd>
+							<Measure
+								value={figure.value}
+								class="text-2xl font-figure"
+								unitClass="ml-[0.25em] text-sm font-medium text-ink-3"
+							/>
+						</dd>
+					</div>
+				{/each}
+			</dl>
+		</div>
+	</section>
+
+	<section
+		aria-labelledby="health-trend-title"
+		class={cn('mt-16', night && 'bg-night px-5 pt-6 pb-5 text-moon sm:px-7')}
+	>
+		<div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+			<div class="min-w-0">
+				<h2 id="health-trend-title" class="text-2xl">{m.health_trend_title()}</h2>
+				<p class={cn('mt-2 text-sm', night ? 'text-moon-2' : 'text-ink-3')}>
+					{m.health_trend_description({ metric: metricLabel(metric.dataType) })}
+				</p>
+			</div>
+			<ToggleGroup.Root
+				type="single"
+				value={rangeValue}
+				variant="outline"
+				class={cn('w-full sm:w-auto', night && 'shadow-[inset_0_-1px_0_var(--color-night-rule)]')}
+			>
+				{#each RANGE_DAYS as days (days)}
+					<ToggleGroup.Item
+						value={String(days)}
+						aria-label={m.health_range_days({ days })}
+						class={cn(
+							'h-10 flex-1 px-3 text-[0.9375rem] sm:flex-none',
+							night && 'text-moon-2 hover:text-moon data-[state=on]:text-moon'
+						)}
+						onclick={() => (rangeValue = String(days))}
+					>
+						{rangeLabel(days)}
+					</ToggleGroup.Item>
+				{/each}
+			</ToggleGroup.Root>
+		</div>
+		<div class="mt-6">
+			{#if trendQuery !== null && !trendQuery.ready}
+				<Skeleton class={cn('h-[278px] w-full', night && 'bg-night-2')} />
+			{:else}
+				<HealthTrendChart {metric} summaries={trend} />
+			{/if}
+		</div>
+	</section>
+
+	<!-- The records are a ledger: a heavy rule opens it, hairlines part the rows. -->
+	<section class="mt-16 min-w-0" aria-labelledby="health-records-title">
+		<h2 id="health-records-title" class="text-2xl">{m.health_records_title()}</h2>
+		<p class="mt-2 text-sm text-ink-3">{m.health_records_description()}</p>
+		{#if records.length === 0}
+			<p class="mt-6 border-t border-ink pt-4 text-sm text-ink-3">{m.health_no_records()}</p>
+		{:else}
+			<div class="mt-6 overflow-x-auto">
+				<table class="w-full border-t border-ink text-left">
+					<thead class="text-sm text-ink-3">
+						<tr>
+							<th scope="col" class={cn(PINNED, 'py-2.5 font-normal')}>{m.health_date()}</th>
+							<th scope="col" class="py-2.5 pr-8 text-right font-normal">{m.health_value()}</th>
+							<th scope="col" class="py-2.5 pr-8 font-normal">{m.health_application()}</th>
+							<th scope="col" class="py-2.5 pr-8 font-normal">{m.health_device()}</th>
+							<th scope="col" class="py-2.5 pr-8 font-normal">{m.health_method()}</th>
+							<th scope="col" class="py-2.5 font-normal">{m.health_details()}</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each records as record, index (index)}
+							<tr class="border-t border-rule align-baseline">
+								<td class={cn(PINNED, 'py-3 text-sm whitespace-nowrap text-ink-2')}>
+									{formatDateLong(record.recordTimestamp)}
+								</td>
+								<td class="py-3 pr-8 text-right whitespace-nowrap"
+									><Measure
+										value={recordValue(record.primaryValue, record.primaryUnit)}
+										numberClass="font-medium"
+										unitClass="ml-[0.25em] text-sm text-ink-3"
+									/></td
+								>
+								<td class="py-3 pr-8 whitespace-nowrap">
+									{record.sourceApplication ?? record.sourcePlatform ?? '−'}
+								</td>
+								<td class="py-3 pr-8 whitespace-nowrap">{record.sourceDevice ?? '−'}</td>
+								<td class="py-3 pr-8 whitespace-nowrap">{record.recordingMethod ?? '−'}</td>
+								<td class="min-w-56 py-3">
+									{#if record.payload.kind === 'fields' && record.payload.fields.length > 0}
+										<details>
+											<summary
+												class="cursor-pointer text-sm font-medium underline decoration-rule-2 underline-offset-4 transition-colors duration-(--dur-micro) hover:decoration-sun"
+											>
+												{m.health_details()}
+											</summary>
+											<dl class="mt-2 grid gap-2">
+												{#each record.payload.fields as field (`${field.path.join('.')}:${String(field.value)}`)}
+													<div>
+														<dt class="text-sm text-ink-3">
+															{payloadPath(field.path, m.health_value())}
+														</dt>
+														<dd class="break-words">{payloadValue(field.value)}</dd>
+													</div>
+												{/each}
+											</dl>
+										</details>
+									{:else}
+										<span class="text-sm text-ink-3">{m.health_payload_unavailable()}</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+
+		{#if nextCursor !== null || loadingMore}
+			<div class="mt-5">
+				<Button variant="outline" disabled={loadingMore} onclick={loadMore}>
+					{#if loadingMore}
+						<Spinner data-icon="inline-start" />
+						{m.health_loading_more()}
+					{:else}
+						{m.health_load_more()}
+					{/if}
+				</Button>
+			</div>
+		{/if}
+	</section>
+{/if}

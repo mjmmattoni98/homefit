@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { curveMonotoneX, line } from 'd3-shape';
 	import { CHART_COLORS } from '#lib/charts.js';
 	import { dayToDate } from '#lib/days.js';
 	import { formatCompact, formatDate, formatHours, formatNumber } from '#lib/format.js';
 	import { TREND_DAYS, type ChartPoint, type Granularity } from '#lib/overview.js';
 	import * as m from '#lib/paraglide/messages.js';
+	import { curveMonotoneX, line } from 'd3-shape';
 
 	let {
 		points,
@@ -18,14 +18,16 @@
 		average: number | null;
 	} = $props();
 
-	const HEIGHT = 300;
-	const LEFT = 40;
+	// Each column is one day (or week, or month): its training rises above the horizon and the
+	// sleep that began that evening hangs below it. The halves have different units, so each keeps
+	// its own zero (the horizon) and its own scale, labelled on its own side.
+	const DAY = 150;
+	const NIGHT = 176;
+	const LABELS = 30;
+	const HEIGHT = DAY + NIGHT + LABELS;
+	const LEFT = 52;
 	const RIGHT = 12;
-	const TOP = 10;
-	const QUALITY_BOTTOM = 190;
-	const BAND_TOP = 212;
-	const BAND_BOTTOM = 272;
-	const TOOLTIP_WIDTH = 176;
+	const READOUT_WIDTH = 200;
 
 	let width = $state(0);
 	let active = $state<number | null>(null);
@@ -33,39 +35,24 @@
 	const innerWidth = $derived(Math.max(0, width - LEFT - RIGHT));
 	const step = $derived(points.length === 0 ? 0 : innerWidth / points.length);
 	const x = (index: number) => LEFT + (index + 0.5) * step;
-
-	// Fitted to the data in steps of ten, so ordinary variation stays visible.
-	const domain = $derived.by((): [number, number] => {
-		const values = points.flatMap((point) => (point.quality === null ? [] : [point.quality]));
-		if (values.length === 0) return [0, 100];
-		const low = Math.max(0, Math.floor((Math.min(...values) - 5) / 10) * 10);
-		const high = Math.min(100, Math.ceil((Math.max(...values) + 5) / 10) * 10);
-		return [Math.min(low, high - 20), Math.max(high, low + 20)];
-	});
-	const y = (value: number) =>
-		TOP + (1 - (value - domain[0]) / (domain[1] - domain[0])) * (QUALITY_BOTTOM - TOP);
-	const yTicks = $derived.by(() => {
-		const stride = domain[1] - domain[0] > 40 ? 20 : 10;
-		const ticks: number[] = [];
-		for (let tick = domain[0]; tick <= domain[1]; tick += stride) ticks.push(tick);
-		return ticks;
-	});
+	const barWidth = $derived(Math.max(1, Math.min(22, step * 0.62)));
 
 	const maxVolume = $derived(Math.max(1, ...points.map((point) => point.volume)));
-	const barHeight = (volume: number) => (volume / maxVolume) * (BAND_BOTTOM - BAND_TOP);
-	const barWidth = $derived(Math.max(1, Math.min(16, step * 0.6)));
-	const dotRadius = $derived(Math.max(1.5, Math.min(3.5, step * 0.3)));
+	// Volume fills at most nine tenths of the day; quality runs from 0 to 100 down the night.
+	const rise = (volume: number) => (volume / maxVolume) * DAY * 0.9;
+	const drop = (quality: number) => (quality / 100) * (NIGHT - 14);
+	const nightY = (quality: number) => DAY + drop(quality);
 
 	const trendPath = $derived(
 		line<ChartPoint>()
 			.defined((point) => point.trend !== null)
 			.x((_, index) => x(index))
-			.y((point) => y(point.trend ?? 0))
+			.y((point) => nightY(point.trend ?? 0))
 			.curve(curveMonotoneX)(points) ?? ''
 	);
 
 	const xTicks = $derived.by(() => {
-		const count = Math.max(2, Math.floor(innerWidth / (granularity === 'day' ? 90 : 110)));
+		const count = Math.max(2, Math.floor(innerWidth / (granularity === 'day' ? 96 : 116)));
 		const stride = Math.max(1, Math.ceil(points.length / count));
 		return points.flatMap((point, index) => (index % stride === 0 ? [{ point, index }] : []));
 	});
@@ -85,11 +72,13 @@
 	const trendLabel = $derived(m.chart_trend({ days: TREND_DAYS[granularity] }));
 
 	const activePoint = $derived(active === null ? null : points[active]);
-	// Beside the crosshair, on whichever side has room, so it never hides the inspected point.
-	const tooltipLeft = $derived.by(() => {
+	// Beside the column, on whichever side has room, so it never hides the inspected day.
+	const readoutLeft = $derived.by(() => {
 		if (active === null) return 0;
-		const right = x(active) + 12;
-		return right + TOOLTIP_WIDTH <= width ? right : Math.max(0, x(active) - 12 - TOOLTIP_WIDTH);
+		const right = x(active) + barWidth / 2 + 12;
+		return right + READOUT_WIDTH <= width
+			? right
+			: Math.max(0, x(active) - barWidth / 2 - 12 - READOUT_WIDTH);
 	});
 
 	// What a screen reader announces for the inspected point.
@@ -129,163 +118,183 @@
 	}
 </script>
 
-<!-- A slider over the points, so keyboard and screen reader users can inspect them too. -->
-<div
-	class="relative w-full rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
-	bind:clientWidth={width}
-	role="slider"
-	aria-label={m.chart_label()}
-	aria-valuemin={0}
-	aria-valuemax={Math.max(0, points.length - 1)}
-	aria-valuenow={active ?? points.length - 1}
-	aria-valuetext={valueText}
-	tabindex="0"
-	{onkeydown}
-	onfocus={() => (active ??= points.length - 1)}
-	onblur={() => (active = null)}
->
-	{#if width > 0}
+<!-- The night field starts at the horizon and runs to both edges of the window. -->
+<div class="relative col-[full] grid grid-cols-subgrid">
+	<div
+		class="pointer-events-none absolute inset-x-0 bottom-0 bg-night"
+		style:top="{DAY}px"
+		aria-hidden="true"
+	></div>
+
+	<!-- A slider over the points, so keyboard and screen reader users can inspect them too. -->
+	<div
+		class="relative col-[content] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-focus"
+		bind:clientWidth={width}
+		role="slider"
+		aria-label={m.chart_label()}
+		aria-valuemin={0}
+		aria-valuemax={Math.max(0, points.length - 1)}
+		aria-valuenow={active ?? points.length - 1}
+		aria-valuetext={valueText}
+		tabindex="0"
+		{onkeydown}
+		onfocus={() => (active ??= points.length - 1)}
+		onblur={() => (active = null)}
+	>
 		<svg
-			{width}
+			width={width || undefined}
 			height={HEIGHT}
-			class="block touch-pan-y select-none"
+			class="block w-full touch-pan-y select-none"
 			aria-hidden="true"
 			onpointermove={(event) => pick(event.clientX, event.currentTarget)}
 			onpointerdown={(event) => pick(event.clientX, event.currentTarget)}
 			onpointerleave={() => (active = null)}
 		>
-			{#each yTicks as tick (tick)}
-				<line x1={LEFT} x2={width - RIGHT} y1={y(tick)} y2={y(tick)} class="stroke-border" />
-				<text
-					x={LEFT - 8}
-					y={y(tick)}
-					dy="0.32em"
-					text-anchor="end"
-					class="fill-muted-foreground text-[10px] tabular-nums">{tick}%</text
-				>
-			{/each}
-			<text
-				x={LEFT - 8}
-				y={BAND_TOP + 4}
-				text-anchor="end"
-				class="fill-muted-foreground text-[10px]">{formatCompact(Math.round(maxVolume))}</text
-			>
-			<text x={LEFT - 8} y={BAND_BOTTOM} text-anchor="end" class="fill-muted-foreground text-[10px]"
-				>kg</text
-			>
-			<line x1={LEFT} x2={width - RIGHT} y1={BAND_BOTTOM} y2={BAND_BOTTOM} class="stroke-border" />
-
-			{#if active !== null}
-				<rect
-					x={x(active) - step / 2}
-					y={TOP}
-					width={step}
-					height={BAND_BOTTOM - TOP}
-					class="fill-foreground/5"
-				/>
-			{/if}
-
-			{#each points as point, index (point.from)}
-				{#if point.volume > 0}
-					<rect
-						x={x(index) - barWidth / 2}
-						y={BAND_BOTTOM - barHeight(point.volume)}
-						width={barWidth}
-						height={barHeight(point.volume)}
-						rx="1.5"
-						fill={CHART_COLORS.volume}
-						opacity={active === null || active === index ? 0.9 : 0.45}
-					/>
-				{/if}
-				{#if point.quality !== null}
-					<circle
-						cx={x(index)}
-						cy={y(point.quality)}
-						r={active === index ? dotRadius + 1.5 : dotRadius}
-						fill={CHART_COLORS.quality}
-						opacity={active === index ? 1 : 0.5}
-					/>
-				{/if}
-			{/each}
-
-			{#if average !== null}
+			{#if width > 0}
+				<!-- Day scale: one line at the largest volume. -->
 				<line
 					x1={LEFT}
 					x2={width - RIGHT}
-					y1={y(average)}
-					y2={y(average)}
-					class="stroke-foreground/50"
-					stroke-dasharray="4 4"
+					y1={DAY - rise(maxVolume)}
+					y2={DAY - rise(maxVolume)}
+					class="stroke-rule"
 				/>
 				<text
-					x={width - RIGHT}
-					y={y(average) - 5}
+					x={LEFT - 10}
+					y={DAY - rise(maxVolume)}
+					dy="0.32em"
 					text-anchor="end"
-					class="fill-muted-foreground text-[10px] tabular-nums"
-					>{m.chart_average_short({ value: Math.round(average) })}</text
+					class="fill-ink-3 text-xs">{formatCompact(Math.round(maxVolume))}</text
 				>
-			{/if}
-			<path
-				d={trendPath}
-				fill="none"
-				stroke={CHART_COLORS.quality}
-				stroke-width="2.5"
-				stroke-linecap="round"
-			/>
+				<text x={LEFT - 10} y={DAY - 8} text-anchor="end" class="fill-ink-3 text-xs">kg</text>
 
-			{#if active !== null}
-				<line
-					x1={x(active)}
-					x2={x(active)}
-					y1={TOP}
-					y2={BAND_BOTTOM}
-					class="stroke-foreground/40"
+				<!-- Night scale: half and full quality. -->
+				{#each [50, 100] as tick (tick)}
+					<line
+						x1={LEFT}
+						x2={width - RIGHT}
+						y1={nightY(tick)}
+						y2={nightY(tick)}
+						class="stroke-night-rule"
+					/>
+					<text
+						x={LEFT - 10}
+						y={nightY(tick)}
+						dy="0.32em"
+						text-anchor="end"
+						class="fill-moon-2 text-xs">{tick}%</text
+					>
+				{/each}
+
+				{#if active !== null}
+					<rect x={x(active) - step / 2} y={0} width={step} height={DAY} class="fill-ink/6" />
+					<rect x={x(active) - step / 2} y={DAY} width={step} height={NIGHT} class="fill-moon/10" />
+				{/if}
+
+				{#each points as point, index (point.from)}
+					{@const dim = active !== null && active !== index}
+					{#if point.volume > 0}
+						<rect
+							x={x(index) - barWidth / 2}
+							y={DAY - rise(point.volume)}
+							width={barWidth}
+							height={rise(point.volume)}
+							style:fill={CHART_COLORS.volume}
+							opacity={dim ? 0.4 : 1}
+						/>
+					{/if}
+					{#if point.quality !== null}
+						<rect
+							x={x(index) - barWidth / 2}
+							y={DAY}
+							width={barWidth}
+							height={drop(point.quality)}
+							style:fill={CHART_COLORS.quality}
+							opacity={dim ? 0.35 : 0.85}
+						/>
+					{/if}
+				{/each}
+
+				{#if average !== null}
+					<line
+						x1={LEFT}
+						x2={width - RIGHT}
+						y1={nightY(average)}
+						y2={nightY(average)}
+						class="stroke-moon"
+						stroke-width="1"
+					/>
+					<text
+						x={width - RIGHT}
+						y={nightY(average) + 15}
+						text-anchor="end"
+						class="fill-moon text-xs">{m.chart_average_short({ value: Math.round(average) })}</text
+					>
+				{/if}
+				<path
+					d={trendPath}
+					fill="none"
+					class="stroke-moon"
+					stroke-width="2.5"
+					stroke-linecap="round"
 				/>
+
+				<!-- The horizon. -->
+				<line x1={0} x2={width} y1={DAY} y2={DAY} class="stroke-ink" stroke-width="1.5" />
+
+				{#each xTicks as tick (tick.point.from)}
+					<text x={x(tick.index)} y={HEIGHT - 9} text-anchor="middle" class="fill-moon-2 text-xs"
+						>{tickLabel(tick.point)}</text
+					>
+				{/each}
 			{/if}
-
-			{#each xTicks as tick (tick.point.from)}
-				<text
-					x={x(tick.index)}
-					y={HEIGHT - 8}
-					text-anchor="middle"
-					class="fill-muted-foreground text-[10px]">{tickLabel(tick.point)}</text
-				>
-			{/each}
 		</svg>
-	{/if}
 
-	{#if activePoint}
-		<div
-			class="pointer-events-none absolute top-2 z-10 w-44 rounded-md border bg-popover p-2.5 text-xs text-popover-foreground shadow-lg"
-			style:left="{tooltipLeft}px"
-		>
-			<p class="mb-1.5 font-medium">{pointLabel(activePoint)}</p>
-			<dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 tabular-nums">
-				<dt class="flex items-center gap-1.5 text-muted-foreground">
-					<span class="size-2 rounded-full" style:background={CHART_COLORS.quality}></span>
-					{m.quality()}
-				</dt>
-				<dd class="text-right font-medium">
-					{activePoint.quality === null
-						? m.chart_not_tracked()
-						: `${Math.round(activePoint.quality)}%`}
-				</dd>
-				<dt class="pl-3.5 text-muted-foreground">{trendLabel}</dt>
-				<dd class="text-right">
-					{activePoint.trend === null ? '—' : `${Math.round(activePoint.trend)}%`}
-				</dd>
-				<dt class="pl-3.5 text-muted-foreground">{m.chart_asleep()}</dt>
-				<dd class="text-right">
-					{activePoint.asleep === null ? '—' : formatHours(activePoint.asleep)}
-				</dd>
-				<dt class="flex items-center gap-1.5 text-muted-foreground">
-					<span class="size-2 rounded-sm" style:background={CHART_COLORS.volume}></span>
-					{m.chart_workouts()}
-				</dt>
-				<dd class="text-right">{activePoint.workouts}</dd>
-				<dt class="pl-3.5 text-muted-foreground">{m.chart_volume_short()}</dt>
-				<dd class="text-right">{formatNumber(activePoint.volume)} kg</dd>
-			</dl>
-		</div>
-	{/if}
+		{#if activePoint}
+			<!-- The readout straddles the horizon too: the day above, that night below. -->
+			<div
+				class="pointer-events-none absolute z-10 w-[200px] overflow-hidden rounded-(--radius-control) text-sm shadow-lift"
+				style:left="{readoutLeft}px"
+				style:top="{DAY - 82}px"
+			>
+				<div class="bg-day px-3 pt-2.5 pb-2">
+					<p class="mb-1 font-medium">{pointLabel(activePoint)}</p>
+					<dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+						<dt class="flex items-center gap-1.5 text-ink-3">
+							<span class="size-2" style:background={CHART_COLORS.volume}></span>
+							{m.chart_workouts()}
+						</dt>
+						<dd class="text-right">{activePoint.workouts}</dd>
+						<dt class="pl-3.5 text-ink-3">{m.chart_volume_short()}</dt>
+						<dd class="text-right">{formatNumber(activePoint.volume)} kg</dd>
+					</dl>
+				</div>
+				<div class="bg-night-2 px-3 pt-2 pb-2.5 text-moon">
+					<dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5">
+						<dt class="flex items-center gap-1.5 text-moon-2">
+							<span class="size-2" style:background={CHART_COLORS.quality}></span>
+							{m.quality()}
+						</dt>
+						<dd class="text-right">
+							{activePoint.quality === null
+								? m.chart_not_tracked()
+								: `${Math.round(activePoint.quality)}%`}
+						</dd>
+						<dt class="pl-3.5 text-moon-2">{trendLabel}</dt>
+						<dd class="text-right">
+							{activePoint.trend === null
+								? m.chart_not_tracked()
+								: `${Math.round(activePoint.trend)}%`}
+						</dd>
+						<dt class="pl-3.5 text-moon-2">{m.chart_asleep()}</dt>
+						<dd class="text-right">
+							{activePoint.asleep === null
+								? m.chart_not_tracked()
+								: formatHours(activePoint.asleep)}
+						</dd>
+					</dl>
+				</div>
+			</div>
+		{/if}
+	</div>
 </div>

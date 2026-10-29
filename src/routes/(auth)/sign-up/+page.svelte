@@ -18,12 +18,12 @@
 </script>
 
 <svelte:head>
-	<title>{m.sign_up()} · {m.app_name()}</title>
+	<title>{m.sign_up()}: {m.app_name()}</title>
 </svelte:head>
 
-<Card.Root>
+<Card.Root class="shadow-lift">
 	<Card.Header>
-		<Card.Title>{m.auth_sign_up_title()}</Card.Title>
+		<Card.Title class="text-xl">{m.auth_sign_up_title()}</Card.Title>
 		<Card.Description>{m.auth_sign_up_description()}</Card.Description>
 	</Card.Header>
 	<Card.Content>
@@ -98,7 +98,7 @@
 		{m.auth_have_account()}
 		<a
 			href={resolve('sign-in')}
-			class="font-medium text-foreground underline-offset-4 hover:underline"
+			class="font-medium text-foreground underline decoration-rule-2 underline-offset-4 hover:decoration-sun"
 		>
 			{m.sign_in()}
 		</a>

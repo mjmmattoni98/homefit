@@ -10,19 +10,26 @@
 		color: string;
 	} = $props();
 
-	const WIDTH = 100;
-	const HEIGHT = 28;
+	// Drawn at the cell's measured width, so bars keep square ends and the latest point stays round.
+	const HEIGHT = 32;
+	const INSET = 3;
+	const MAX_BAR = 6;
 
+	let width = $state(0);
+
+	const present = $derived(values.filter((value): value is number => value !== null));
+	const latest = $derived(values.findLastIndex((value) => value !== null));
 	const scale = $derived.by(() => {
-		const present = values.filter((value): value is number => value !== null);
 		const min = kind === 'bars' ? 0 : Math.min(...present);
 		const max = Math.max(...present);
-		return { min, span: max - min || 1, empty: present.length === 0 };
+		return { min, span: max - min || 1 };
 	});
 
+	const plotWidth = $derived(Math.max(0, width - INSET * 2));
 	const x = (index: number) =>
-		values.length < 2 ? WIDTH / 2 : (index / (values.length - 1)) * WIDTH;
-	const y = (value: number) => HEIGHT - 2 - ((value - scale.min) / scale.span) * (HEIGHT - 4);
+		INSET + (values.length < 2 ? plotWidth / 2 : (index / (values.length - 1)) * plotWidth);
+	const y = (value: number) =>
+		HEIGHT - INSET - ((value - scale.min) / scale.span) * (HEIGHT - INSET * 2);
 
 	const path = $derived(
 		values
@@ -30,39 +37,48 @@
 			.map((point, index) => `${index === 0 ? 'M' : 'L'}${point}`)
 			.join(' ')
 	);
-	const barWidth = $derived(Math.max(0.6, (WIDTH / Math.max(1, values.length)) * 0.65));
+	const slot = $derived(width / Math.max(1, values.length));
+	const barWidth = $derived(Math.max(1, Math.min(MAX_BAR, slot * 0.6)));
 </script>
 
-<!-- Stretched to the cell's width; the stroke keeps its thickness. -->
-<svg
-	viewBox="0 0 {WIDTH} {HEIGHT}"
-	preserveAspectRatio="none"
-	class="h-7 w-full overflow-visible"
-	aria-hidden="true"
->
-	{#if !scale.empty}
-		{#if kind === 'line'}
-			<path
-				d={path}
-				fill="none"
-				stroke={color}
-				stroke-width="1.5"
-				stroke-linejoin="round"
-				vector-effect="non-scaling-stroke"
-			/>
-		{:else}
-			{#each values as value, index (index)}
-				{#if value}
-					<rect
-						x={(index + 0.5) * (WIDTH / values.length) - barWidth / 2}
-						y={y(value)}
-						width={barWidth}
-						height={HEIGHT - 2 - y(value)}
-						fill={color}
-						opacity="0.8"
-					/>
+<div class="h-8 w-full" bind:clientWidth={width} aria-hidden="true">
+	{#if width > 0 && present.length > 0}
+		<svg {width} height={HEIGHT} class="block overflow-visible">
+			{#if kind === 'line'}
+				<path
+					d={path}
+					fill="none"
+					style:stroke={color}
+					stroke-width="1.5"
+					stroke-linejoin="round"
+					stroke-linecap="round"
+				/>
+				{#if latest >= 0}
+					<circle cx={x(latest)} cy={y(values[latest] ?? 0)} r="2.5" style:fill={color} />
 				{/if}
-			{/each}
-		{/if}
+			{:else}
+				<!-- The zero line, in the series' own colour so it reads on the day and on the night. -->
+				<line
+					x1={0}
+					x2={width}
+					y1={HEIGHT - INSET}
+					y2={HEIGHT - INSET}
+					style:stroke={color}
+					stroke-opacity="0.35"
+				/>
+				{#each values as value, index (index)}
+					{#if value}
+						<rect
+							x={(index + 0.5) * slot - barWidth / 2}
+							y={y(value)}
+							width={barWidth}
+							height={HEIGHT - INSET - y(value)}
+							style:fill={color}
+							opacity={index === latest ? 1 : 0.5}
+						/>
+					{/if}
+				{/each}
+			{/if}
+		</svg>
 	{/if}
-</svg>
+</div>

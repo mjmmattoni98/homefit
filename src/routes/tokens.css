@@ -1,0 +1,137 @@
+/* Day and night. The day ground carries training, the night field carries sleep, and the horizon
+ * between them is the one line every screen is built on. Colours, faces, sizes and radii live in
+ * @theme so each is a Tailwind utility (bg-night, text-moon, bg-sun). --color-accent and
+ * --color-muted are left to shadcn, which already owns those utility names. */
+@theme static {
+	/* The day: a clear, cool ground for training, forms and tables. */
+	--color-day: oklch(97.5% 0.004 250);
+	--color-day-2: oklch(94.6% 0.006 252);
+	--color-day-3: oklch(91.4% 0.008 255);
+	--color-ink: oklch(20% 0.03 265);
+	--color-ink-2: oklch(34% 0.03 265);
+	--color-ink-3: oklch(48% 0.02 265);
+	--color-rule: oklch(88.5% 0.008 258);
+	--color-rule-2: oklch(80% 0.012 260);
+	--color-field-edge: oklch(60% 0.02 265);
+
+	/* The night: the field sleep is drawn on, with moonlight for its type and marks. */
+	--color-night: oklch(24% 0.06 270);
+	--color-night-2: oklch(29% 0.065 270);
+	--color-night-rule: oklch(38% 0.06 270);
+	--color-moon: oklch(95% 0.015 255);
+	--color-moon-2: oklch(80% 0.04 260);
+	--color-sleep: oklch(78% 0.09 262);
+	--color-sleep-dim: oklch(56% 0.07 266);
+
+	/* The sun: the one signal. Training on the charts, the current page, focus. */
+	--color-sun: oklch(60% 0.19 42);
+	--color-focus: oklch(60% 0.2 42);
+
+	/* The primary control is the night on the day ground, and the moon in dark mode. */
+	--color-board: oklch(24% 0.06 270);
+	--color-board-ink: oklch(97.5% 0.004 250);
+
+	--color-error: oklch(50% 0.19 25);
+	--color-success: oklch(50% 0.12 155);
+	--color-scrim: oklch(16% 0.05 270 / 0.5);
+
+	--font-sans: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
+
+	/* The app scale, 1.2 apart. Figures and heads take the condensed width of the same family. */
+	--text-xs: 0.75rem;
+	--text-xs--line-height: 1.4;
+	--text-sm: 0.875rem;
+	--text-sm--line-height: 1.45;
+	--text-base: 1rem;
+	--text-base--line-height: 1.5;
+	--text-lg: 1.2rem;
+	--text-lg--line-height: 1.35;
+	--text-xl: 1.44rem;
+	--text-xl--line-height: 1.2;
+	--text-2xl: 1.728rem;
+	--text-2xl--line-height: 1.15;
+	--text-3xl: 2.074rem;
+	--text-3xl--line-height: 1.1;
+	--text-4xl: 2.488rem;
+	--text-4xl--line-height: 1;
+	--text-5xl: 2.986rem;
+	--text-5xl--line-height: 1;
+
+	--radius-control: 4px;
+
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+:root {
+	color-scheme: light;
+	--stretch-head: 78%;
+	--stretch-figure: 68%;
+	--weight-head: 700;
+	--weight-figure: 750;
+	--shadow-lift: 0 10px 30px -12px oklch(24% 0.06 270 / 0.28), 0 0 0 1px oklch(24% 0.06 270 / 0.1);
+
+	--dur-micro: 120ms;
+	--dur-short: 200ms;
+
+	--container: 1360px;
+	--bar-height: 56px;
+}
+
+/* Dark is derived, never inverted. The day turns to dusk, the night deepens below it, and the
+ * hues hold. mode-watcher sets the class. */
+.dark {
+	color-scheme: dark;
+	--color-day: oklch(20.5% 0.022 265);
+	--color-day-2: oklch(24% 0.025 265);
+	--color-day-3: oklch(27.5% 0.027 265);
+	--color-ink: oklch(94% 0.012 255);
+	--color-ink-2: oklch(84% 0.016 258);
+	--color-ink-3: oklch(72% 0.02 260);
+	--color-rule: oklch(31% 0.022 265);
+	--color-rule-2: oklch(37% 0.025 265);
+	--color-field-edge: oklch(52% 0.022 262);
+
+	--color-night: oklch(13.5% 0.04 270);
+	--color-night-2: oklch(17.5% 0.045 270);
+	--color-night-rule: oklch(30% 0.05 270);
+	--color-moon: oklch(94% 0.015 255);
+	--color-moon-2: oklch(76% 0.04 260);
+	--color-sleep: oklch(76% 0.08 262);
+	--color-sleep-dim: oklch(50% 0.06 266);
+
+	--color-sun: oklch(72% 0.16 45);
+	--color-focus: oklch(72% 0.17 45);
+
+	--color-board: oklch(92% 0.015 255);
+	--color-board-ink: oklch(20.5% 0.022 265);
+
+	--color-error: oklch(70% 0.15 25);
+	--color-success: oklch(72% 0.13 155);
+	--color-scrim: oklch(8% 0.03 270 / 0.66);
+
+	--shadow-lift: 0 0 0 1px oklch(37% 0.025 265);
+}
+
+/* A raised surface (menus, dialogs, the chart readout) reads its shadow at run time, so dark mode
+ * can swap it for a hairline; a shadow in @theme would be inlined at build time. */
+@utility shadow-lift {
+	--tw-shadow: var(--shadow-lift);
+	box-shadow:
+		var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+		var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+/* The condensed cuts of Archivo: one for heads, a narrower and heavier one for figures. */
+@utility font-head {
+	font-stretch: var(--stretch-head);
+	font-weight: var(--weight-head);
+	letter-spacing: -0.005em;
+}
+@utility font-figure {
+	font-stretch: var(--stretch-figure);
+	font-weight: var(--weight-figure);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0;
+}

@@ -8,17 +8,19 @@
 
 	// Bars are scaled to the largest difference, but never so far that small ones look dramatic.
 	const scale = $derived(Math.max(5, ...factors.map((factor) => Math.abs(factor.difference ?? 0))));
-	const COLUMNS = 'grid-cols-[minmax(0,1fr)_6rem_3.5rem] sm:grid-cols-[minmax(0,1fr)_9rem_3.5rem]';
+	const COLUMNS = 'grid-cols-[minmax(0,1fr)_6rem_3.5rem] sm:grid-cols-[minmax(0,1fr)_10rem_3.5rem]';
 </script>
 
-<section class="rounded-lg border bg-card p-4" aria-labelledby="sleep-factors-title">
-	<h2 id="sleep-factors-title" class="font-semibold tracking-tight">{m.factors_title()}</h2>
-	<p class="text-xs text-muted-foreground">{description}</p>
+<!-- A piece of the night field: every factor here is measured on the nights. -->
+<section
+	class="min-w-0 bg-night px-5 pt-6 pb-5 text-moon sm:px-7"
+	aria-labelledby="sleep-factors-title"
+>
+	<h2 id="sleep-factors-title" class="text-2xl">{m.factors_title()}</h2>
+	<p class="mt-2 text-sm text-moon-2">{description}</p>
+
 	<div
-		class={cn(
-			'mt-3 grid gap-3 border-b pb-1.5 text-[11px] text-muted-foreground uppercase',
-			COLUMNS
-		)}
+		class={cn('mt-6 grid gap-3 border-b border-night-rule pb-2 text-sm text-moon-2', COLUMNS)}
 		aria-hidden="true"
 	>
 		<span>{m.factors_col_factor()}</span>
@@ -27,13 +29,13 @@
 		</span>
 		<span class="text-right">{m.factors_col_difference()}</span>
 	</div>
-	<ul class="divide-y">
+	<ul class="divide-y divide-night-rule">
 		{#each factors as factor (factor.note ?? '')}
 			{@const width = ((Math.abs(factor.difference ?? 0) / scale) * 50).toFixed(1)}
-			<li class={cn('grid items-center gap-3 py-2', COLUMNS)}>
+			<li class={cn('grid items-center gap-3 py-3', COLUMNS)}>
 				<div class="min-w-0">
-					<p class="truncate text-sm font-medium">{factor.note ?? m.factor_trained()}</p>
-					<p class="text-xs text-muted-foreground tabular-nums">
+					<p class="truncate font-medium">{factor.note ?? m.factor_trained()}</p>
+					<p class="text-sm text-moon-2">
 						{m.factor_meta({
 							nights: m.nights_count({ count: factor.nights }),
 							average: Math.round(factor.average)
@@ -42,17 +44,10 @@
 				</div>
 				<!-- Diverging from the centre: worse to the left, better to the right. -->
 				<div class="relative h-3" aria-hidden="true">
-					<span class="absolute inset-y-0 left-1/2 w-px bg-border"></span>
+					<span class="absolute -inset-y-1.5 left-1/2 w-px bg-moon-2/60"></span>
 					{#if factor.difference !== null}
 						<span
-							class={cn(
-								'absolute inset-y-0 rounded-sm',
-								!factor.clear
-									? 'bg-muted-foreground/30'
-									: factor.difference > 0
-										? 'bg-emerald-500'
-										: 'bg-red-500'
-							)}
+							class={cn('absolute inset-y-0', factor.clear ? 'bg-sleep' : 'bg-moon-2/40')}
 							style:left={factor.difference > 0 ? '50%' : undefined}
 							style:right={factor.difference < 0 ? '50%' : undefined}
 							style:width="{width}%"
@@ -61,18 +56,18 @@
 				</div>
 				<span
 					class={cn(
-						'text-right text-sm font-medium tabular-nums',
-						factor.difference === null || !factor.clear
-							? 'text-muted-foreground'
-							: factor.difference > 0
-								? 'text-emerald-700 dark:text-emerald-400'
-								: 'text-red-700 dark:text-red-400'
+						'text-right',
+						factor.difference === null || !factor.clear ? 'text-moon-2' : 'font-semibold text-moon'
 					)}
 				>
-					{factor.difference === null ? '—' : formatSigned(factor.difference, 1)}
+					{#if factor.difference === null}
+						<span class="sr-only">{m.no_data_in_range()}</span>
+					{:else}
+						{formatSigned(factor.difference, 1)}
+					{/if}
 				</span>
 			</li>
 		{/each}
 	</ul>
-	<p class="mt-2 text-xs text-muted-foreground">{m.notes_impact_footnote()}</p>
+	<p class="mt-4 text-sm text-moon-2">{m.notes_impact_footnote()}</p>
 </section>

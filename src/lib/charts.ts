@@ -3,13 +3,17 @@
  */
 import { formatDate, formatDateLong, formatMonthAxis } from '#lib/format.js';
 
-/** Explicit palette so charts don't fall back to the grayscale theme vars. */
+/**
+ * Chart colours as theme variables, so they follow light and dark mode. Training is the sun on the
+ * day ground; sleep is moonlight on the night field. Use them through `style:` (or a chart
+ * config), not as SVG presentation attributes.
+ */
 export const CHART_COLORS = {
-	quality: '#6366f1', // indigo
-	asleep: '#10b981', // emerald
-	inBed: '#94a3b8', // slate
-	volume: '#f59e0b', // amber
-	weight: '#8b5cf6' // violet
+	quality: 'var(--color-sleep)',
+	asleep: 'var(--color-sleep)',
+	inBed: 'var(--color-sleep-dim)',
+	volume: 'var(--color-sun)',
+	weight: 'var(--color-sun)'
 } as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;

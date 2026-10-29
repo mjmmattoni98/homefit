@@ -1,0 +1,60 @@
+/* What the Floor already decided. Imported into the base layer, so every utility still wins. */
+html,
+body {
+	overflow-x: clip;
+}
+html {
+	scrollbar-color: var(--color-rule-2) var(--color-day);
+	scroll-padding-top: calc(var(--bar-height) + 24px);
+}
+body {
+	background: var(--color-day);
+	color: var(--color-ink);
+	font-family: var(--font-sans);
+	font-size: var(--text-base);
+	line-height: 1.5;
+	font-synthesis: none;
+	font-variant-numeric: tabular-nums;
+	-webkit-font-smoothing: antialiased;
+	caret-color: var(--color-sun);
+}
+.dark body {
+	font-weight: 350;
+}
+::selection {
+	background: color-mix(in oklab, var(--color-sun) 28%, transparent);
+	color: var(--color-ink);
+}
+:focus-visible {
+	outline: 2px solid var(--color-focus);
+	outline-offset: 2px;
+}
+a {
+	color: inherit;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 0.2em;
+}
+h1,
+h2,
+h3 {
+	font-stretch: var(--stretch-head);
+	font-weight: var(--weight-head);
+	letter-spacing: -0.005em;
+	line-height: 1.1;
+	overflow-wrap: break-word;
+	min-width: 0;
+	text-wrap: balance;
+}
+p {
+	text-wrap: pretty;
+}
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}

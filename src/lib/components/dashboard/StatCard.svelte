@@ -1,58 +1,62 @@
 <script lang="ts">
-	import * as Card from '#lib/components/ui/card/index.js';
-	import { Badge } from '#lib/components/ui/badge/index.js';
+	import Measure from '#lib/components/Measure.svelte';
 	import { formatNumber } from '#lib/format.js';
-	import TrendingDownIcon from '@lucide/svelte/icons/trending-down';
-	import TrendingUpIcon from '@lucide/svelte/icons/trending-up';
-	import type { Component } from 'svelte';
+	import { cn } from '#lib/utils.js';
+	import ArrowDownRightIcon from '@lucide/svelte/icons/arrow-down-right';
+	import ArrowUpRightIcon from '@lucide/svelte/icons/arrow-up-right';
 
+	// One lead figure: its label, the figure in the condensed cut, then what it refers to. No box
+	// and no icon. It renders a term and its details, so place several inside one `<dl>`.
 	let {
 		title,
 		value,
 		subtitle,
-		icon: Icon,
 		change = null,
-		changeLabel
+		changeLabel,
+		class: className
 	}: {
 		title: string;
 		value: string;
 		subtitle?: string;
-		icon?: Component;
 		/** Relative change against the previous period (0.05 = 5 % more). */
 		change?: number | null;
 		/** What the change compares against, e.g. "vs previous 30 days". */
 		changeLabel?: string;
+		class?: string;
 	} = $props();
 
 	const percent = $derived(change === null ? null : Math.round(change * 100));
 </script>
 
-<Card.Root>
-	<Card.Header class="flex flex-row items-center justify-between space-y-0 pb-2">
-		<Card.Title class="text-sm font-medium text-muted-foreground">{title}</Card.Title>
-		{#if Icon}
-			<Icon class="size-4 text-muted-foreground" />
-		{/if}
-	</Card.Header>
-	<Card.Content class="flex items-end justify-between gap-3">
-		<div class="min-w-0">
-			<div class="text-2xl font-bold">{value}</div>
-			{#if subtitle}
-				<p class="text-xs text-muted-foreground">{subtitle}</p>
-			{/if}
-		</div>
+<div class={cn('flex min-w-0 flex-col gap-1', className)}>
+	<dt class="text-sm text-ink-3">{title}</dt>
+	<dd class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+		<Measure
+			{value}
+			class="text-4xl font-figure sm:text-5xl"
+			unitClass="ml-[0.2em] text-[0.45em] font-medium text-ink-3"
+		/>
 		{#if percent !== null}
-			<Badge variant="outline" class="shrink-0" title={changeLabel}>
+			<span
+				class={cn(
+					'inline-flex shrink-0 items-center gap-0.5 text-sm',
+					percent === 0 ? 'text-ink-3' : 'text-ink-2'
+				)}
+				title={changeLabel}
+			>
 				{#if percent > 0}
-					<TrendingUpIcon aria-hidden="true" />
+					<ArrowUpRightIcon class="size-3.5" aria-hidden="true" />
 				{:else if percent < 0}
-					<TrendingDownIcon aria-hidden="true" />
+					<ArrowDownRightIcon class="size-3.5" aria-hidden="true" />
 				{/if}
 				{percent > 0 ? '+' : percent < 0 ? '−' : ''}{formatNumber(Math.abs(percent))}%
 				{#if changeLabel}
 					<span class="sr-only">{changeLabel}</span>
 				{/if}
-			</Badge>
+			</span>
 		{/if}
-	</Card.Content>
-</Card.Root>
+	</dd>
+	{#if subtitle}
+		<dd class="truncate text-sm text-ink-3">{subtitle}</dd>
+	{/if}
+</div>

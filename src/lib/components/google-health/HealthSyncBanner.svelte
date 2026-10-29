@@ -3,15 +3,11 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { getConnectionStatus } from '#lib/remote/health.remote.js';
-	import * as Alert from '#lib/components/ui/alert/index.js';
-	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
-	import { buttonVariants } from '#lib/components/ui/button/index.js';
 	import * as m from '#lib/paraglide/messages.js';
 	import { formatDateLong } from '#lib/format.js';
 	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
-	import InfoIcon from '@lucide/svelte/icons/info';
 
 	// Background jobs and other tabs change what these pages show. Poll the cheap status query, and
 	// refresh every health query when the connection appears, disappears, changes status or syncs.
@@ -48,37 +44,43 @@
 		if (seen !== undefined && current !== seen) void refreshAll();
 		seen = current;
 	});
+
+	// One quiet line under the page header. States that need the reader are told apart by their
+	// wording, a mark and an action, never by a tinted box.
+	const LINE = 'flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-rule py-2.5 text-sm';
+	const ACTION =
+		'ml-auto font-medium whitespace-nowrap underline decoration-rule-2 underline-offset-4 transition-colors duration-(--dur-micro) hover:decoration-sun';
 </script>
+
+{#snippet warningMark()}
+	<AlertCircleIcon class="size-4 shrink-0 self-center text-ink-2" aria-hidden="true" />
+{/snippet}
 
 {#if !page.data.googleHealthEnabled}
 	<!-- The optional integration is not configured on this server. -->
 {:else if isLoading}
-	<Skeleton class="h-14 w-full" />
+	<div class="border-b border-rule py-2.5" aria-busy="true">
+		<Skeleton class="h-5 w-80 max-w-full" />
+	</div>
 {:else if connectionQuery.error !== undefined}
-	<Alert.Root variant="destructive">
-		<AlertCircleIcon aria-hidden="true" />
-		<Alert.Title>{m.health_query_error_title()}</Alert.Title>
-		<Alert.Description>{m.health_query_error_description()}</Alert.Description>
-	</Alert.Root>
+	<div class={LINE} role="alert">
+		{@render warningMark()}
+		<span class="font-medium">{m.health_query_error_title()}</span>
+		<span class="text-ink-3">{m.health_query_error_description()}</span>
+	</div>
 {:else if connection === null}
-	<Alert.Root>
-		<InfoIcon aria-hidden="true" />
-		<Alert.Title>{m.google_health_status_not_connected()}</Alert.Title>
-		<Alert.Description class="flex flex-wrap items-center justify-between gap-3">
-			<span>{m.google_health_not_connected_description()}</span>
-			<a href={resolve('/dashboard/import')} class={buttonVariants({ size: 'sm' })}>
-				{m.google_health_connect()}
-			</a>
-		</Alert.Description>
-	</Alert.Root>
+	<div class={LINE} role="status">
+		<span class="font-medium">{m.google_health_status_not_connected()}</span>
+		<span class="text-ink-3">{m.google_health_not_connected_description()}</span>
+		<a href={resolve('/dashboard/import')} class={ACTION}>{m.google_health_connect()}</a>
+	</div>
 {:else if connection !== undefined}
 	{#if connection.status === 'connecting' || connection.status === 'backfilling'}
-		<Alert.Root>
-			<InfoIcon aria-hidden="true" />
-			<Alert.Title>{m.google_health_importing_title()}</Alert.Title>
-			<Alert.Description class="flex flex-col gap-2">
-				<span>{m.google_health_importing_description()}</span>
-				<span id="health-sync-progress">
+		<div class={LINE} role="status">
+			<span class="font-medium">{m.google_health_importing_title()}</span>
+			<span class="text-ink-3">{m.google_health_importing_description()}</span>
+			<span class="ml-auto flex items-center gap-3 self-center">
+				<span id="health-sync-progress" class="whitespace-nowrap text-ink-2">
 					{m.google_health_progress({
 						completed: connection.backfillCompletedTypes,
 						total: connection.backfillTotalTypes
@@ -88,47 +90,36 @@
 					value={connection.backfillCompletedTypes}
 					max={Math.max(connection.backfillTotalTypes, 1)}
 					aria-labelledby="health-sync-progress"
+					class="w-28 rounded-none bg-rule"
 				/>
-			</Alert.Description>
-		</Alert.Root>
+			</span>
+		</div>
 	{:else if connection.status === 'delayed'}
-		<Alert.Root>
-			<InfoIcon aria-hidden="true" />
-			<Alert.Title>{m.google_health_delayed_title()}</Alert.Title>
-			<Alert.Description>{m.google_health_delayed_description()}</Alert.Description>
-		</Alert.Root>
+		<div class={LINE} role="status">
+			<span class="font-medium">{m.google_health_delayed_title()}</span>
+			<span class="text-ink-3">{m.google_health_delayed_description()}</span>
+		</div>
 	{:else if connection.status === 'action_required'}
-		<Alert.Root variant="destructive">
-			<AlertCircleIcon aria-hidden="true" />
-			<Alert.Title>{m.google_health_action_required_title()}</Alert.Title>
-			<Alert.Description class="flex flex-wrap items-center justify-between gap-3">
-				<span>{m.google_health_action_required_description()}</span>
-				<a
-					href={resolve('/dashboard/import')}
-					class={buttonVariants({ variant: 'outline', size: 'sm' })}
-				>
-					{m.google_health_review_access()}
-				</a>
-			</Alert.Description>
-		</Alert.Root>
+		<div class={LINE} role="alert">
+			{@render warningMark()}
+			<span class="font-medium">{m.google_health_action_required_title()}</span>
+			<span class="text-ink-3">{m.google_health_action_required_description()}</span>
+			<a href={resolve('/dashboard/import')} class={ACTION}>{m.google_health_review_access()}</a>
+		</div>
 	{:else if connection.status === 'disconnected'}
-		<Alert.Root>
-			<InfoIcon aria-hidden="true" />
-			<Alert.Title>{m.google_health_retained_title()}</Alert.Title>
-			<Alert.Description>{m.google_health_retained_description()}</Alert.Description>
-		</Alert.Root>
+		<div class={LINE} role="status">
+			<span class="font-medium">{m.google_health_retained_title()}</span>
+			<span class="text-ink-3">{m.google_health_retained_description()}</span>
+		</div>
 	{:else if connection.status === 'deleting'}
-		<Alert.Root>
-			<InfoIcon aria-hidden="true" />
-			<Alert.Title>{m.google_health_status_deleting()}</Alert.Title>
-			<Alert.Description>{m.google_health_deleting_description()}</Alert.Description>
-		</Alert.Root>
+		<div class={LINE} role="status">
+			<span class="font-medium">{m.google_health_status_deleting()}</span>
+			<span class="text-ink-3">{m.google_health_deleting_description()}</span>
+		</div>
 	{:else}
-		<div
-			class="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-		>
-			<Badge variant="secondary">{m.google_health_status_connected()}</Badge>
-			<span>
+		<div class={LINE}>
+			<span class="font-medium">{m.google_health_status_connected()}</span>
+			<span class="text-ink-3">
 				{connection.lastSuccessfulSyncAt === undefined
 					? m.health_sync_never()
 					: m.health_sync_active({ date: formatDateLong(connection.lastSuccessfulSyncAt) })}

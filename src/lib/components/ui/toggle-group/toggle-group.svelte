@@ -69,6 +69,8 @@ get along, so we shut typescript up by casting `value` to `never`.
 	style={`--gap: ${spacing}`}
 	class={cn(
 		'group/toggle-group flex w-fit flex-row items-center gap-[--spacing(var(--gap))] rounded-md data-[size=sm]:rounded-[min(var(--radius-md),8px)] data-vertical:flex-col data-vertical:items-stretch',
+		// The outline group is a row of tabs standing on a rule.
+		'data-[variant=outline]:rounded-none data-[variant=outline]:shadow-[inset_0_-1px_0_var(--color-rule)]',
 		className
 	)}
 	{...restProps}

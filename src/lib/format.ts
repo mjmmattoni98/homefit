@@ -81,3 +81,13 @@ export function sleepNightKey(wentToBedMs: number): string {
 	}
 	return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
+
+/**
+ * Splits a formatted measurement such as "126,868 kg" into its number and its unit, so the unit
+ * can be set apart. Values that are not one number followed by a unit ("1 h 30 min", "Recorded",
+ * "77%") come back whole, with no unit.
+ */
+export function splitUnit(value: string): { number: string; unit: string } {
+	const match = /^([\u2212+-]?\d[\d.,\s]*?)\s+([^\d\s][^\d]*)$/.exec(value);
+	return match ? { number: match[1], unit: match[2] } : { number: value, unit: '' };
+}

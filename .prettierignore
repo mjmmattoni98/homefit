@@ -21,3 +21,6 @@ src/lib/paraglide/
 .vscode/
 project.inlang/
 docs/superpowers/
+
+# Hallmark design-run records and screenshots
+.hallmark/

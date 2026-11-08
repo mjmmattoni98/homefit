@@ -17,6 +17,7 @@
 	import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard';
 	import DumbbellIcon from '@lucide/svelte/icons/dumbbell';
 	import HeartPulseIcon from '@lucide/svelte/icons/heart-pulse';
+	import TargetIcon from '@lucide/svelte/icons/target';
 	import UploadIcon from '@lucide/svelte/icons/upload';
 	import SearchIcon from '@lucide/svelte/icons/search';
 	import MenuIcon from '@lucide/svelte/icons/menu';
@@ -25,7 +26,12 @@
 	let { children } = $props();
 
 	type Section = {
-		href: '/dashboard' | '/dashboard/exercises' | '/dashboard/health' | '/dashboard/import';
+		href:
+			| '/dashboard'
+			| '/dashboard/today'
+			| '/dashboard/exercises'
+			| '/dashboard/health'
+			| '/dashboard/import';
 		label: string;
 		icon: Component;
 	};
@@ -39,6 +45,7 @@
 
 	const sections = $derived<Section[]>([
 		{ href: '/dashboard', label: m.nav_overview(), icon: LayoutDashboardIcon },
+		{ href: '/dashboard/today', label: m.nav_today(), icon: TargetIcon },
 		{ href: '/dashboard/exercises', label: m.nav_exercises(), icon: DumbbellIcon },
 		...(showHealth
 			? [{ href: '/dashboard/health' as const, label: m.nav_health(), icon: HeartPulseIcon }]

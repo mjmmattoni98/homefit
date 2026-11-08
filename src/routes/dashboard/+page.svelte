@@ -16,6 +16,7 @@
 	import TrainingReadiness from '#lib/components/dashboard/TrainingReadiness.svelte';
 	import WorkoutNights from '#lib/components/dashboard/WorkoutNights.svelte';
 	import WorkoutSheet from '#lib/components/dashboard/WorkoutSheet.svelte';
+	import TodayGoalsCard from '#lib/components/goals/TodayGoalsCard.svelte';
 	import { dayToDate } from '#lib/days.js';
 	import { formatDate } from '#lib/format.js';
 	import {
@@ -177,6 +178,11 @@
 
 <div class="pt-7">
 	<h1 class="text-4xl">{m.dashboard_title()}</h1>
+	{#if page.data.timeZoneKnown || browser}
+		<div class="mt-5">
+			<TodayGoalsCard />
+		</div>
+	{/if}
 </div>
 
 <!-- One period drives every figure below, so its tabs and dates stay in view while scrolling. -->

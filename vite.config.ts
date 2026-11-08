@@ -37,6 +37,7 @@ export default defineConfig({
 						'@lucide/svelte/icons/heart-pulse',
 						'@lucide/svelte/icons/info',
 						'@lucide/svelte/icons/check',
+						'@lucide/svelte/icons/undo-2',
 						'@lucide/svelte/icons/languages',
 						'@lucide/svelte/icons/log-out',
 						'@lucide/svelte/icons/moon',

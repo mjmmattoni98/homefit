@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
 	boolean,
+	check,
 	date,
 	doublePrecision,
 	index,
@@ -8,6 +9,7 @@ import {
 	jsonb,
 	pgTable,
 	primaryKey,
+	smallint,
 	text,
 	timestamp,
 	uniqueIndex,
@@ -22,6 +24,7 @@ import type {
 	SyncRunStatus,
 	SyncTrigger
 } from '../google-health/types';
+import type { GoalUnit } from '../../daily-goals';
 import { user } from './auth.schema';
 
 export * from './auth.schema';
@@ -110,6 +113,83 @@ export const workoutSet = pgTable(
 			table.exerciseTitle,
 			table.startTime
 		)
+	]
+);
+
+// ---------------------------------------------------------------------------
+// Daily home goals
+// ---------------------------------------------------------------------------
+
+const localDay = (name: string) => date(name, { mode: 'string' });
+
+export const dailyGoal = pgTable(
+	'daily_goal',
+	{
+		id: uuid('id').primaryKey().defaultRandom(),
+		userId: ownerId(),
+		name: text('name').notNull(),
+		unit: text('unit').$type<GoalUnit>().notNull(),
+		sortOrder: integer('sort_order').notNull(),
+		// The goal stops counting from this local day onward; earlier days keep it.
+		archivedOn: localDay('archived_on'),
+		createdAt: instant('created_at').notNull().defaultNow()
+	},
+	(table) => [
+		index('daily_goal_user_order_idx').on(table.userId, table.sortOrder),
+		check('daily_goal_unit_check', sql`${table.unit} in ('minutes', 'reps', 'seconds')`)
+	]
+);
+
+const goalId = () =>
+	uuid('goal_id')
+		.notNull()
+		.references(() => dailyGoal.id, { onDelete: 'cascade' });
+
+// Targets are versioned by day so changing one never rewrites how past days are judged.
+export const dailyGoalTarget = pgTable(
+	'daily_goal_target',
+	{
+		goalId: goalId(),
+		effectiveFrom: localDay('effective_from').notNull(),
+		target: integer('target').notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.goalId, table.effectiveFrom] }),
+		check('daily_goal_target_range', sql`${table.target} between 1 and 10000`)
+	]
+);
+
+export const dailyGoalSchedule = pgTable(
+	'daily_goal_schedule',
+	{
+		userId: ownerId(),
+		effectiveFrom: localDay('effective_from').notNull(),
+		// Bit 0 = Monday … bit 6 = Sunday.
+		weekdays: smallint('weekdays').notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.userId, table.effectiveFrom] }),
+		check('daily_goal_schedule_weekdays', sql`${table.weekdays} between 1 and 127`)
+	]
+);
+
+export const dailyGoalEntry = pgTable(
+	'daily_goal_entry',
+	{
+		id: uuid('id').primaryKey().defaultRandom(),
+		goalId: goalId(),
+		userId: ownerId(),
+		day: localDay('day').notNull(),
+		amount: integer('amount').notNull(),
+		// clock_timestamp() differs per statement, so undo always finds the newest entry.
+		createdAt: instant('created_at')
+			.notNull()
+			.default(sql`clock_timestamp()`)
+	},
+	(table) => [
+		index('daily_goal_entry_user_day_idx').on(table.userId, table.day),
+		index('daily_goal_entry_goal_day_created_idx').on(table.goalId, table.day, table.createdAt),
+		check('daily_goal_entry_amount_range', sql`${table.amount} between 1 and 10000`)
 	]
 );
 

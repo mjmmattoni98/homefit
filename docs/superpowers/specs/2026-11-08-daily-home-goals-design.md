@@ -111,9 +111,9 @@ These rules live in a pure module, `src/lib/daily-goals.ts`, with no database ac
 
 ## Remote Functions
 
-`src/lib/remote/goals.remote.ts`. `today` is always computed on the server from the time-zone cookie through `resolveTimeZone`, matching `imports.remote.ts`. Inputs are validated with valibot: dates match `YYYY-MM-DD` and are real calendar dates, amounts and targets are integers from 1 to 10,000, names are 1–100 characters after trimming, the weekday mask is from 1 to 127, and history windows are from 1 to 366 days.
+`src/lib/remote/goals.remote.ts`. `today` is always computed on the server from the time-zone cookie through `resolveTimeZone`, matching `imports.remote.ts`. Inputs are validated with valibot: dates match `YYYY-MM-DD` and are real calendar dates, amounts and targets are integers from 1 to 10,000, names are 1–100 characters after trimming, and the weekday mask is from 1 to 127.
 
-- Queries: `getGoalDay(day)`, `getGoalHistory(days)`, `getGoals()`.
+- Queries: `getGoalDay(day | null)`, where `null` means the server's today; `getGoalHistory()`, which always covers the last 84 days; and `getGoals()`.
 - Commands: `createGoal`, `updateGoal`, `reorderGoals`, `archiveGoal`, `setSchedule`, `addEntry`, `undoLastEntry`. Each command refreshes the queries it affects on the client after it succeeds.
 
 ## User Interface
@@ -121,7 +121,7 @@ These rules live in a pure module, `src/lib/daily-goals.ts`, with no database ac
 ### Today page: `/dashboard/today`
 
 - Listed in the dashboard nav right after Overview, with a command-palette entry, using the Lucide `target` icon.
-- **Header:** the formatted date, ‹ › buttons to move between days (› is disabled on today, and the day is kept in a `?day=` search parameter), a day-status badge, and the current streak.
+- **Header:** the formatted date, ‹ › buttons to move between days (› is disabled on today; a past day lives at `/dashboard/today/YYYY-MM-DD`, route `src/routes/dashboard/today/[[day]]`, because the repo's lint rule only accepts links built with `resolve()`), a day-status badge, and the current streak.
 - **Goal cards**, one per active goal: the name, a progress bar with "24 / 60 min", a check mark when met, preset buttons, a numeric custom-amount input with an add button, and an undo button that is disabled when the goal has no entries that day. Presets:
   - minutes: +5, +10, +15
   - reps: +5, +10, +20
@@ -132,7 +132,7 @@ These rules live in a pure module, `src/lib/daily-goals.ts`, with no database ac
 
 ### Manage goals sheet
 
-Opened from a "Manage goals" button on the Today page. It lists the goals with editable name and target fields, up/down buttons for ordering, and an archive button that asks for confirmation through `alert-dialog`. It also has an "Add goal" row (name, unit, target) and weekday chips through `toggle-group`, of which at least one must be selected.
+Opened from a "Manage goals" button on the Today page. It lists the goals with editable name and target fields, up/down buttons for ordering, and an archive button that asks for confirmation through `alert-dialog`. It also has an "Add goal" row (name, unit, target) and weekday chips (plain `aria-pressed` buttons, so the control stays fully controlled), of which at least one must be selected.
 
 ### Overview card
 
@@ -140,7 +140,7 @@ The `/dashboard` overview gets a compact "Today's goals" card showing "2 / 3 don
 
 ### Conventions
 
-The UI uses shadcn-svelte components from `src/lib/components/ui` (card, progress, button, input, sheet, toggle-group, alert-dialog), the existing design tokens, and Paraglide messages added to both `en` and `es`. Svelte code is checked with the Svelte MCP autofixer.
+The UI uses shadcn-svelte components from `src/lib/components/ui` (progress, button, input, sheet, alert-dialog, empty, skeleton), the existing design tokens, and Paraglide messages added to both `en` and `es`. Svelte code is checked with the Svelte MCP autofixer.
 
 ## Error Handling
 

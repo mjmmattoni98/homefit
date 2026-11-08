@@ -1,13 +1,19 @@
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lte, sql } from 'drizzle-orm';
+import { dayFromNumber, dayNumber } from '#lib/days.js';
 import {
+	evaluateDay,
+	firstGoalDay,
 	scheduleOn,
+	summarizeHistory,
 	targetOn,
+	type DayStatus,
+	type GoalHistory,
 	type GoalRules,
 	type GoalUnit,
 	type NewGoal,
 	type ScheduleVersion
 } from '#lib/daily-goals.js';
-import { dailyGoal, dailyGoalSchedule, dailyGoalTarget } from './db/schema';
+import { dailyGoal, dailyGoalEntry, dailyGoalSchedule, dailyGoalTarget } from './db/schema';
 import type { Database, Executor } from './db/types';
 
 export type DailyGoalErrorCode = 'not-found' | 'future-day' | 'inactive-goal' | 'invalid-order';
@@ -206,4 +212,161 @@ export async function listGoals(
 		}
 	}
 	return { goals: items, weekdays: scheduleOn(schedule, today) };
+}
+
+export interface GoalEntryView {
+	id: string;
+	amount: number;
+	/** Milliseconds since the epoch. */
+	createdAt: number;
+}
+
+export interface GoalProgress {
+	id: string;
+	name: string;
+	unit: GoalUnit;
+	/** The target in effect on the day shown. */
+	target: number;
+	total: number;
+	met: boolean;
+	/** That day's entries, oldest first. */
+	entries: GoalEntryView[];
+}
+
+export interface GoalDay {
+	day: string;
+	today: string;
+	scheduled: boolean;
+	status: DayStatus;
+	/** Goals that applied on the day, in display order. */
+	goals: GoalProgress[];
+}
+
+export async function addEntry(
+	db: Database,
+	userId: string,
+	today: string,
+	input: { goalId: string; day: string; amount: number }
+): Promise<void> {
+	if (input.day > today) throw new DailyGoalError('future-day', 'Cannot log a future day');
+	const goal = await requireGoal(db, userId, input.goalId);
+	const targets = await db
+		.select({ effectiveFrom: dailyGoalTarget.effectiveFrom, target: dailyGoalTarget.target })
+		.from(dailyGoalTarget)
+		.where(eq(dailyGoalTarget.goalId, goal.id));
+	if (targetOn({ id: goal.id, archivedOn: goal.archivedOn, targets }, input.day) === null) {
+		throw new DailyGoalError('inactive-goal', 'This goal does not apply on that day');
+	}
+	await db
+		.insert(dailyGoalEntry)
+		.values({ goalId: goal.id, userId, day: input.day, amount: input.amount });
+}
+
+/** Deletes the newest entry for the goal on the day; does nothing when there is none. */
+export async function undoLastEntry(
+	db: Database,
+	userId: string,
+	input: { goalId: string; day: string }
+): Promise<void> {
+	const [latest] = await db
+		.select({ id: dailyGoalEntry.id })
+		.from(dailyGoalEntry)
+		.where(
+			and(
+				eq(dailyGoalEntry.userId, userId),
+				eq(dailyGoalEntry.goalId, input.goalId),
+				eq(dailyGoalEntry.day, input.day)
+			)
+		)
+		.orderBy(desc(dailyGoalEntry.createdAt), desc(dailyGoalEntry.id))
+		.limit(1);
+	if (latest !== undefined) {
+		await db.delete(dailyGoalEntry).where(eq(dailyGoalEntry.id, latest.id));
+	}
+}
+
+export async function loadGoalDay(
+	db: Database,
+	userId: string,
+	day: string,
+	today: string
+): Promise<GoalDay> {
+	const { goals, schedule } = await loadRules(db, userId);
+	const entries = await db
+		.select({
+			id: dailyGoalEntry.id,
+			goalId: dailyGoalEntry.goalId,
+			amount: dailyGoalEntry.amount,
+			createdAt: dailyGoalEntry.createdAt
+		})
+		.from(dailyGoalEntry)
+		.where(and(eq(dailyGoalEntry.userId, userId), eq(dailyGoalEntry.day, day)))
+		.orderBy(asc(dailyGoalEntry.createdAt), asc(dailyGoalEntry.id));
+
+	const totals = new Map<string, number>();
+	for (const entry of entries) {
+		totals.set(entry.goalId, (totals.get(entry.goalId) ?? 0) + entry.amount);
+	}
+	const result = evaluateDay(goals, schedule, totals, day, today);
+	return {
+		day,
+		today,
+		scheduled: result.scheduled,
+		status: result.status,
+		goals: result.goals.map(({ goal, target, total, met }) => ({
+			id: goal.id,
+			name: goal.name,
+			unit: goal.unit,
+			target,
+			total,
+			met,
+			entries: entries
+				.filter((entry) => entry.goalId === goal.id)
+				.map((entry) => ({
+					id: entry.id,
+					amount: entry.amount,
+					createdAt: entry.createdAt.getTime()
+				}))
+		}))
+	};
+}
+
+export async function loadGoalHistory(
+	db: Database,
+	userId: string,
+	today: string,
+	days: number
+): Promise<GoalHistory> {
+	const { goals, schedule } = await loadRules(db, userId);
+	// Streaks may reach back past the window, to the first goal.
+	const windowStart = dayFromNumber(dayNumber(today) - days + 1);
+	const first = firstGoalDay(goals);
+	const from = first !== null && first < windowStart ? first : windowStart;
+
+	const rows = await db
+		.select({
+			day: dailyGoalEntry.day,
+			goalId: dailyGoalEntry.goalId,
+			total: sql<number>`sum(${dailyGoalEntry.amount})::int`
+		})
+		.from(dailyGoalEntry)
+		.where(
+			and(
+				eq(dailyGoalEntry.userId, userId),
+				gte(dailyGoalEntry.day, from),
+				lte(dailyGoalEntry.day, today)
+			)
+		)
+		.groupBy(dailyGoalEntry.day, dailyGoalEntry.goalId);
+
+	const totalsByDay = new Map<string, Map<string, number>>();
+	for (const row of rows) {
+		let totals = totalsByDay.get(row.day);
+		if (totals === undefined) {
+			totals = new Map();
+			totalsByDay.set(row.day, totals);
+		}
+		totals.set(row.goalId, row.total);
+	}
+	return summarizeHistory(goals, schedule, totalsByDay, today, days);
 }

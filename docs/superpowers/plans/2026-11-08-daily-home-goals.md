@@ -32,6 +32,15 @@ These came out of reading the code while planning. They are already reflected in
 - `getGoalDay(day: string | null)`: `null` means the server's today. `getGoalHistory()` takes no argument and always covers `HISTORY_DAYS`.
 - The weekday and unit pickers are plain `aria-pressed` buttons, not `toggle-group`, so they stay fully controlled. Otherwise the last selected day could be deselected.
 
+## Implementation notes
+
+Differences between this plan and what was built, found while implementing it:
+
+- **Routes.** `resolve()` accepts an optional-segment route only with a params object, and the ESLint rule `svelte/no-navigation-without-resolve` can't trace the helper the layout would need. So instead of one `[[day]]` route there are two plain routes, `src/routes/dashboard/today/+page.svelte` (today) and `src/routes/dashboard/today/[day]/+page.svelte` (with the `+page.ts` format guard). Both render `src/lib/components/goals/GoalDayView.svelte`, which takes `day: string | null`. Links use `resolve('/dashboard/today')` and `resolve('/dashboard/today/[day]', { day })`.
+- **Tasks 6 and 7 share a commit.** The Today page's `manageOpen` state is only used once the sheet exists, so the page and the settings sheet were committed together.
+- **Component tests.** In the installed `vitest-browser-svelte`, `render()` returns a promise; the goal card test awaits it before calling `rerender`.
+- **Sheet width.** The sheet uses `data-[side=right]:w-full data-[side=right]:sm:max-w-md`, because the base component's `data-[side=right]:w-3/4` otherwise wins on phones.
+
 ## File Structure
 
 | File | Responsibility |

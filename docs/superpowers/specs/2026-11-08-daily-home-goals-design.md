@@ -121,7 +121,7 @@ These rules live in a pure module, `src/lib/daily-goals.ts`, with no database ac
 ### Today page: `/dashboard/today`
 
 - Listed in the dashboard nav right after Overview, with a command-palette entry, using the Lucide `target` icon.
-- **Header:** the formatted date, ‹ › buttons to move between days (› is disabled on today; a past day lives at `/dashboard/today/YYYY-MM-DD`, route `src/routes/dashboard/today/[[day]]`, because the repo's lint rule only accepts links built with `resolve()`), a day-status badge, and the current streak.
+- **Header:** the formatted date, ‹ › buttons to move between days (› is disabled on today; today lives at `/dashboard/today` and a past day at `/dashboard/today/YYYY-MM-DD`, two routes rendering one `GoalDayView` component), a day-status badge, and the current streak.
 - **Goal cards**, one per active goal: the name, a progress bar with "24 / 60 min", a check mark when met, preset buttons, a numeric custom-amount input with an add button, and an undo button that is disabled when the goal has no entries that day. Presets:
   - minutes: +5, +10, +15
   - reps: +5, +10, +20

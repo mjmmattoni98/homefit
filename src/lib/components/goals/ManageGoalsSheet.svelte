@@ -56,7 +56,10 @@
 </script>
 
 <Sheet.Root bind:open>
-	<Sheet.Content side="right" class="w-full gap-0 overflow-y-auto bg-day sm:max-w-md">
+	<Sheet.Content
+		side="right"
+		class="gap-0 overflow-y-auto bg-day data-[side=right]:w-full data-[side=right]:sm:max-w-md"
+	>
 		<Sheet.Header class="border-b border-rule">
 			<Sheet.Title>{m.goals_manage()}</Sheet.Title>
 			<Sheet.Description>{m.goals_manage_desc()}</Sheet.Description>

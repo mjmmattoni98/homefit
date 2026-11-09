@@ -60,11 +60,52 @@ describe('parseHevyCsv', () => {
 		).toEqual([new Date(2026, 6, 17, 18, 35).getTime()]);
 	});
 
-	it('skips rows whose timestamps cannot be read', () => {
-		expect(
+	it('rejects rows whose timestamps cannot be read', () => {
+		expect(() =>
 			parseHevyCsv(
 				csv('"Back","2026-07-17 18:35","2026-07-17 19:37","","Curl",,"",0,"normal",10,8,,,')
 			)
-		).toEqual([]);
+		).toThrow(/row 2/i);
+	});
+});
+
+describe('Hevy invalid input', () => {
+	const row = [
+		'Back',
+		'17 jul 2026, 18:35',
+		'17 jul 2026, 19:37',
+		'',
+		'Curl',
+		'',
+		'',
+		'0',
+		'normal',
+		'10',
+		'8',
+		'',
+		'',
+		'8'
+	];
+	const line = (values: string[]) => values.map((value) => JSON.stringify(value)).join(',');
+
+	it.each([
+		[1, '31 feb 2026, 18:35'],
+		[1, '17 jul 2026, 25:35'],
+		[1, '17 jul 2026, 18:99'],
+		[1, '17 jul 2026, 18:35 garbage'],
+		[2, '17 jul 2026, 17:00'],
+		[4, ''],
+		[7, '-1'],
+		[7, '0.5'],
+		[9, '-10'],
+		[10, '-8'],
+		[10, '2.5'],
+		[10, 'invalid'],
+		[11, '-1'],
+		[12, '-120'],
+		[13, '11']
+	])('rejects invalid column %i value %s without partially accepting the file', (column, value) => {
+		const invalid = row.map((field, index) => (index === column ? String(value) : field));
+		expect(() => parseHevyCsv(csv(line(row), line(invalid)))).toThrow(/row 3/i);
 	});
 });

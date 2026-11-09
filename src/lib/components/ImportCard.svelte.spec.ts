@@ -40,3 +40,22 @@ describe('Sleep Cycle import feedback', () => {
 		}
 	);
 });
+
+describe('Hevy import feedback', () => {
+	it('rejects an impossible date before enabling import', async () => {
+		render(ImportCard, { title: 'Hevy', description: 'CSV', kind: 'hevy', icon: MoonIcon });
+		await userEvent.upload(
+			page.getByLabelText('Hevy'),
+			new File(
+				[
+					'title,start_time,end_time,exercise_title,set_index,weight_kg,reps\n' +
+						'Back,"31 feb 2026, 18:00","31 feb 2026, 19:00",Squat,0,60,8'
+				],
+				'hevy.csv',
+				{ type: 'text/csv' }
+			)
+		);
+		await expect.element(page.getByRole('alert')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Import', exact: true })).toBeDisabled();
+	});
+});

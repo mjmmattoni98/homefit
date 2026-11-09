@@ -23,7 +23,8 @@
 	import StatCard from '#lib/components/dashboard/StatCard.svelte';
 	import WeightChart from '#lib/components/dashboard/WeightChart.svelte';
 	import VolumeChart from '#lib/components/dashboard/VolumeChart.svelte';
-	import { formatDate, formatDateLong, formatHours, formatNumber } from '#lib/format.js';
+	import { formatDate, formatDateLong, formatNumber } from '#lib/format.js';
+	import { formatDuration } from '#lib/google-health/view.js';
 	import { cn } from '#lib/utils.js';
 	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
@@ -346,7 +347,7 @@
 					{:else}
 						<StatCard
 							title={m.ex_best_duration()}
-							value={formatHours(progression.longestDuration?.durationSeconds ?? 0)}
+							value={formatDuration(progression.longestDuration?.durationSeconds ?? 0)}
 							subtitle={progression.longestDuration &&
 								formatDateLong(progression.longestDuration.startTime)}
 						/>

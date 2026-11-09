@@ -33,6 +33,9 @@ export default defineConfig({
 				optimizeDeps: {
 					include: [
 						'@lucide/svelte/icons/alert-circle',
+						'@lucide/svelte/icons/chevrons-up-down',
+						'@lucide/svelte/icons/search',
+						'@lucide/svelte/icons/x',
 						'@lucide/svelte/icons/arrow-right',
 						'@lucide/svelte/icons/heart-pulse',
 						'@lucide/svelte/icons/info',

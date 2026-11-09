@@ -1,25 +1,8 @@
+import * as v from 'valibot';
+import { workoutSchema, type ParsedWorkout } from './hevy-schema';
 import { parseDelimited, toNumber } from './parse';
 
-export interface ParsedSet {
-	exerciseTitle: string;
-	setIndex: number;
-	setType: string;
-	weightKg?: number;
-	reps?: number;
-	distanceKm?: number;
-	durationSeconds?: number;
-	rpe?: number;
-	supersetId?: string;
-	exerciseNotes?: string;
-}
-
-export interface ParsedWorkout {
-	title: string;
-	startTime: number;
-	endTime: number;
-	description?: string;
-	sets: ParsedSet[];
-}
+export type { ParsedSet, ParsedWorkout } from './hevy-schema';
 
 const MONTHS: Record<string, number> = {
 	ene: 0,
@@ -42,7 +25,7 @@ const MONTHS: Record<string, number> = {
 
 // Hevy formats timestamps with the phone's locale, e.g. "17 jul 2026, 18:35" (day first) or
 // "Jul 17, 2026, 6:35 PM" (month first), optionally with an AM/PM or "a. m."/"p. m." suffix.
-const TIME = String.raw`(?<hour>\d{1,2}):(?<minute>\d{2})(?:\s*(?<meridiem>[ap])\.?\s*m\.?)?`;
+const TIME = String.raw`(?<hour>\d{1,2}):(?<minute>\d{2})(?:\s*(?<meridiem>[ap])\.?\s*m\.?)?\s*$`;
 const DAY_FIRST = new RegExp(
 	String.raw`^(?<day>\d{1,2})\s+(?<month>[a-záéíóú]{3,})\.?\s+(?<year>\d{4}),?\s+${TIME}`,
 	'i'
@@ -73,7 +56,14 @@ function toHevyTimestamp(value: string | undefined): number | undefined {
 		Number(groups.minute)
 	);
 	const time = date.getTime();
-	return Number.isFinite(time) ? time : undefined;
+	return Number.isFinite(time) &&
+		date.getFullYear() === Number(groups.year) &&
+		date.getMonth() === month &&
+		date.getDate() === Number(groups.day) &&
+		date.getHours() === hour &&
+		date.getMinutes() === Number(groups.minute)
+		? time
+		: undefined;
 }
 
 function emptyToUndefined(value: string | undefined): string | undefined {
@@ -113,11 +103,18 @@ export function parseHevyCsv(text: string): ParsedWorkout[] {
 
 	const workouts = new Map<string, ParsedWorkout>();
 
-	for (const row of rows.slice(1)) {
+	for (const [index, row] of rows.slice(1).entries()) {
+		const invalid = () => new Error(`Invalid Hevy data on CSV row ${index + 2}`);
+		const number = (column: number) => {
+			const raw = row[column]?.trim();
+			const value = toNumber(raw);
+			if (value === undefined && raw && raw !== '-' && raw !== '—') throw invalid();
+			return value;
+		};
 		const startTime = toHevyTimestamp(row[cStart]);
 		const endTime = toHevyTimestamp(row[cEnd]);
 		const title = row[cTitle]?.trim();
-		if (startTime == null || endTime == null || !title) continue;
+		if (startTime == null || endTime == null || !title) throw invalid();
 
 		const key = `${title}|${startTime}|${endTime}`;
 		let workout = workouts.get(key);
@@ -133,19 +130,20 @@ export function parseHevyCsv(text: string): ParsedWorkout[] {
 		}
 
 		const exerciseTitle = row[cExercise]?.trim();
-		if (!exerciseTitle) continue;
+		if (!exerciseTitle) throw invalid();
 		workout.sets.push({
 			exerciseTitle,
-			setIndex: toNumber(row[cSetIndex]) ?? 0,
+			setIndex: number(cSetIndex) ?? 0,
 			setType: row[cSetType]?.trim() || 'normal',
-			weightKg: toNumber(row[cWeight]),
-			reps: toNumber(row[cReps]),
-			distanceKm: toNumber(row[cDistance]),
-			durationSeconds: toNumber(row[cDuration]),
-			rpe: toNumber(row[cRpe]),
+			weightKg: number(cWeight),
+			reps: number(cReps),
+			distanceKm: number(cDistance),
+			durationSeconds: number(cDuration),
+			rpe: number(cRpe),
 			supersetId: emptyToUndefined(row[cSuperset]),
 			exerciseNotes: emptyToUndefined(row[cExNotes])
 		});
+		if (!v.safeParse(workoutSchema, workout).success) throw invalid();
 	}
 
 	return [...workouts.values()].sort((a, b) => a.startTime - b.startTime);

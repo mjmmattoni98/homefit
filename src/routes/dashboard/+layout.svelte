@@ -129,7 +129,7 @@
 		>
 			<button
 				type="button"
-				class="-ml-2 flex size-11 items-center justify-center self-center rounded-(--radius-control) text-ink-2 hover:bg-day-2 hover:text-foreground md:hidden"
+				class="-ml-2 flex size-11 items-center justify-center self-center rounded-(--radius-control) text-ink-2 hover:bg-day-2 hover:text-foreground lg:hidden"
 				aria-label={m.nav_open_menu()}
 				onclick={() => (menuOpen = true)}
 			>
@@ -142,7 +142,7 @@
 			>
 				<Wordmark />
 			</a>
-			<nav class="hidden items-stretch md:flex" aria-label={m.nav_main_label()}>
+			<nav class="hidden items-stretch lg:flex" aria-label={m.nav_main_label()}>
 				{#each sections as section (section.href)}
 					{@render barLink(section)}
 				{/each}
@@ -152,16 +152,16 @@
 			<div class="ml-auto flex items-center gap-1">
 				<button
 					type="button"
-					class="flex h-9 items-center gap-2 rounded-(--radius-control) px-2.5 text-sm text-ink-3 transition-colors duration-(--dur-micro) hover:text-foreground sm:w-60 sm:border sm:border-rule-2 sm:hover:border-field-edge"
+					class="flex h-9 items-center gap-2 rounded-(--radius-control) px-2.5 text-sm text-ink-3 transition-colors duration-(--dur-micro) hover:text-foreground xl:w-60 xl:border xl:border-rule-2 xl:hover:border-field-edge"
 					aria-label={m.command_search()}
 					aria-keyshortcuts="Control+K Meta+K"
 					onclick={() => (paletteOpen = true)}
 				>
 					<SearchIcon class="size-4" />
-					<span class="hidden sm:inline">{m.command_search()}</span>
-					<Kbd class="ml-auto hidden sm:inline-flex">⌘K</Kbd>
+					<span class="hidden xl:inline">{m.command_search()}</span>
+					<Kbd class="ml-auto hidden xl:inline-flex">⌘K</Kbd>
 				</button>
-				<div class="hidden items-center md:flex">
+				<div class="hidden items-center lg:flex">
 					<ThemeToggle />
 					<LanguageMenu side="bottom" />
 				</div>

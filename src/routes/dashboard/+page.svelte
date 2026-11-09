@@ -193,7 +193,13 @@
 		<p class="min-w-0 truncate pb-2 text-sm text-ink-3 sm:pb-2.5">{caption}</p>
 		<ToggleGroup.Root
 			type="single"
-			value={String(period)}
+			bind:value={
+				() => String(period),
+				(value) => {
+					const selected = PERIODS.find((option) => String(option) === value);
+					if (selected !== undefined) period = selected;
+				}
+			}
 			variant="outline"
 			aria-label={m.period_label()}
 			class="w-full data-[variant=outline]:shadow-none sm:w-auto"
@@ -203,7 +209,6 @@
 					value={String(option)}
 					aria-label={periodName(option)}
 					class="h-10 flex-1 px-3 text-[0.9375rem] sm:flex-none"
-					onclick={() => (period = option)}
 				>
 					{periodLabel(option)}
 				</ToggleGroup.Item>

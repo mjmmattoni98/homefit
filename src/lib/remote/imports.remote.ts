@@ -16,34 +16,10 @@ import {
 	listExercises
 } from '#lib/server/workouts.js';
 import { TIME_ZONE_COOKIE } from '#lib/time-zone.js';
+import { workoutSchema } from '#lib/csv/hevy-schema.js';
 import { sleepRecordSchema } from '#lib/csv/sleep-schema.js';
 
-const finite = v.pipe(v.number(), v.finite());
 const text = (max = 2_000) => v.pipe(v.string(), v.maxLength(max));
-const optionalFinite = v.optional(finite);
-const optionalText = (max?: number) => v.optional(text(max));
-
-const workoutSetSchema = v.object({
-	exerciseTitle: text(500),
-	setIndex: v.pipe(v.number(), v.integer()),
-	setType: text(100),
-	weightKg: optionalFinite,
-	reps: optionalFinite,
-	distanceKm: optionalFinite,
-	durationSeconds: optionalFinite,
-	rpe: optionalFinite,
-	supersetId: optionalText(100),
-	exerciseNotes: optionalText()
-});
-
-const workoutSchema = v.object({
-	title: text(500),
-	startTime: finite,
-	endTime: finite,
-	description: optionalText(),
-	sets: v.pipe(v.array(workoutSetSchema), v.maxLength(500))
-});
-
 export const getDashboard = query(async () => {
 	const userId = requireUserId();
 	const timeZone = resolveTimeZone(getRequestEvent().cookies.get(TIME_ZONE_COOKIE));

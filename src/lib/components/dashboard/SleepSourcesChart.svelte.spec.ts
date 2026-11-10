@@ -69,4 +69,30 @@ describe('SleepSourcesChart', () => {
 		await timingTab.click();
 		await expect.element(timingTab).toHaveAttribute('data-state', 'on');
 	});
+	it('explains an absent source in the selected dates without claiming both sources have records', async () => {
+		const comparison = compareSleepSources(
+			scNights,
+			ghNights.map((night) => ({ ...night, night: '2026-11-08' })),
+			'UTC',
+			'2026-10-12',
+			'2026-11-10'
+		);
+		render(SleepSourcesChart, { comparison });
+		await expect
+			.element(page.getByText('Sleep Cycle nights in this period: 0.', { exact: false }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Google Health nights in this period: 1.', { exact: false }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText('No Sleep Cycle nights in this period.', { exact: false }))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Latest available: Apr 2, 2026.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Both sources have records,', { exact: false }))
+			.not.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('slider'))
+			.toHaveAttribute('aria-valuetext', expect.stringContaining('Google Health'));
+	});
 });

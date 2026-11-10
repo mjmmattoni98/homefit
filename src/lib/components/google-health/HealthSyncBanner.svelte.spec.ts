@@ -82,4 +82,15 @@ describe('HealthSyncBanner', () => {
 		vi.advanceTimersByTime(30_000);
 		expect(mocks.refresh).toHaveBeenCalledTimes(1);
 	});
+
+	it('keeps the access-renewal action visible when a metric has failed', async () => {
+		connectionState.set('current', {
+			...connection('action_required'),
+			syncIssues: [{ dataType: 'weight', mode: 'backfill', status: 'failed', attempts: 1 }]
+		});
+		render(HealthSyncBanner);
+		await expect.element(page.getByRole('alert')).toBeInTheDocument();
+		await expect.element(page.getByRole('link', { name: 'Review access' })).toBeInTheDocument();
+		await expect.element(page.getByText('Import temporarily delayed')).not.toBeInTheDocument();
+	});
 });

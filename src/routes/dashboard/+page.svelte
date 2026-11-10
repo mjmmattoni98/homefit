@@ -7,7 +7,7 @@
 	import * as Empty from '#lib/components/ui/empty/index.js';
 	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
-	import { buttonVariants } from '#lib/components/ui/button/index.js';
+	import { Button, buttonVariants } from '#lib/components/ui/button/index.js';
 	import CircadianSleepChart from '#lib/components/dashboard/CircadianSleepChart.svelte';
 	import KpiStrip from '#lib/components/dashboard/KpiStrip.svelte';
 	import SleepFactors from '#lib/components/dashboard/SleepFactors.svelte';
@@ -16,6 +16,7 @@
 	import TrainingReadiness from '#lib/components/dashboard/TrainingReadiness.svelte';
 	import WorkoutNights from '#lib/components/dashboard/WorkoutNights.svelte';
 	import WorkoutSheet from '#lib/components/dashboard/WorkoutSheet.svelte';
+	import HealthSyncBanner from '#lib/components/google-health/HealthSyncBanner.svelte';
 	import TodayGoalsCard from '#lib/components/goals/TodayGoalsCard.svelte';
 	import { dayToDate } from '#lib/days.js';
 	import { formatDate } from '#lib/format.js';
@@ -76,7 +77,18 @@
 	let factorTarget = $state<SleepFactorTarget>('quality');
 
 	const records = $derived(recordsByDay(dashboard?.nights ?? [], dashboard?.trainingDays ?? []));
-	const summary = $derived(dashboard && summarizePeriod(records, dashboard.today, period));
+	const summary = $derived(
+		dashboard &&
+			summarizePeriod(
+				records,
+				dashboard.today,
+				period,
+				dashboard.googleSleepNights.map((night) => night.night)
+			)
+	);
+	const hasPrimaryPeriodData = $derived(
+		(summary?.nights.length ?? 0) > 0 || (summary?.workouts ?? 0) > 0
+	);
 	const granularity = $derived(summary ? chartGranularity(summary.from, summary.to) : 'day');
 	const points = $derived(
 		summary ? chartPoints(records, summary.from, summary.to, granularity) : []
@@ -94,9 +106,7 @@
 			: null
 	);
 	const showSleepSources = $derived(
-		(dashboard?.googleSleepNights.length ?? 0) > 0 &&
-			(dashboard?.nights.length ?? 0) > 0 &&
-			sleepComparison !== null
+		(dashboard?.googleSleepNights.length ?? 0) > 0 && (sleepComparison?.points.length ?? 0) > 0
 	);
 
 	const circadian = $derived(
@@ -185,6 +195,10 @@
 	{/if}
 </div>
 
+{#if page.data.googleHealthEnabled}
+	<HealthSyncBanner />
+{/if}
+
 <!-- One period drives every figure below, so its tabs and dates stay in view while scrolling. -->
 <div class="sticky top-(--bar-height) z-20 bleed bg-day">
 	<div
@@ -247,44 +261,57 @@
 	</Empty.Root>
 {:else}
 	<!-- The horizon: the period's training above the line, its nights below it. -->
-	<section class="bleed" aria-labelledby="sleep-training-title">
-		<div class="flex flex-col gap-8 pt-9 pb-7 lg:flex-row lg:items-end lg:justify-between">
-			<div class="min-w-0 lg:max-w-[22rem]">
-				<h2 id="sleep-training-title" class="text-2xl">{m.chart_title()}</h2>
-				<p class="mt-2 text-sm text-ink-3">{m.chart_hint()}</p>
+	<section class="bleed" aria-label={m.chart_title()}>
+		{#if hasPrimaryPeriodData}
+			<div class="flex flex-col gap-8 pt-9 pb-7 lg:flex-row lg:items-end lg:justify-between">
+				<div class="min-w-0 lg:max-w-[22rem]">
+					<h2 id="sleep-training-title" class="text-2xl">{m.chart_title()}</h2>
+					<p class="mt-2 text-sm text-ink-3">{m.chart_hint()}</p>
+					<p class="mt-2 text-sm text-ink-3">{m.overview_source_labels()}</p>
+				</div>
+				<KpiStrip side="day" {summary} {points} {comparedWith} />
 			</div>
-			<KpiStrip side="day" {summary} {points} {comparedWith} />
-		</div>
-		<p class="flex items-center gap-2 pb-3 text-sm text-ink-2">
-			<span class="size-2.5 bg-sun" aria-hidden="true"></span>
-			{m.chart_volume()}
-		</p>
-		{#if points.some((point) => point.quality !== null || point.volume > 0)}
-			<SleepTrainingChart {points} {granularity} average={summary.quality} />
+			<p class="flex items-center gap-2 pb-3 text-sm text-ink-2">
+				<span class="size-2.5 bg-sun" aria-hidden="true"></span>
+				{m.chart_volume()}
+			</p>
+			{#if points.some((point) => point.quality !== null || point.volume > 0)}
+				<SleepTrainingChart {points} {granularity} average={summary.quality} />
+			{/if}
 		{:else}
-			<div class="bleed">
-				<div class="flex h-40 items-end pb-3 text-sm text-ink-3">{m.no_data_in_range()}</div>
-				<div class="bleed h-44 bg-night"></div>
-			</div>
+			<Empty.Root class="my-7 border border-rule">
+				<Empty.Header>
+					<Empty.Title>{m.overview_sources_empty_title()}</Empty.Title>
+					<Empty.Description>{m.overview_sources_empty_description()}</Empty.Description>
+				</Empty.Header>
+				<Empty.Content class="flex-row flex-wrap justify-center">
+					<Button variant="outline" onclick={() => (period = 'all')}
+						>{m.period_all_records()}</Button
+					>
+					<a href={resolve('/dashboard/import')} class={buttonVariants()}>{m.empty_cta()}</a>
+				</Empty.Content>
+			</Empty.Root>
 		{/if}
 		<div class="bleed bg-night text-moon">
-			<div class="flex flex-col gap-8 pt-4 pb-12">
-				<ul class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-moon-2">
-					<li class="flex items-center gap-2">
-						<span class="size-2.5 bg-sleep" aria-hidden="true"></span>
-						{qualityLegend}
-					</li>
-					<li class="flex items-center gap-2">
-						<span class="h-[3px] w-4 bg-moon" aria-hidden="true"></span>
-						{trendLegend}
-					</li>
-					<li class="flex items-center gap-2">
-						<span class="h-px w-4 bg-moon" aria-hidden="true"></span>
-						{m.chart_period_average()}
-					</li>
-				</ul>
-				<KpiStrip side="night" {summary} {points} {comparedWith} />
-			</div>
+			{#if summary.nights.length > 0}
+				<div class="flex flex-col gap-8 pt-4 pb-12">
+					<ul class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-moon-2">
+						<li class="flex items-center gap-2">
+							<span class="size-2.5 bg-sleep" aria-hidden="true"></span>
+							{qualityLegend}
+						</li>
+						<li class="flex items-center gap-2">
+							<span class="h-[3px] w-4 bg-moon" aria-hidden="true"></span>
+							{trendLegend}
+						</li>
+						<li class="flex items-center gap-2">
+							<span class="h-px w-4 bg-moon" aria-hidden="true"></span>
+							{m.chart_period_average()}
+						</li>
+					</ul>
+					<KpiStrip side="night" {summary} {points} {comparedWith} />
+				</div>
+			{/if}
 
 			{#if showSleepSources && sleepComparison !== null}
 				<SleepSourcesChart comparison={sleepComparison} embedded />

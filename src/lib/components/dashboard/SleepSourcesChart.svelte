@@ -33,6 +33,7 @@
 	let active = $state<number | null>(null);
 
 	const points = $derived(comparison.points);
+	const availability = $derived(comparison.availability);
 	const CHART_HEIGHT = 228;
 	const LABELS = 28;
 	const HEIGHT = CHART_HEIGHT + LABELS;
@@ -271,6 +272,24 @@
 			{/each}
 		</ToggleGroup.Root>
 	</div>
+	<div class="mt-5 flex flex-wrap gap-x-8 gap-y-2 text-sm text-moon-2">
+		{#each [{ name: m.sleep_sources_legend_sc(), source: availability.sleepCycle }, { name: m.sleep_sources_legend_gh(), source: availability.googleHealth }] as item (item.name)}
+			<p>
+				{m.sleep_sources_available({ source: item.name, count: item.source.nights })}
+				{#if item.source.latestNight !== null}
+					<span
+						>{m.sleep_sources_latest({
+							date: formatDate(dayToDate(item.source.latestNight).getTime(), {
+								day: 'numeric',
+								month: 'short',
+								year: 'numeric'
+							})
+						})}</span
+					>
+				{/if}
+			</p>
+		{/each}
+	</div>
 
 	{#if comparison.sharedNights > 0}
 		<dl class="mt-7 grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-4 sm:gap-x-10">
@@ -343,6 +362,12 @@
 				{/if}
 			</div>
 		</dl>
+	{:else if availability.sleepCycle.nights === 0 && availability.googleHealth.nights === 0}
+		<p class="mt-6 text-sm text-moon-2">{m.sleep_sources_no_main_nights()}</p>
+	{:else if availability.sleepCycle.nights === 0}
+		<p class="mt-6 text-sm text-moon-2">{m.sleep_sources_missing_sc()}</p>
+	{:else if availability.googleHealth.nights === 0}
+		<p class="mt-6 text-sm text-moon-2">{m.sleep_sources_missing_gh()}</p>
 	{:else}
 		<p class="mt-6 text-sm text-moon-2">{m.sleep_sources_no_overlap()}</p>
 	{/if}

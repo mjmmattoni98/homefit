@@ -341,3 +341,17 @@ describe('qualityBand', () => {
 		expect([90, 80, 79, 65, 64].map(qualityBand)).toEqual(['good', 'good', 'fair', 'fair', 'poor']);
 	});
 });
+
+describe('overview range with Google-only history', () => {
+	it('includes Google nights in All without giving them Sleep Cycle quality or training', () => {
+		const records = recordsByDay([], []);
+		const all = summarizePeriod(records, '2026-11-10', 'all', ['2026-10-01', '2026-11-08']);
+		expect(all.from).toBe('2026-10-01');
+		expect(all.quality).toBeNull();
+		expect(all.workouts).toBe(0);
+		expect(periodDays(records, '2026-11-10', 7, ['2026-10-01'])).toEqual({
+			from: '2026-11-04',
+			to: '2026-11-10'
+		});
+	});
+});

@@ -33,6 +33,10 @@ export interface PairedSleepNight {
 }
 
 export interface SleepSourcesSummary {
+	availability: {
+		sleepCycle: { nights: number; latestNight: string | null };
+		googleHealth: { nights: number; latestNight: string | null };
+	};
 	/** Every night inside the range that has at least one main sleep source, oldest first. */
 	points: PairedSleepNight[];
 	/** Nights recorded by both Sleep Cycle and Google Health inside the range. */
@@ -252,7 +256,16 @@ export function compareSleepSources(
 					awakeMin: (mean(withStages.map((g) => g.awakeSeconds ?? 0)) ?? 0) / 60
 				};
 
+	const latestNight = (nights: readonly { night: string }[]) =>
+		nights.reduce<string | null>(
+			(latest, entry) => (latest === null || entry.night > latest ? entry.night : latest),
+			null
+		);
 	return {
+		availability: {
+			sleepCycle: { nights: scByNight.size, latestNight: latestNight(sleepCycleNights) },
+			googleHealth: { nights: ghByNight.size, latestNight: latestNight(googleNights) }
+		},
 		points,
 		sharedNights: shared.length,
 		sleepCycleOnlyNights,

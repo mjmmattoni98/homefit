@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, inArray, lte, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, lte, isNull, or, sql } from 'drizzle-orm';
 import type { Database, Executor } from '../db/types';
 import { googleHealthConnection, googleHealthSyncCursor, googleHealthSyncRun } from '../db/schema';
 import {
@@ -38,6 +38,22 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 type ConnectionRow = typeof googleHealthConnection.$inferSelect;
 type CursorRow = typeof googleHealthSyncCursor.$inferSelect;
+
+// Older versions paused the whole connection for metric errors too. Only an explicit shared
+// failure may gate otherwise claimable work; cursor retry times still apply to legacy failures.
+const sharedBackoff = sql`coalesce(
+	starts_with(${googleHealthConnection.lastErrorCode}, 'token_refresh_')
+	or starts_with(${googleHealthConnection.lastErrorCode}, 'rate_limit_')
+	or ${googleHealthConnection.lastErrorCode} = 'http_429', false
+)`;
+
+function hasSharedBackoff(connection: ConnectionRow): boolean {
+	return (
+		connection.lastErrorCode?.startsWith('token_refresh_') === true ||
+		connection.lastErrorCode?.startsWith('rate_limit_') === true ||
+		connection.lastErrorCode === 'http_429'
+	);
+}
 
 /** Thrown when another worker or a lifecycle change took ownership of the work. */
 class LostOwnershipError extends Error {}
@@ -236,6 +252,7 @@ export async function findDueConnections(db: Database, limit = 500): Promise<str
 			and(
 				inArray(googleHealthConnection.status, [...SYNCABLE_STATUSES]),
 				or(
+					sql`not (${sharedBackoff})`,
 					isNull(googleHealthConnection.nextRetryAt),
 					lte(googleHealthConnection.nextRetryAt, sql`now()`)
 				),
@@ -254,7 +271,11 @@ async function claimNextCursor(db: Database, connectionId: string): Promise<Clai
 			.where(eq(googleHealthConnection.id, connectionId))
 			.for('update');
 		if (connection === undefined || !SYNCABLE_STATUSES.has(connection.status)) return null;
-		if (connection.nextRetryAt !== null && connection.nextRetryAt.getTime() > Date.now())
+		if (
+			hasSharedBackoff(connection) &&
+			connection.nextRetryAt !== null &&
+			connection.nextRetryAt.getTime() > Date.now()
+		)
 			return null;
 		const [cursor] = await tx
 			.select()
@@ -266,9 +287,9 @@ async function claimNextCursor(db: Database, connectionId: string): Promise<Clai
 					claimableCursor
 				)
 			)
-			// Finish the historical import before incremental work, oldest request first.
+			// Keep recent data fresh while a large historical import works through its pages.
 			.orderBy(
-				desc(sql`${googleHealthSyncCursor.mode} = 'backfill'`),
+				asc(sql`${googleHealthSyncCursor.mode} = 'backfill'`),
 				asc(googleHealthSyncCursor.updatedAt)
 			)
 			.limit(1)
@@ -595,7 +616,12 @@ async function yieldCursor(db: Database, claim: Claim): Promise<void> {
 	});
 }
 
-async function scheduleRetry(db: Database, claim: Claim, errorCode: string): Promise<void> {
+async function scheduleRetry(
+	db: Database,
+	claim: Claim,
+	errorCode: string,
+	sharedScope?: 'token_refresh' | 'rate_limit'
+): Promise<void> {
 	await db.transaction(async (tx) => {
 		const { cursor } = await lockOwnership(tx, claim);
 		const retryAt = new Date(Date.now() + computeRetryDelayMs(cursor.attempt));
@@ -614,7 +640,10 @@ async function scheduleRetry(db: Database, claim: Claim, errorCode: string): Pro
 			.set({
 				status: 'delayed',
 				lastAttemptAt: new Date(),
-				lastErrorCode: safeErrorCode(errorCode),
+				lastErrorCode:
+					sharedScope === undefined
+						? safeErrorCode(errorCode)
+						: `${sharedScope}_${safeErrorCode(errorCode)}`,
 				lastErrorMessage: 'Google Health is temporarily unavailable',
 				nextRetryAt: retryAt
 			})
@@ -692,6 +721,7 @@ async function processCursor(
 	access: { current: AccessToken | null }
 ): Promise<CursorOutcome> {
 	const definition = getMetricDefinition(claim.cursor.dataType);
+	let refreshingToken = false;
 	try {
 		if (definition === null || !claim.connection.grantedScopes.includes(definition.scope)) {
 			await failCursor(deps.db, claim, 'scope_not_granted', true);
@@ -704,7 +734,9 @@ async function processCursor(
 				access.current.generation !== claim.connection.generation ||
 				access.current.expiresAt - ACCESS_TOKEN_MARGIN_MS < Date.now()
 			) {
+				refreshingToken = true;
 				access.current = await obtainAccessToken(deps, claim);
+				refreshingToken = false;
 			}
 			if (!access.current.grantedScopes.includes(definition.scope)) {
 				await failCursor(deps.db, claim, 'scope_not_granted', true);
@@ -778,12 +810,17 @@ async function processCursor(
 		if (error instanceof LostOwnershipError) return 'stop';
 		try {
 			if (error instanceof GoogleHealthError && error.retryable) {
-				await scheduleRetry(deps.db, claim, error.code);
-				return 'stop';
+				const sharedScope = refreshingToken
+					? 'token_refresh'
+					: error.status === 429
+						? 'rate_limit'
+						: undefined;
+				await scheduleRetry(deps.db, claim, error.code, sharedScope);
+				return sharedScope === undefined ? 'next' : 'stop';
 			}
 			if (isTransientDatabaseError(error)) {
 				await scheduleRetry(deps.db, claim, 'database_conflict');
-				return 'stop';
+				return 'next';
 			}
 			const actionRequired =
 				error instanceof GoogleHealthError &&

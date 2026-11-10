@@ -441,7 +441,7 @@ describe('Google Health synchronization', () => {
 		expect(await getConnectionStatus(database.db, userId)).toMatchObject({ status: 'active' });
 	});
 
-	it('finishes the import when Google permanently refuses one metric', async () => {
+	it('finishes other metrics and reports a permanently refused metric', async () => {
 		google.setPages('weight', [[weight(daysAgo(3), 70_000)]]);
 		google.setHandler('blood-glucose', () => {
 			throw new Response(JSON.stringify({ error: 'permission_denied' }), { status: 403 });
@@ -453,7 +453,14 @@ describe('Google Health synchronization', () => {
 
 		expect(await getConnectionStatus(database.db, userId)).toMatchObject({
 			status: 'active',
-			backfillCompletedTypes: METRICS_SCOPE_TYPES
+			backfillCompletedTypes: METRICS_SCOPE_TYPES - 1,
+			syncIssues: [
+				expect.objectContaining({
+					dataType: 'blood-glucose',
+					status: 'failed',
+					errorCode: 'permission_denied'
+				})
+			]
 		});
 		expect(await weightRecords(userId)).toHaveLength(1);
 		const [run] = await database.db
@@ -639,6 +646,101 @@ describe('Google Health synchronization', () => {
 			after: null
 		});
 		expect(page.records.map((record) => record.primaryValue)).toEqual([1850]);
+	});
+
+	it('isolates a failing metric, keeps its issue visible after other successes, and resumes its page manually', async () => {
+		let failing = true;
+		google.setHandler('blood-glucose', ({ pageToken }) => {
+			if (pageToken === 'resume-page' && failing) throw new Response('{}', { status: 500 });
+			return pageToken === undefined
+				? { points: [], nextPageToken: 'resume-page' }
+				: { points: [] };
+		});
+		google.setPages('weight', [[weight(daysAgo(2), 70_000)]]);
+		const userId = await createUser(database.db);
+		const connectionId = await connect(userId);
+		await sync(connectionId);
+		expect(await weightRecords(userId)).toHaveLength(1);
+		expect(await getConnectionStatus(database.db, userId)).toMatchObject({
+			status: 'delayed',
+			backfillCompletedTypes: METRICS_SCOPE_TYPES - 1,
+			syncIssues: [
+				{ dataType: 'blood-glucose', status: 'retry', errorCode: 'http_500', attempts: 1 }
+			]
+		});
+		expect(await findDueConnections(database.db)).not.toContain(connectionId);
+
+		// A legacy connection-wide timer must not prevent fresh incremental work.
+		const otherUser = await createUser(database.db);
+		expect(await getConnectionStatus(database.db, otherUser)).toBeNull();
+		await expect(requestManualSync(database.db, otherUser)).rejects.toThrow('not found');
+		await database.db
+			.update(googleHealthConnection)
+			.set({
+				status: 'delayed',
+				lastErrorCode: 'http_500',
+				nextRetryAt: new Date(Date.now() + 6 * 3600_000)
+			})
+			.where(eq(googleHealthConnection.id, connectionId));
+		await queueIncrementalWindow(
+			database.db,
+			{
+				connectionId,
+				generation: 1,
+				grantedScopes: google.grantedScopes
+			},
+			'weight',
+			null,
+			'reconciliation'
+		);
+		expect(await findDueConnections(database.db)).toContain(connectionId);
+		const failuresBefore = google.requestsFor('blood-glucose').length;
+		await sync(connectionId);
+		expect(google.requestsFor('blood-glucose')).toHaveLength(failuresBefore);
+		expect((await getConnectionStatus(database.db, userId))?.syncIssues).toHaveLength(1);
+
+		failing = false;
+		await requestManualSync(database.db, userId);
+		expect(await findDueConnections(database.db)).toContain(connectionId);
+		await sync(connectionId);
+		const glucosePages = google.requestsFor('blood-glucose').filter((r) => r.filter === undefined);
+		expect(glucosePages.map((r) => r.pageToken)).toEqual([undefined, 'resume-page', 'resume-page']);
+		expect(await getConnectionStatus(database.db, userId)).toMatchObject({
+			status: 'active',
+			syncIssues: []
+		});
+	});
+
+	it('retains connection-wide backoff when Google rate limits a data request', async () => {
+		google.setHandler('blood-glucose', () => {
+			throw new Response('{}', { status: 429 });
+		});
+		const userId = await createUser(database.db);
+		const connectionId = await connect(userId);
+		await sync(connectionId);
+		const requestCount = google.dataRequests.length;
+		expect(await getConnectionStatus(database.db, userId)).toMatchObject({
+			status: 'delayed',
+			lastErrorCode: 'http_429',
+			sharedRetryAt: expect.any(Number)
+		});
+		expect(await findDueConnections(database.db)).not.toContain(connectionId);
+		await sync(connectionId);
+		expect(google.dataRequests).toHaveLength(requestCount);
+	});
+
+	it('processes recent incremental work before an unfinished historical import', async () => {
+		const userId = await createUser(database.db);
+		const connectionId = await connect(userId);
+		await queueIncrementalWindow(
+			database.db,
+			{ connectionId, generation: 1, grantedScopes: google.grantedScopes },
+			'weight',
+			{ start: daysAgo(7), end: daysAgo(0) },
+			'reconciliation'
+		);
+		await sync(connectionId);
+		expect(google.dataRequests[0]).toMatchObject({ dataType: 'weight', readMode: 'reconcile' });
 	});
 
 	it('backs off on transient errors and asks for action when access is revoked', async () => {

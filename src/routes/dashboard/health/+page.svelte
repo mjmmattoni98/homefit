@@ -35,7 +35,7 @@
 	const sleep = $derived(sleepQuery?.current);
 
 	const sleepComparison = $derived.by(() => {
-		if (!sleep || sleep.nights.length === 0 || sleep.googleSleepNights.length === 0) return null;
+		if (!sleep || (sleep.nights.length === 0 && sleep.googleSleepNights.length === 0)) return null;
 		const from = dayFromNumber(dayNumber(sleep.today) - OVERVIEW_DAYS + 1);
 		return compareSleepSources(
 			sleep.nights,

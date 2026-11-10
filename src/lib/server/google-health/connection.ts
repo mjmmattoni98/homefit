@@ -5,6 +5,7 @@ import {
 	googleHealthConnection,
 	googleHealthOAuthState,
 	googleHealthSyncRun,
+	googleHealthSyncCursor,
 	healthDataPoint
 } from '../db/schema';
 import {
@@ -16,10 +17,10 @@ import {
 } from './api-client';
 import type { GoogleHealthConfig } from './config';
 import { decryptRefreshToken, encryptRefreshToken, type EncryptedTokenEnvelope } from './crypto';
-import { initializeBackfillCursors, queueReconciliation } from './cursors';
+import { countFinishedBackfills, initializeBackfillCursors, queueReconciliation } from './cursors';
 import { sha256Base64Url } from './normalize';
 import { METRIC_DEFINITIONS } from './registry';
-import type { ConnectionStatus } from './types';
+import { SYNCABLE_STATUSES, type ConnectionStatus } from './types';
 
 export const IMPORT_RETURN_PATH = '/dashboard/import';
 export const DELETE_CONFIRMATION = 'DELETE GOOGLE DATA';
@@ -41,6 +42,17 @@ export interface ConnectionStatusView {
 	lastErrorMessage?: string;
 	nextRetryAt?: number;
 	disconnectedAt?: number;
+	syncIssues: SyncIssue[];
+	sharedRetryAt?: number;
+}
+
+export interface SyncIssue {
+	dataType: string;
+	mode: 'backfill' | 'incremental';
+	status: 'retry' | 'failed';
+	attempts: number;
+	errorCode?: string;
+	nextRetryAt?: number;
 }
 
 function flowError(code: string): GoogleHealthError {
@@ -94,17 +106,67 @@ export async function getConnectionStatus(
 		.where(eq(googleHealthConnection.userId, userId));
 	if (connection === undefined) return null;
 	const ms = (value: Date | null) => (value === null ? undefined : value.getTime());
+	const cursors = await db
+		.select({
+			dataType: googleHealthSyncCursor.dataType,
+			mode: googleHealthSyncCursor.mode,
+			status: googleHealthSyncCursor.status,
+			attempts: googleHealthSyncCursor.attempt,
+			nextAttemptAt: googleHealthSyncCursor.nextAttemptAt,
+			errorCode: sql<string | null>`(
+				select ${googleHealthSyncRun.errorCode} from ${googleHealthSyncRun}
+				where ${googleHealthSyncRun.connectionId} = ${googleHealthSyncCursor.connectionId}
+					and ${googleHealthSyncRun.dataType} = ${googleHealthSyncCursor.dataType}
+					and ${googleHealthSyncRun.mode} = ${googleHealthSyncCursor.mode}
+					and ${googleHealthSyncRun.status} = 'failed'
+				order by ${googleHealthSyncRun.startedAt} desc limit 1
+			)`
+		})
+		.from(googleHealthSyncCursor)
+		.where(
+			and(
+				eq(googleHealthSyncCursor.connectionId, connection.id),
+				eq(googleHealthSyncCursor.generation, connection.generation),
+				inArray(googleHealthSyncCursor.status, ['retry', 'failed'])
+			)
+		);
+	const syncIssues: SyncIssue[] = cursors.map((cursor) => ({
+		dataType: cursor.dataType,
+		mode: cursor.mode,
+		status: cursor.status as SyncIssue['status'],
+		attempts: cursor.attempts,
+		errorCode: cursor.errorCode ?? undefined,
+		nextRetryAt: cursor.status === 'retry' ? ms(cursor.nextAttemptAt) : undefined
+	}));
+	const retryTimes = syncIssues.flatMap((issue) => issue.nextRetryAt ?? []);
+	const retryAt = retryTimes.length > 0 ? Math.min(...retryTimes) : undefined;
+	const status =
+		SYNCABLE_STATUSES.has(connection.status) && syncIssues.some((issue) => issue.status === 'retry')
+			? 'delayed'
+			: connection.status;
+	const sharedRetryAt = /^(token_refresh_|rate_limit_|http_429$)/.test(
+		connection.lastErrorCode ?? ''
+	)
+		? ms(connection.nextRetryAt)
+		: undefined;
 	return {
-		status: connection.status,
+		status,
 		grantedScopes: connection.grantedScopes,
 		backfillTotalTypes: connection.backfillTotalTypes,
-		backfillCompletedTypes: connection.backfillCompletedTypes,
+		backfillCompletedTypes: Math.max(
+			0,
+			connection.backfillCompletedTypes -
+				syncIssues.filter((issue) => issue.mode === 'backfill' && issue.status === 'failed').length
+		),
 		lastAttemptAt: ms(connection.lastAttemptAt),
 		lastSuccessfulSyncAt: ms(connection.lastSuccessfulSyncAt),
-		lastErrorCode: connection.lastErrorCode ?? undefined,
+		lastErrorCode:
+			connection.lastErrorCode?.replace(/^(token_refresh|rate_limit)_/, '') ?? undefined,
 		lastErrorMessage: connection.lastErrorMessage ?? undefined,
-		nextRetryAt: ms(connection.nextRetryAt),
-		disconnectedAt: ms(connection.disconnectedAt)
+		nextRetryAt: sharedRetryAt ?? retryAt ?? ms(connection.nextRetryAt),
+		disconnectedAt: ms(connection.disconnectedAt),
+		syncIssues,
+		sharedRetryAt
 	};
 }
 
@@ -265,10 +327,31 @@ export async function requestManualSync(
 	return await db.transaction(async (tx) => {
 		const connection = await connectionForUpdate(tx, userId);
 		if (connection === null) throw new Error('Google Health connection not found');
-		if (connection.status !== 'active' && connection.status !== 'backfilling') {
+		if (!SYNCABLE_STATUSES.has(connection.status)) {
 			throw new Error('Google Health connection is not ready to sync');
 		}
 		const queued = await queueReconciliation(tx, toCursorOwner(connection), 'manual', Date.now());
+		// Retry from the committed page, without resetting the token or reconciliation range.
+		await tx
+			.update(googleHealthSyncCursor)
+			.set({ status: 'queued', nextAttemptAt: null })
+			.where(
+				and(
+					eq(googleHealthSyncCursor.connectionId, connection.id),
+					eq(googleHealthSyncCursor.generation, connection.generation),
+					eq(googleHealthSyncCursor.status, 'retry')
+				)
+			);
+		const completed = await countFinishedBackfills(tx, connection.id, connection.generation);
+		await tx
+			.update(googleHealthConnection)
+			.set({
+				status: completed < connection.backfillTotalTypes ? 'backfilling' : 'active',
+				nextRetryAt: null,
+				lastErrorCode: null,
+				lastErrorMessage: null
+			})
+			.where(eq(googleHealthConnection.id, connection.id));
 		return { connectionId: connection.id, queued };
 	});
 }

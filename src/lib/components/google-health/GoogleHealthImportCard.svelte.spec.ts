@@ -120,6 +120,33 @@ describe('GoogleHealthImportCard', () => {
 		await expect.element(page.getByText('Connected', { exact: true })).toBeInTheDocument();
 	});
 
+	it('shows the delayed metric, retained progress, error and retry time, and allows a manual retry', async () => {
+		mocks.connectionQuery.current = {
+			...connection('delayed', 37, 40),
+			nextRetryAt: Date.UTC(2026, 10, 10, 12, 25),
+			syncIssues: [
+				{
+					dataType: 'time-in-heart-rate-zone',
+					mode: 'backfill',
+					status: 'retry',
+					attempts: 12,
+					errorCode: 'http_500',
+					nextRetryAt: Date.UTC(2026, 10, 10, 12, 25)
+				}
+			]
+		};
+		render(GoogleHealthImportCard);
+		await expect.element(page.getByText('37 of 40 metric types completed')).toBeInTheDocument();
+		await expect.element(page.getByText('http_500')).toBeInTheDocument();
+		await expect.element(page.getByText('Failed attempts: 12.')).toBeInTheDocument();
+		await expect.element(page.getByText('Next retry:', { exact: false })).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Other metrics continue importing.', { exact: false }))
+			.toBeInTheDocument();
+		await page.getByRole('button', { name: 'Sync now' }).click();
+		expect(mocks.syncNow).toHaveBeenCalledOnce();
+	});
+
 	it('explains that disconnecting retains imported data', async () => {
 		mocks.connectionQuery.current = connection('active');
 		render(GoogleHealthImportCard);

@@ -67,11 +67,13 @@ export function recordsByDay(
 export function periodDays(
 	records: ReadonlyMap<string, DayRecord>,
 	today: string,
-	period: Period
+	period: Period,
+	additionalDays: readonly string[] = []
 ): { from: string; to: string } {
 	if (period !== 'all') return { from: dayFromNumber(dayNumber(today) - period + 1), to: today };
 	let from = today;
 	for (const day of records.keys()) if (day < from) from = day;
+	for (const day of additionalDays) if (day < from) from = day;
 	return { from, to: today };
 }
 
@@ -134,9 +136,10 @@ export function workloadRatio(records: ReadonlyMap<string, DayRecord>, to: strin
 export function summarizePeriod(
 	records: ReadonlyMap<string, DayRecord>,
 	today: string,
-	period: Period
+	period: Period,
+	additionalDays: readonly string[] = []
 ): PeriodSummary {
-	const { from, to } = periodDays(records, today, period);
+	const { from, to } = periodDays(records, today, period, additionalDays);
 	const current = totals(records, from, to);
 	const oldest = periodDays(records, today, 'all').from;
 	const previousFrom = period === 'all' ? null : dayFromNumber(dayNumber(from) - period);

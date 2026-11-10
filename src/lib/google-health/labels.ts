@@ -66,3 +66,12 @@ export function metricLabel(dataType: string): string {
 export function categoryLabel(category: HealthCategory): string {
 	return categoryLabels[category]();
 }
+
+/** A short, user-facing explanation; raw response bodies are never displayed. */
+export function syncErrorLabel(code: string): string {
+	if (/^http_5\d\d$/.test(code)) return m.google_health_error_server();
+	if (code === 'http_429' || code === 'rate_limit') return m.google_health_error_limit();
+	if (code === 'request_timeout') return m.google_health_error_timeout();
+	if (code === 'network_error') return m.google_health_error_network();
+	return m.google_health_error_sync();
+}

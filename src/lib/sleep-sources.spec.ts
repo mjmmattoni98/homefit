@@ -104,3 +104,24 @@ describe('compareSleepSources', () => {
 		});
 	});
 });
+
+describe('source availability in the selected period', () => {
+	it('distinguishes older Sleep Cycle history from current Google sleep', () => {
+		const old = scNight('2026-04-01', '2026-04-01T22:00:00Z', '2026-04-02T06:00:00Z', 420, 480);
+		const current = ghNight('2026-11-08', '2026-11-08T22:00:00Z', '2026-11-09T06:00:00Z', 420, 480);
+		const result = compareSleepSources([old], [current], 'UTC', '2026-10-12', '2026-11-10');
+		expect(result.availability).toEqual({
+			sleepCycle: { nights: 0, latestNight: '2026-04-01' },
+			googleHealth: { nights: 1, latestNight: '2026-11-08' }
+		});
+		expect(result.sharedNights).toBe(0);
+		expect(result.points[0].googleAsleepMin).toBe(420);
+	});
+
+	it('reports no main nights when the only source records are short naps', () => {
+		const nap = scNight('2026-11-08', '2026-11-08T12:00:00Z', '2026-11-08T13:00:00Z', 60, 60);
+		const result = compareSleepSources([nap], [], 'UTC');
+		expect(result.availability.sleepCycle.nights).toBe(0);
+		expect(result.points).toEqual([]);
+	});
+});

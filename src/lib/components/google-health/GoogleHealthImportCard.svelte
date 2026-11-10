@@ -12,7 +12,7 @@
 	import * as Field from '#lib/components/ui/field/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
-	import { Progress } from '#lib/components/ui/progress/index.js';
+	import SyncDetails from './SyncDetails.svelte';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import { formatDateLong } from '#lib/format.js';
@@ -41,7 +41,6 @@
 	const status = $derived(connection?.status);
 	const isLoading = $derived(!connectionQuery.ready && connectionQuery.error === undefined);
 	const isPending = $derived(pending !== null);
-	const completedTypes = $derived(connection?.backfillCompletedTypes ?? 0);
 	const totalTypes = $derived(connection?.backfillTotalTypes ?? 0);
 	const hasPartialAccess = $derived(
 		connection !== null && connection !== undefined && totalTypes < SUPPORTED_METRIC_TYPES
@@ -186,17 +185,6 @@
 							? m.google_health_connecting_description()
 							: m.google_health_importing_description()}
 					</p>
-					<div class="mt-4 flex max-w-md flex-col gap-2">
-						<p id="google-health-progress-label" class="text-sm">
-							{m.google_health_progress({ completed: completedTypes, total: totalTypes })}
-						</p>
-						<Progress
-							value={completedTypes}
-							max={Math.max(totalTypes, 1)}
-							aria-labelledby="google-health-progress-label"
-							class="rounded-none bg-rule"
-						/>
-					</div>
 				{:else if connection.status === 'delayed'}
 					<p class="mt-1 text-sm text-ink-2">{m.google_health_delayed_title()}</p>
 					<p class="text-sm text-ink-3">{m.google_health_delayed_description()}</p>
@@ -227,11 +215,14 @@
 						<p class="text-sm text-ink-3">{m.google_health_partial_access_description()}</p>
 					{/if}
 				{/if}
+				{#if connection.status === 'connecting' || connection.status === 'backfilling' || connection.status === 'delayed' || (connection.status === 'active' && (connection.syncIssues?.length ?? 0) > 0)}
+					<div class="mt-4"><SyncDetails {connection} /></div>
+				{/if}
 			</div>
 
 			{#if connection.status !== 'deleting' && connection.status !== 'connecting' && connection.status !== 'backfilling'}
 				<div class="flex w-full flex-wrap items-center gap-2">
-					{#if connection.status === 'active'}
+					{#if connection.status === 'active' || connection.status === 'delayed'}
 						<Button disabled={isPending} onclick={requestSync}>
 							{#if pending === 'sync'}<Spinner
 									data-icon="inline-start"

@@ -3,6 +3,7 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { getConnectionStatus } from '#lib/remote/health.remote.js';
+	import SyncDetails from './SyncDetails.svelte';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 	import * as m from '#lib/paraglide/messages.js';
@@ -94,10 +95,12 @@
 				/>
 			</span>
 		</div>
-	{:else if connection.status === 'delayed'}
+	{:else if connection.status === 'delayed' || (connection.status === 'active' && (connection.syncIssues?.length ?? 0) > 0)}
 		<div class={LINE} role="status">
 			<span class="font-medium">{m.google_health_delayed_title()}</span>
 			<span class="text-ink-3">{m.google_health_delayed_description()}</span>
+			<SyncDetails {connection} compact />
+			<a href={resolve('/dashboard/import')} class={ACTION}>{m.google_health_retry_details()}</a>
 		</div>
 	{:else if connection.status === 'action_required'}
 		<div class={LINE} role="alert">

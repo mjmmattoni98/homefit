@@ -50,7 +50,7 @@
 	const night = $derived(category === 'sleep');
 	const sleepComparison = $derived.by(() => {
 		const sleep = sleepQuery?.current;
-		if (!night || !sleep || sleep.nights.length === 0 || sleep.googleSleepNights.length === 0) {
+		if (!night || !sleep || (sleep.nights.length === 0 && sleep.googleSleepNights.length === 0)) {
 			return null;
 		}
 		const from = dayFromNumber(dayNumber(sleep.today) - 59);

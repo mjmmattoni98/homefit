@@ -4,10 +4,10 @@ import { sleepRecordSchema, type ParsedSleepRecord } from './sleep-schema';
 
 export type { ParsedSleepRecord } from './sleep-schema';
 
-export class SleepCsvError extends Error {
-	constructor(readonly row: number) {
-		super(`Invalid sleep data on CSV row ${row}`);
-	}
+export interface SleepCsvResult {
+	records: ParsedSleepRecord[];
+	/** CSV record numbers including the header, starting at 1. */
+	invalidRows: number[];
 }
 
 const HEADER_MAP = {
@@ -36,11 +36,13 @@ function emptyToUndefined(value: string | undefined): string | undefined {
 
 /**
  * Parses a Sleep Cycle CSV export (semicolon separated, first row headers).
- * Rejects a file containing an invalid row before any records can be imported.
+ * Keeps valid records and reports invalid rows so one bad night cannot block the export.
  */
-export function parseSleepCsv(text: string): ParsedSleepRecord[] {
+export function parseSleepCsv(text: string): SleepCsvResult {
 	const rows = parseDelimited(text, ';');
-	if (rows.length < 2) return [];
+	const records: ParsedSleepRecord[] = [];
+	const invalidRows: number[] = [];
+	if (rows.length === 0) return { records, invalidRows };
 
 	const headers = rows[0].map((h) => h.trim().toLowerCase());
 	const col = (name: string) => headers.findIndex((h) => h.startsWith(name));
@@ -53,32 +55,39 @@ export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 	}
 
 	const at = (row: string[], i: number) => (i === -1 ? undefined : row[i]);
-	const records: ParsedSleepRecord[] = [];
 
 	for (const [index, row] of rows.slice(1).entries()) {
 		const wentToBed = toLocalTimestamp(at(row, idx.wentToBed));
 		const wokeUp = toLocalTimestamp(at(row, idx.wokeUp));
 		const sleepQuality = toPercent(at(row, idx.sleepQuality));
 		if (wentToBed == null || wokeUp == null || sleepQuality == null) {
-			throw new SleepCsvError(index + 2);
+			invalidRows.push(index + 2);
+			continue;
 		}
+		let invalidNumber = false;
+		const numberAt = (column: number, parse = toNumber) => {
+			const raw = at(row, column)?.trim();
+			const value = parse(raw);
+			if (raw && raw !== '—' && raw !== '-' && value === undefined) invalidNumber = true;
+			return value;
+		};
 
 		const notesRaw = emptyToUndefined(at(row, idx.notes));
 		const parsed = v.safeParse(sleepRecordSchema, {
 			wentToBed,
 			wokeUp,
 			sleepQuality,
-			timeInBedSeconds: toNumber(at(row, idx.timeInBed)) ?? 0,
-			timeAsleepSeconds: toNumber(at(row, idx.timeAsleep)) ?? 0,
-			asleepAfterSeconds: toNumber(at(row, idx.asleepAfter)) ?? 0,
-			regularity: toPercent(at(row, idx.regularity)),
+			timeInBedSeconds: numberAt(idx.timeInBed) ?? 0,
+			timeAsleepSeconds: numberAt(idx.timeAsleep) ?? 0,
+			asleepAfterSeconds: numberAt(idx.asleepAfter) ?? 0,
+			regularity: numberAt(idx.regularity, toPercent),
 			didSnore: at(row, idx.didSnore)?.trim().toLowerCase() === 'true',
-			snoreTimeSeconds: toNumber(at(row, idx.snoreTime)) ?? 0,
-			steps: toNumber(at(row, idx.steps)),
-			weatherTempC: toNumber(at(row, idx.weatherTemp)),
+			snoreTimeSeconds: numberAt(idx.snoreTime) ?? 0,
+			steps: numberAt(idx.steps),
+			weatherTempC: numberAt(idx.weatherTemp),
 			weatherType: emptyToUndefined(at(row, idx.weatherType)),
 			city: emptyToUndefined(at(row, idx.city)),
-			movementsPerHour: toNumber(at(row, idx.movements)),
+			movementsPerHour: numberAt(idx.movements),
 			notes: notesRaw
 				? notesRaw
 						.split(':')
@@ -87,8 +96,11 @@ export function parseSleepCsv(text: string): ParsedSleepRecord[] {
 				: [],
 			mood: emptyToUndefined(at(row, idx.mood))
 		});
-		if (!parsed.success) throw new SleepCsvError(index + 2);
+		if (!parsed.success || invalidNumber) {
+			invalidRows.push(index + 2);
+			continue;
+		}
 		records.push(parsed.output);
 	}
-	return records;
+	return { records, invalidRows };
 }

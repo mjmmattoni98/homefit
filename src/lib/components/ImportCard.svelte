@@ -5,19 +5,16 @@
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { parseSleepCsv, SleepCsvError, type ParsedSleepRecord } from '#lib/csv/sleep.js';
+	import { parseSleepCsv, type ParsedSleepRecord } from '#lib/csv/sleep.js';
 	import { parseHevyCsv, type ParsedWorkout } from '#lib/csv/hevy.js';
 	import { cn } from '#lib/utils.js';
 	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
 	import CheckIcon from '@lucide/svelte/icons/check';
 	import { toast } from 'svelte-sonner';
-	import type { Component } from 'svelte';
 
 	const SLEEP_BATCH = 200;
 	const HEVY_BATCH = 30;
 
-	// The import ledger names each source in words, so `icon` is accepted for callers but not drawn.
-	// eslint-disable-next-line svelte/no-unused-props
 	let {
 		title,
 		description,
@@ -26,13 +23,13 @@
 		title: string;
 		description: string;
 		kind: 'sleep' | 'hevy';
-		icon: Component;
 	} = $props();
 
 	let sleepRecords = $state<ParsedSleepRecord[] | null>(null);
 	let hevyWorkouts = $state<ParsedWorkout[] | null>(null);
 	let fileName = $state<string | null>(null);
 	let parseError = $state<string | null>(null);
+	let invalidRows = $state<number[]>([]);
 	let importing = $state(false);
 	// Records sent so far while the file is imported in batches.
 	let sent = $state(0);
@@ -47,25 +44,27 @@
 		if (!file) return;
 		fileName = file.name;
 		parseError = null;
+		invalidRows = [];
 		result = null;
 		sleepRecords = null;
 		hevyWorkouts = null;
 		try {
 			const text = await file.text();
 			if (kind === 'sleep') {
-				sleepRecords = parseSleepCsv(text);
-				if (sleepRecords.length === 0) throw new Error('No records found');
+				const parsed = parseSleepCsv(text);
+				sleepRecords = parsed.records;
+				invalidRows = parsed.invalidRows;
+				if (sleepRecords.length === 0) {
+					parseError = m.import_no_valid_sleep_rows();
+				}
 			} else {
 				hevyWorkouts = parseHevyCsv(text);
 				if (hevyWorkouts.length === 0) throw new Error('No workouts found');
 			}
-		} catch (error) {
+		} catch {
 			sleepRecords = null;
 			hevyWorkouts = null;
-			parseError =
-				error instanceof SleepCsvError
-					? m.import_invalid_sleep_row({ row: error.row })
-					: m.import_error();
+			parseError = m.import_error();
 		}
 	}
 
@@ -179,6 +178,17 @@
 					<p class={cn('text-sm', night ? 'text-moon-2' : 'text-ink-3')}>
 						{m.import_file_ready({ count: parsedCount })}
 					</p>
+				{/if}
+				{#if invalidRows.length > 0}
+					<details class={cn('text-sm', night ? 'text-moon-2' : 'text-ink-3')}>
+						<summary class="cursor-pointer">
+							{m.import_invalid_sleep_rows_skipped({ count: invalidRows.length })}
+						</summary>
+						<p class="mt-2 max-h-40 overflow-y-auto break-words">
+							{m.import_invalid_sleep_rows_list({ rows: invalidRows.join(', ') })}
+						</p>
+						<p class="mt-1">{m.import_invalid_sleep_rows_hint()}</p>
+					</details>
 				{/if}
 			</div>
 

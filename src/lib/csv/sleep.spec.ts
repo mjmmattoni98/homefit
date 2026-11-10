@@ -30,15 +30,14 @@ function csv(overrides: Partial<Record<number, string>> = {}): string {
 
 describe('Sleep Cycle input validation', () => {
 	it('preserves valid exports and optional columns', () => {
-		expect(parseSleepCsv(csv())[0]).toMatchObject({
+		expect(parseSleepCsv(csv()).records[0]).toMatchObject({
 			sleepQuality: 80,
 			regularity: 85,
 			timeAsleepSeconds: 25200
 		});
 		expect(
-			parseSleepCsv(
-				'Went to bed;Woke up;Sleep quality\n2026-10-27 23:00:00;2026-10-28 07:00:00;0%'
-			)[0]
+			parseSleepCsv('Went to bed;Woke up;Sleep quality\n2026-10-27 23:00:00;2026-10-28 07:00:00;0%')
+				.records[0]
 		).toMatchObject({ sleepQuality: 0, timeInBedSeconds: 0, timeAsleepSeconds: 0 });
 	});
 
@@ -50,15 +49,36 @@ describe('Sleep Cycle input validation', () => {
 		{ 4: '-7200' },
 		{ 5: '-60' },
 		{ 7: '-30' },
+		{ 3: 'invalid' },
+		{ 4: 'Infinity' },
+		{ 6: 'unknown' },
 		{ 0: '2026-10-28 23:00:00' },
 		{ 0: '2026-02-30 23:00:00' },
 		{ 1: '2026-13-28 07:00:00' },
 		{ 1: '2026-10-28 25:00:00' }
 	])('rejects an invalid row instead of importing it: %j', (overrides) => {
-		expect(() => parseSleepCsv(csv(overrides))).toThrow(/row 2/i);
+		expect(parseSleepCsv(csv(overrides))).toEqual({ records: [], invalidRows: [2] });
 	});
 
-	it('does not partially accept a file containing a bad later row', () => {
-		expect(() => parseSleepCsv(`${csv()}\n${csv({ 2: '150%' }).split('\n')[1]}`)).toThrow(/row 3/i);
+	it('keeps valid rows before and after invalid rows', () => {
+		const result = parseSleepCsv(
+			`${csv()}\n${csv({ 2: '150%' }).split('\n')[1]}\n${valid.join(';')}`
+		);
+		expect(result.records).toHaveLength(2);
+		expect(result.records.every((record) => record.sleepQuality === 80)).toBe(true);
+		expect(result.invalidRows).toEqual([3]);
+	});
+
+	it('reports every invalid row, including an invalid first data row', () => {
+		const result = parseSleepCsv(
+			`${csv({ 2: '150%' })}\n${valid.join(';')}\n${csv({ 1: 'invalid' }).split('\n')[1]}`
+		);
+		expect(result.records).toHaveLength(1);
+		expect(result.invalidRows).toEqual([2, 4]);
+	});
+
+	it('rejects an unrecognized export and accepts empty input without records', () => {
+		expect(() => parseSleepCsv('wrong;headers\na;b')).toThrow('Not a Sleep Cycle export');
+		expect(parseSleepCsv('')).toEqual({ records: [], invalidRows: [] });
 	});
 });

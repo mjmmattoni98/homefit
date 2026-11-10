@@ -64,7 +64,6 @@
 	"import_importing": "Importando…",
 	"import_result": "Importados {imported}, omitidos {skipped} duplicados",
 	"import_error": "No se pudo leer el archivo. Asegúrate de que es la exportación CSV original.",
-	"import_invalid_sleep_row": "Datos de sueño no válidos en la fila {row} del CSV. Revisa las fechas, los porcentajes (de 0 a 100) y las duraciones no negativas. No se importó ningún registro.",
 	"import_success": "Importación finalizada",
 	"google_health_title": "Google Health",
 	"google_health_description": "Importa automáticamente datos de salud y actividad física desde tu cuenta de Google.",
@@ -523,5 +522,9 @@
 	"google_health_error_limit": "Google está limitando las solicitudes.",
 	"google_health_error_timeout": "La solicitud a Google agotó el tiempo de espera.",
 	"google_health_error_network": "Falló la conexión con Google.",
-	"google_health_error_sync": "No se pudo sincronizar esta métrica."
+	"google_health_error_sync": "No se pudo sincronizar esta métrica.",
+	"import_no_valid_sleep_rows": "No se encontraron registros de sueño válidos. Elige otra exportación o corrige las filas omitidas.",
+	"import_invalid_sleep_rows_skipped": "Filas no válidas omitidas: {count}. Los registros válidos se pueden importar.",
+	"import_invalid_sleep_rows_list": "Filas del CSV: {rows}.",
+	"import_invalid_sleep_rows_hint": "Revisa las fechas, los porcentajes (de 0 a 100) y las duraciones no negativas de estas filas."
 }

@@ -3,8 +3,6 @@
 	import * as m from '#lib/paraglide/messages.js';
 	import ImportCard from '#lib/components/ImportCard.svelte';
 	import GoogleHealthImportCard from '#lib/components/google-health/GoogleHealthImportCard.svelte';
-	import MoonIcon from '@lucide/svelte/icons/moon';
-	import DumbbellIcon from '@lucide/svelte/icons/dumbbell';
 </script>
 
 <svelte:head>
@@ -24,19 +22,9 @@
 		{#if page.data.googleHealthEnabled}
 			<GoogleHealthImportCard />
 		{/if}
-		<ImportCard
-			kind="hevy"
-			title={m.import_hevy_title()}
-			description={m.import_hevy_desc()}
-			icon={DumbbellIcon}
-		/>
+		<ImportCard kind="hevy" title={m.import_hevy_title()} description={m.import_hevy_desc()} />
 	</div>
 	<div class="bleed">
-		<ImportCard
-			kind="sleep"
-			title={m.import_sleep_title()}
-			description={m.import_sleep_desc()}
-			icon={MoonIcon}
-		/>
+		<ImportCard kind="sleep" title={m.import_sleep_title()} description={m.import_sleep_desc()} />
 	</div>
 </div>

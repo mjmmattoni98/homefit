@@ -64,7 +64,6 @@
 	"import_importing": "Importing…",
 	"import_result": "Imported {imported}, skipped {skipped} duplicates",
 	"import_error": "Could not read the file. Make sure it is the original CSV export.",
-	"import_invalid_sleep_row": "Invalid sleep data on CSV row {row}. Check the dates, percentages (0 to 100) and nonnegative durations. No records were imported.",
 	"import_success": "Import finished",
 	"google_health_title": "Google Health",
 	"google_health_description": "Automatically import health and fitness data from your Google account.",
@@ -523,5 +522,9 @@
 	"google_health_error_limit": "Google is limiting requests.",
 	"google_health_error_timeout": "The Google request timed out.",
 	"google_health_error_network": "The connection to Google failed.",
-	"google_health_error_sync": "This metric could not be synchronized."
+	"google_health_error_sync": "This metric could not be synchronized.",
+	"import_no_valid_sleep_rows": "No valid sleep records found. Choose another export or correct the skipped rows.",
+	"import_invalid_sleep_rows_skipped": "Invalid rows skipped: {count}. Valid records can still be imported.",
+	"import_invalid_sleep_rows_list": "CSV rows: {rows}.",
+	"import_invalid_sleep_rows_hint": "Check dates, percentages (0 to 100), and nonnegative durations in these rows."
 }

@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
+import type { Logger } from 'drizzle-orm/logger';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import * as schema from '../db/schema';
@@ -11,9 +12,9 @@ export interface TestDatabase {
 }
 
 /** An in-process PostgreSQL (PGlite) with every migration applied. */
-export async function createTestDatabase(): Promise<TestDatabase> {
+export async function createTestDatabase(logger?: Logger): Promise<TestDatabase> {
 	const client = new PGlite();
-	const db = drizzle(client, { schema });
+	const db = drizzle(client, { schema, logger });
 	await migrate(db, { migrationsFolder: resolve(process.cwd(), 'drizzle') });
 	return { db: db as unknown as Database, close: () => client.close() };
 }

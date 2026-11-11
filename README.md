@@ -35,7 +35,7 @@ Then start it:
 docker compose up -d --build
 ```
 
-Open `ORIGIN`, create your account and import your data from **Import data**. Database migrations run automatically when the app starts. Once your own account exists you can set `DISABLE_SIGNUP=true` and run `docker compose up -d` again to close registration.
+Open `ORIGIN`, create your account and import your data from **Import data**. Database migrations run automatically when the app starts. Registration defaults to `SIGNUP_MODE=first-user`: it closes as soon as any account exists, with concurrent first registrations serialized in PostgreSQL. Use `open` to allow additional accounts or `closed` to disallow registration. The deprecated `DISABLE_SIGNUP=true` still overrides the mode to closed. Removing the last account reopens first-user registration.
 
 ### Deploying on a server
 
@@ -59,6 +59,40 @@ docker compose -f compose.test.yaml up -d --build
 Open http://127.0.0.1:3300 and create an account. The database is `homefit_test` on `127.0.0.1:5434` (user `homefit`, password `homefittest`). Google Health stays off. The process only starts when `POSTGRES_DB` is `homefit_test` and every Google Health credential is empty, so this stack cannot open your real database or sync your real health data.
 
 `docker compose -f compose.test.yaml down -v` deletes the disposable volume. The main stack is left as it is.
+
+### Published images and Tailscale
+
+CI publishes `linux/amd64` and `linux/arm64` images to GHCR. To use the published main image, set `HOMEFIT_IMAGE=ghcr.io/mjmmattoni98/homefit:main` in `.env`, then:
+
+```sh
+docker compose pull app
+docker compose up -d --no-build
+```
+
+Pin a version or SHA tag for reproducible deployments. Leaving `HOMEFIT_IMAGE` unset preserves local builds (`homefit:latest`).
+
+For Tailscale Serve, set `TAILSCALE_ORIGIN` to your own HTTPS origin (including any nonstandard port) and optionally `TAILSCALE_APP_PORT` (default 3080). Configure Serve to proxy that loopback port, then run `docker compose -f compose.yaml -f compose.tailscale.yaml up -d`. No tailnet hostname is built into the repository.
+
+### Scheduled backups and restore
+
+Enable with `docker compose --profile backup up -d`. The backup service takes a compressed PostgreSQL custom-format dump immediately and every `BACKUP_INTERVAL_SECONDS` (default 86400), keeping the newest `BACKUP_KEEP` dumps (default 14) in `BACKUP_DIRECTORY` (default `./backups`). The bind directory must be writable by the container. Dumps are created with owner-only permissions; use the backup container to read them. Backups contain private health data; restrict access and copy them off the host. A failed dump exits non-zero and never publishes a completed `.dump` file; temporary files are ignored and cleaned on exit. Container failures are visible in `docker compose logs backup`.
+
+Restore into a separate empty database first, using the same PostgreSQL major version. For default database/role names:
+
+```sh
+# Replace the filename with one completed .dump file.
+docker compose exec db createdb -U homefit homefit_restore
+docker compose --profile backup run --rm --no-deps --entrypoint pg_restore backup --host=db --username=homefit --dbname=homefit_restore --exit-on-error --no-owner /backups/homefit-TIMESTAMP-ID.dump
+docker compose exec db psql -U homefit -d homefit_restore -c 'SELECT count(*) FROM "user";'
+```
+
+Check accounts and representative records in the restored database. To recover the deployment, stop the app and backup services, retain the current database as a rollback, then point `POSTGRES_DB` at the verified restored database and recreate the services. Never restore over a running app's database. The same dump/restore path is exercised with synthetic data against the disposable stack by `scripts/test-backup.sh`.
+
+### CSV corrections and time zones
+
+Export files carry local times without a time zone. The first file you select saves your browser's time zone for the account, and every later import reads times in that zone, whichever browser you use. You can change it on the import page; delete the imported CSV data first, because records imported earlier keep their old times and would otherwise be added a second time.
+
+Importing an export again is safe: unchanged records are skipped and edited ones are updated. Hevy exports have no workout ID, so a workout is recognised by its start time and title. A renamed workout is still matched when the full export shows that exactly one stored title disappeared and one new title appeared at that start time. If several sessions at the same start time cannot be told apart, the import stops and asks you to delete the imported Hevy data and import the full export again. That is also how to remove duplicates left by renames made before this version.
 
 ## Google Health (optional)
 
@@ -89,6 +123,10 @@ The app builds its PostgreSQL connection string from `POSTGRES_USER`, `POSTGRES_
 | `bun run auth:schema`             | Regenerate the Better Auth tables after changing auth options   |
 
 Server tests run against an in-process PostgreSQL ([PGlite](https://pglite.dev/)), so no database is needed to run them. Component tests run in Chromium through Playwright (`bunx --bun playwright install chromium` once).
+
+### End-to-end tests
+
+`bun run test:e2e` rebuilds and starts only `compose.test.yaml`, runs Chromium smoke tests with synthetic accounts and CSVs in both themes, then the backup and restore test (`scripts/test-backup.sh`), and removes the disposable stack and volume afterwards. Install Chromium once with `bunx --bun playwright install --with-deps chromium`. `bun run test` runs unit tests and this suite.
 
 ### Project layout
 

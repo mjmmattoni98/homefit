@@ -7,7 +7,13 @@ import type { SleepNight } from '#lib/server/sleep.js';
 import type { TrainingDay, WorkoutSummary } from '#lib/server/workouts.js';
 import { dayFromNumber, dayNumber, monthStart, weekStart } from '#lib/days.js';
 import { eveningOffsetMinutes, formatEveningMinute } from '#lib/sleep-sources.js';
-import { compareMeans, mean, relativeChange } from '#lib/stats.js';
+import {
+	compareMeans,
+	falseDiscoveryRejections,
+	MIN_COMPARED_NIGHTS,
+	mean,
+	relativeChange
+} from '#lib/stats.js';
 
 /** Periods the overview can show, in days; 'all' covers every record. */
 export const PERIODS = [7, 30, 90, 365, 'all'] as const;
@@ -15,8 +21,6 @@ export type Period = (typeof PERIODS)[number];
 
 /** Shorter sleeps are naps or incomplete nights and stay out of the statistics. */
 const MIN_NIGHT_SECONDS = 3 * 3600;
-/** Training and rest nights are only compared once each has this many nights. */
-const MIN_COMPARED_NIGHTS = 10;
 /** Notes compared with the nights without them, most frequent first. */
 const MAX_NOTES = 10;
 /** Above this many weeks the chart shows months. */
@@ -302,8 +306,9 @@ export interface SleepFactor {
 	difference: number | null;
 	/** Signed towards better sleep (+ = better, - = worse) regardless of whether lower is better. */
 	improvement: number | null;
-	/** Whether the difference is larger than ordinary night-to-night variation. */
+	/** Whether the Welch comparison passes Benjamini–Hochberg at 5% for this target. */
 	clear: boolean;
+	p: number | null;
 }
 
 function targetValue(night: SleepNight, target: SleepFactorTarget): number | null {
@@ -321,7 +326,7 @@ function targetValue(night: SleepNight, target: SleepFactorTarget): number | nul
 
 /**
  * Training, load/timing/travel factors, and the most frequent notes against the chosen target
- * (`quality`, `latency`, `snore`, or `movements`), largest absolute difference first.
+ * (`quality`, `latency`, `snore`, or `movements`), ranked by corrected evidence.
  * Preserves the exact default signature `sleepFactors(nights, records)` for quality.
  */
 export function sleepFactors(
@@ -359,7 +364,8 @@ export function sleepFactors(
 			average: mean(training) ?? 0,
 			difference: trainingComparison?.difference ?? null,
 			improvement: sign(trainingComparison?.difference ?? null),
-			clear: trainingComparison?.clear ?? false
+			clear: false,
+			p: trainingComparison?.p ?? null
 		}
 	];
 
@@ -377,18 +383,17 @@ export function sleepFactors(
 				const vol = records.get(night.night)?.training?.volume ?? 0;
 				(vol >= heavyCutoff ? heavyVals : otherVals).push(val);
 			}
-			const cmp = compareMeans(heavyVals, otherVals, 3);
-			if (cmp !== null) {
-				factors.push({
-					note: '__heavy_training__',
-					kind: 'heavy_training',
-					nights: heavyVals.length,
-					average: mean(heavyVals) ?? 0,
-					difference: cmp.difference,
-					improvement: sign(cmp.difference),
-					clear: cmp.clear
-				});
-			}
+			const cmp = compareMeans(heavyVals, otherVals, MIN_COMPARED_NIGHTS);
+			factors.push({
+				note: '__heavy_training__',
+				kind: 'heavy_training',
+				nights: heavyVals.length,
+				average: mean(heavyVals) ?? 0,
+				difference: cmp?.difference ?? null,
+				improvement: sign(cmp?.difference ?? null),
+				clear: false,
+				p: cmp?.p ?? null
+			});
 		}
 	}
 
@@ -405,18 +410,17 @@ export function sleepFactors(
 		}
 	}
 	if (lateVals.length >= 3 && nonLateVals.length >= 3) {
-		const cmp = compareMeans(lateVals, nonLateVals, 3);
-		if (cmp !== null) {
-			factors.push({
-				note: '__late_workout__',
-				kind: 'late_workout',
-				nights: lateVals.length,
-				average: mean(lateVals) ?? 0,
-				difference: cmp.difference,
-				improvement: sign(cmp.difference),
-				clear: cmp.clear
-			});
-		}
+		const cmp = compareMeans(lateVals, nonLateVals, MIN_COMPARED_NIGHTS);
+		factors.push({
+			note: '__late_workout__',
+			kind: 'late_workout',
+			nights: lateVals.length,
+			average: mean(lateVals) ?? 0,
+			difference: cmp?.difference ?? null,
+			improvement: sign(cmp?.difference ?? null),
+			clear: false,
+			p: cmp?.p ?? null
+		});
 	}
 
 	// Away from home city vs home city, when city is recorded on Sleep Cycle exports.
@@ -440,18 +444,17 @@ export function sleepFactors(
 			(night.city === homeCity ? homeVals : awayVals).push(val);
 		}
 		if (awayVals.length >= 3 && homeVals.length >= 3) {
-			const cmp = compareMeans(awayVals, homeVals, 3);
-			if (cmp !== null) {
-				factors.push({
-					note: '__away_city__',
-					kind: 'away_city',
-					nights: awayVals.length,
-					average: mean(awayVals) ?? 0,
-					difference: cmp.difference,
-					improvement: sign(cmp.difference),
-					clear: cmp.clear
-				});
-			}
+			const cmp = compareMeans(awayVals, homeVals, MIN_COMPARED_NIGHTS);
+			factors.push({
+				note: '__away_city__',
+				kind: 'away_city',
+				nights: awayVals.length,
+				average: mean(awayVals) ?? 0,
+				difference: cmp?.difference ?? null,
+				improvement: sign(cmp?.difference ?? null),
+				clear: false,
+				p: cmp?.p ?? null
+			});
 		}
 	}
 
@@ -463,7 +466,7 @@ export function sleepFactors(
 		const without = measured
 			.filter(({ night }) => !night.notes.includes(note))
 			.map(({ val }) => val);
-		const comparison = compareMeans(withNote, without);
+		const comparison = compareMeans(withNote, without, MIN_COMPARED_NIGHTS);
 		factors.push({
 			note,
 			kind: 'note',
@@ -471,10 +474,18 @@ export function sleepFactors(
 			average: mean(withNote) ?? 0,
 			difference: comparison?.difference ?? null,
 			improvement: sign(comparison?.difference ?? null),
-			clear: comparison?.clear ?? false
+			clear: false,
+			p: comparison?.p ?? null
 		});
 	}
-	return factors.sort((a, b) => Math.abs(b.difference ?? 0) - Math.abs(a.difference ?? 0));
+	const compared = factors.filter((factor) => factor.p !== null);
+	const rejected = falseDiscoveryRejections(compared.map((factor) => factor.p ?? 1));
+	compared.forEach((factor, index) => {
+		factor.clear = rejected.has(index);
+	});
+	return factors.sort(
+		(a, b) => Number(b.clear) - Number(a.clear) || (a.p ?? Infinity) - (b.p ?? Infinity)
+	);
 }
 
 export interface CircadianNightPoint {
@@ -598,13 +609,13 @@ export function sleepReadiness(
 	if (restedVol.length + tiredVol.length < 3) return null;
 	const restedMean = mean(restedVol);
 	const tiredMean = mean(tiredVol);
-	const cmp = compareMeans(restedVol, tiredVol, 2);
+	const cmp = compareMeans(restedVol, tiredVol, MIN_COMPARED_NIGHTS);
 	return {
 		restedDays: restedVol.length,
 		tiredDays: tiredVol.length,
 		restedMeanVolume: restedMean,
 		tiredMeanVolume: tiredMean,
-		volumeLift: relativeChange(restedMean, tiredMean),
+		volumeLift: cmp === null ? null : relativeChange(restedMean, tiredMean),
 		volumeClear: cmp?.clear ?? false,
 		restedMeanRpe: mean(restedRpe),
 		tiredMeanRpe: mean(tiredRpe)

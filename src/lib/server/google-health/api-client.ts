@@ -46,6 +46,18 @@ export class GoogleHealthError extends Error {
 	}
 }
 
+/**
+ * What a log line may say about a failure. Provider errors carry a sanitized code; any other
+ * error is reduced to its type, because database and network messages can quote the
+ * authorization code, tokens, state or request body.
+ */
+export function failureLabel(error: unknown): string {
+	if (error instanceof GoogleHealthError) {
+		return error.status === null ? error.code : `${error.code} (HTTP ${error.status})`;
+	}
+	return error instanceof Error ? error.name : typeof error;
+}
+
 function sanitizeErrorCode(code: string, status: number | null): string {
 	if (SAFE_REMOTE_ERROR_CODE.test(code)) return code;
 	return status === null ? 'network_error' : `http_${status}`;

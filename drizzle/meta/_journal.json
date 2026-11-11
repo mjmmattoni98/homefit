@@ -29,6 +29,13 @@
       "when": 1794097448138,
       "tag": "0003_daily_goals",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794355465709,
+      "tag": "0004_careful_stature",
+      "breakpoints": true
     }
   ]
 }

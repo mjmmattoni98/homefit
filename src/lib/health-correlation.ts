@@ -1,6 +1,12 @@
 import { dayFromNumber, dayNumber } from './days';
 import { summaryNumber, type HealthMetric, type HealthSummary } from './google-health/view';
-import { compareMeans, mean, pearsonCorrelation } from './stats';
+import {
+	compareMeans,
+	MIN_COMPARED_NIGHTS,
+	MIN_CORRELATION_DAYS,
+	mean,
+	pearsonCorrelation
+} from './stats';
 
 export interface MetricPairPoint {
 	date: string;
@@ -79,12 +85,12 @@ export function compareHealthMetrics(
 
 	let highVsLowDiff: number | null = null;
 	let highVsLowClear = false;
-	if (pairs.length >= 6) {
+	if (pairs.length >= MIN_CORRELATION_DAYS) {
 		const sortedX = pairs.map((p) => p.x).sort((a, b) => a - b);
 		const medianX = sortedX[Math.floor(sortedX.length / 2)];
 		const high = pairs.filter((p) => p.x >= medianX).map((p) => p.y);
 		const low = pairs.filter((p) => p.x < medianX).map((p) => p.y);
-		const cmp = compareMeans(high, low, 2);
+		const cmp = compareMeans(high, low, MIN_COMPARED_NIGHTS);
 		if (cmp !== null) {
 			highVsLowDiff = cmp.difference;
 			highVsLowClear = cmp.clear;
@@ -106,7 +112,7 @@ export function compareHealthMetrics(
 
 	return {
 		pairedDays: pairs.length,
-		correlation: pearsonCorrelation(pairs, 5),
+		correlation: pearsonCorrelation(pairs, MIN_CORRELATION_DAYS),
 		leftMean: mean(leftValues),
 		rightMean: mean(rightValues),
 		highVsLowDiff,

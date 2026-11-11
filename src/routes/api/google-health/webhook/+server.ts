@@ -1,5 +1,6 @@
 import { googleHealthConfig } from '#lib/server/config.js';
 import { db } from '#lib/server/db/index.js';
+import { failureLabel } from '#lib/server/google-health/api-client.js';
 import {
 	MAX_WEBHOOK_SIGNATURE_LENGTH,
 	acceptDelivery,
@@ -53,7 +54,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		// Processing is idempotent, so a retried delivery safely re-enqueues its job.
 		await requestWebhookProcessing(deliveryId);
 		return new Response(null, { status: 204 });
-	} catch {
+	} catch (error) {
+		console.error(`[google-health] webhook acceptance failed: ${failureLabel(error)}`);
 		return new Response(null, { status: 503 });
 	}
 };

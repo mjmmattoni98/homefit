@@ -1,19 +1,7 @@
-# Tailscale deployment override — use together with compose.yaml:
-#
-#   docker compose -f compose.yaml -f compose.tailscale.yaml up -d
-#
-# Follows the house pattern on this machine (Paperless, Home Assistant, Bentopdf):
-# publish the app on loopback only, then let `tailscale serve` proxy it over HTTPS.
-# The URL is https://rpi-mjmmattoni.tail18b8f.ts.net:8447 (tailnet only).
-#
-# Port 3000 is unavailable: AdGuardHome listens on *:3000 on this host, hence 3080.
-#
-# server.js stamps ORIGIN onto every request, so ORIGIN must match the URL used
-# in the browser. Mirror these three values into .env (ORIGIN, APP_PORT) if you
-# ever want plain `docker compose up` without the override to work the same way.
+# Use with compose.yaml; proxy the loopback port with `tailscale serve`.
 services:
   app:
     environment:
-      ORIGIN: https://rpi-mjmmattoni.tail18b8f.ts.net:8447
+      ORIGIN: ${TAILSCALE_ORIGIN:?Set TAILSCALE_ORIGIN to your Tailscale HTTPS origin}
     ports: !override
-      - '127.0.0.1:3080:3000'
+      - '127.0.0.1:${TAILSCALE_APP_PORT:-3080}:3000'

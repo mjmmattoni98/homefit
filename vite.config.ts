@@ -16,7 +16,23 @@ export default defineConfig({
 				experimental: { async: true }
 			},
 			experimental: { remoteFunctions: true },
-			adapter: adapter()
+			adapter: adapter(),
+			csp: {
+				mode: 'nonce',
+				directives: {
+					'default-src': ['self'],
+					'script-src': ['self'],
+					// Charts, positioning controls and theme changes use dynamic inline styles.
+					'style-src': ['self', 'unsafe-inline'],
+					'img-src': ['self'],
+					'font-src': ['self'],
+					'connect-src': ['self'],
+					'object-src': ['none'],
+					'base-uri': ['self'],
+					'form-action': ['self'],
+					'frame-ancestors': ['none']
+				}
+			}
 		}),
 
 		paraglideVitePlugin({
@@ -45,9 +61,7 @@ export default defineConfig({
 						'@lucide/svelte/icons/log-out',
 						'@lucide/svelte/icons/moon',
 						'@lucide/svelte/icons/sun',
-						'@lucide/svelte/icons/user',
-						'@lucide/svelte/icons/trending-down',
-						'@lucide/svelte/icons/trending-up'
+						'@lucide/svelte/icons/user'
 					]
 				},
 				test: {

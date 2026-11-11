@@ -19,7 +19,7 @@
 		"check:watch": "bun run i18n && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test:unit": "vitest",
 		"test": "bun run test:unit --run && bun run test:e2e",
-		"test:e2e": "playwright install && playwright test",
+		"test:e2e": "sh scripts/test-e2e.sh",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"db:start": "docker compose -f compose.yaml -f compose.dev.yaml up -d db",
@@ -30,6 +30,7 @@
 		"auth:schema": "auth generate --config scripts/better-auth.config.ts --output src/lib/server/db/auth.schema.ts --yes && prettier --write src/lib/server/db/auth.schema.ts"
 	},
 	"dependencies": {
+		"@js-temporal/polyfill": "^0.5.1",
 		"better-auth": "^1.7.12",
 		"drizzle-orm": "^0.45.4",
 		"pg": "^8.23.1",

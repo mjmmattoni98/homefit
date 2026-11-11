@@ -25,7 +25,7 @@ services:
 
   app:
     build: .
-    image: homefit:latest
+    image: ${HOMEFIT_IMAGE:-homefit:latest}
     restart: unless-stopped
     depends_on:
       db:
@@ -47,6 +47,25 @@ services:
     # APP_BIND_ADDRESS=0.0.0.0 to serve other machines directly (then leave ADDRESS_HEADER unset).
     ports:
       - '${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000'
+
+  backup:
+    image: postgres:18-alpine
+    profiles: [backup]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-homefit}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:-homefit}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - ./scripts/backup.sh:/backup.sh:ro
+      - ${BACKUP_DIRECTORY:-./backups}:/backups
+    entrypoint: ['/bin/sh', '/backup.sh']
 
 volumes:
   pgdata:

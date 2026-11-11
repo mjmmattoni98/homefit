@@ -1,6 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-	webServer: { command: 'bun run build && bun run preview', port: 4173 },
-	testMatch: '**/*.e2e.{ts,js}'
+	testMatch: '**/*.e2e.ts',
+	timeout: 60_000,
+	workers: 1,
+	use: { baseURL: 'http://127.0.0.1:3300', locale: 'en-US', trace: 'retain-on-failure' }
 });

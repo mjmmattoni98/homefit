@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { dayFromNumber, dayNumber } from '#lib/days.js';
 import type { SleepNight } from '#lib/server/sleep.js';
 import type { TrainingDay, WorkoutSummary } from '#lib/server/workouts.js';
 import {
@@ -206,7 +207,7 @@ describe('rollingQuality', () => {
 });
 
 describe('sleepFactors', () => {
-	it('compares training and notes with the other nights, largest difference first', () => {
+	it('compares sufficiently sized groups and ranks uncompared factors last', () => {
 		const nights: SleepNight[] = [];
 		const days: TrainingDay[] = [];
 		for (let i = 1; i <= 24; i++) {
@@ -227,26 +228,38 @@ describe('sleepFactors', () => {
 		const factors = sleepFactors(nights, records);
 
 		expect(factors.map((factor) => factor.note).sort()).toEqual(['Alcohol', 'Coffee', null]);
-		const sizes = factors.map((factor) => Math.abs(factor.difference ?? 0));
-		expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
-		expect(factors[0]).toMatchObject({ note: 'Alcohol', nights: 4, clear: true });
-		expect(factors[0].difference).toBeLessThan(-15);
+		expect(factors.find((f) => f.note === 'Alcohol')).toMatchObject({
+			nights: 4,
+			clear: false,
+			difference: null
+		});
+		expect(factors[0].note).toBeNull();
 		const trainingFactor = factors.find((factor) => factor.note === null);
 		expect(trainingFactor?.nights).toBe(12);
 		expect(trainingFactor?.difference).not.toBeNull();
 	});
 
 	it('flips improvement sign for latency so shorter fall-asleep time is better', () => {
-		const nights = [
-			night('2026-10-01', 80, 7, ['Read'], { asleepAfterSeconds: 480 }),
-			night('2026-10-02', 80, 7, ['Read'], { asleepAfterSeconds: 540 }),
-			night('2026-10-03', 80, 7, [], { asleepAfterSeconds: 1500 }),
-			night('2026-10-04', 80, 7, [], { asleepAfterSeconds: 1620 })
-		];
+		const nights = Array.from({ length: 20 }, (_, i) =>
+			night(dayFromNumber(dayNumber('2026-10-01') + i), 80, 7, i < 10 ? ['Read'] : [], {
+				asleepAfterSeconds: (i < 10 ? 480 : 1500) + (i % 2) * 60
+			})
+		);
 		const factors = sleepFactors(nights, recordsByDay(nights, []), 'latency');
 		const readFactor = factors.find((f) => f.note === 'Read');
-		expect(readFactor?.difference).toBeLessThan(0);
-		expect(readFactor?.improvement).toBeGreaterThan(0);
+		expect(readFactor?.difference).toBeCloseTo(-17);
+		expect(readFactor?.improvement).toBeCloseTo(17);
+		expect(readFactor?.clear).toBe(true);
+	});
+
+	it('lists a note seen on too few nights without comparing it', () => {
+		const nights = Array.from({ length: 20 }, (_, i) =>
+			night(dayFromNumber(dayNumber('2026-10-01') + i), i < 9 ? 95 : 60, 7, i < 9 ? ['Read'] : [])
+		);
+		const readFactor = sleepFactors(nights, recordsByDay(nights, [])).find(
+			(f) => f.note === 'Read'
+		);
+		expect(readFactor).toMatchObject({ nights: 9, average: 95, difference: null, clear: false });
 	});
 
 	it('leaves training uncompared with fewer than ten nights on either side', () => {
@@ -353,5 +366,56 @@ describe('overview range with Google-only history', () => {
 			from: '2026-11-04',
 			to: '2026-11-10'
 		});
+	});
+});
+
+describe('sleepFactors evidence', () => {
+	const days = (count: number) =>
+		Array.from({ length: count }, (_, i) => dayFromNumber(dayNumber('2026-08-01') + i));
+
+	it('ranks by evidence, so a steady effect comes before a larger but erratic one', () => {
+		const erratic = [60, -20, 55, -15, 50, -10, 45, -5, 40, 0];
+		const nights = days(60).map((day, i) =>
+			night(
+				day,
+				30 + (i % 2) + (i < 20 ? 12 : i < 30 ? erratic[i - 20] : 0),
+				7,
+				i < 20 ? ['Steady'] : i < 30 ? ['Erratic'] : []
+			)
+		);
+		const factors = sleepFactors(nights, recordsByDay(nights, []));
+		expect(factors.map((factor) => factor.note)).toEqual(['Steady', 'Erratic', null]);
+		const [steady, erraticFactor, untrained] = factors;
+		expect(Math.abs(erraticFactor.difference ?? 0)).toBeGreaterThan(
+			Math.abs(steady.difference ?? 0)
+		);
+		expect(steady.clear).toBe(true);
+		expect(erraticFactor.clear).toBe(false);
+		expect(erraticFactor.p).toBeGreaterThan(steady.p ?? 1);
+		expect(untrained).toMatchObject({ difference: null, p: null, clear: false });
+	});
+
+	it('controls the false-discovery rate across the factors compared for one target', () => {
+		const nights = days(40).map((day, i) =>
+			night(day, 70 + ((i * 7) % 11) + (i < 12 ? 3.25 : 0), 7, [
+				...(i < 12 ? ['Marginal'] : []),
+				...(i % 3 === 0 ? ['Unrelated'] : [])
+			])
+		);
+		const marginal = sleepFactors(nights, recordsByDay(nights, [])).find(
+			(factor) => factor.note === 'Marginal'
+		);
+		// On its own this difference would pass at 5%; as one of two comparisons it must not.
+		expect(marginal?.p).toBeGreaterThan(0.025);
+		expect(marginal?.p).toBeLessThan(0.05);
+		expect(marginal?.clear).toBe(false);
+
+		const alone = nights.map((entry) => ({
+			...entry,
+			notes: entry.notes.filter((note) => note === 'Marginal')
+		}));
+		expect(
+			sleepFactors(alone, recordsByDay(alone, [])).find((factor) => factor.note === 'Marginal')
+		).toMatchObject({ clear: true });
 	});
 });

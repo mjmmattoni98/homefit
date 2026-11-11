@@ -39,6 +39,14 @@ const ownerId = () =>
 // CSV imports
 // ---------------------------------------------------------------------------
 
+export const csvSettings = pgTable('csv_settings', {
+	userId: ownerId().primaryKey(),
+	timeZone: text('time_zone').notNull()
+});
+
+// The singleton row serializes first-user registration across processes.
+export const signupGate = pgTable('signup_gate', { id: integer('id').primaryKey() });
+
 export const sleepRecord = pgTable(
 	'sleep_record',
 	{

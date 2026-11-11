@@ -1,3 +1,5 @@
+import { Temporal } from '@js-temporal/polyfill';
+
 /**
  * Minimal RFC-4180-style parser for delimited text (CSV/semicolon-CSV).
  * Handles quoted fields, escaped quotes ("") and CRLF line endings.
@@ -74,28 +76,15 @@ export function toPercent(value: string | undefined): number | undefined {
 	return toNumber(value.replace('%', ''));
 }
 
-/** Parses "2025-05-11 23:34:36" (local time) into epoch ms. */
-export function toLocalTimestamp(value: string | undefined): number | undefined {
-	if (value == null) return undefined;
-	const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim());
-	if (!match) return undefined;
-	const [, y, mo, d, h, mi, s] = match;
-	const date = new Date(
-		Number(y),
-		Number(mo) - 1,
-		Number(d),
-		Number(h),
-		Number(mi),
-		Number(s ?? '0')
-	);
-	const time = date.getTime();
-	return Number.isFinite(time) &&
-		date.getFullYear() === Number(y) &&
-		date.getMonth() === Number(mo) - 1 &&
-		date.getDate() === Number(d) &&
-		date.getHours() === Number(h) &&
-		date.getMinutes() === Number(mi) &&
-		date.getSeconds() === Number(s ?? '0')
-		? time
-		: undefined;
+/** Named-zone wall times: choose the earlier overlap instant and shift gaps forward. */
+export function toLocalTimestamp(value: string | undefined, timeZone = 'UTC'): number | undefined {
+	if (!value || !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/.test(value.trim()))
+		return undefined;
+	try {
+		return Temporal.PlainDateTime.from(value.trim().replace(' ', 'T'), {
+			overflow: 'reject'
+		}).toZonedDateTime(timeZone, { disambiguation: 'compatible' }).epochMilliseconds;
+	} catch {
+		return undefined;
+	}
 }

@@ -14,9 +14,9 @@ describe('compareMeans', () => {
 		const similar = [62, 88, 71, 84, 66, 79, 76, 70];
 		const higher = [88, 92, 90, 91, 89, 93, 90, 92];
 
-		expect(compareMeans(noisy, similar)).toEqual({ difference: 0.125, clear: false });
-		expect(compareMeans(higher, noisy)).toMatchObject({ clear: true });
-		expect(compareMeans(noisy, higher)?.difference).toBeLessThan(0);
+		expect(compareMeans(noisy, similar, 2)).toMatchObject({ difference: 0.125, clear: false });
+		expect(compareMeans(higher, noisy, 2)).toMatchObject({ clear: true });
+		expect(compareMeans(noisy, higher, 2)?.difference).toBeLessThan(0);
 	});
 
 	it('needs enough values in both samples', () => {

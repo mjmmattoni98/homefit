@@ -1,10 +1,20 @@
 <script lang="ts">
+	import { isHttpError } from '@sveltejs/kit';
 	import { refreshAll } from '$app/navigation';
-	import { importSleepBatch, importWorkoutBatch } from '#lib/remote/imports.remote.js';
+	import {
+		deleteCsvData,
+		getImportTimeZone,
+		importSleepBatch,
+		importWorkoutBatch
+	} from '#lib/remote/imports.remote.js';
 	import * as m from '#lib/paraglide/messages.js';
+	import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
+	import * as Field from '#lib/components/ui/field/index.js';
+	import { Input } from '#lib/components/ui/input/index.js';
 	import { Progress } from '#lib/components/ui/progress/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
+	import { CSV_DELETE_CONFIRMATION } from '#lib/csv/confirmation.js';
 	import { parseSleepCsv, type ParsedSleepRecord } from '#lib/csv/sleep.js';
 	import { parseHevyCsv, type ParsedWorkout } from '#lib/csv/hevy.js';
 	import { cn } from '#lib/utils.js';
@@ -31,6 +41,8 @@
 	let parseError = $state<string | null>(null);
 	let invalidRows = $state<number[]>([]);
 	let importing = $state(false);
+	let parsing = $state(false);
+	let parsedZone = $state('UTC');
 	// Records sent so far while the file is imported in batches.
 	let sent = $state(0);
 	let result = $state<string | null>(null);
@@ -42,6 +54,7 @@
 	async function onFileChange(event: Event) {
 		const file = (event.currentTarget as HTMLInputElement).files?.[0];
 		if (!file) return;
+		parsing = true;
 		fileName = file.name;
 		parseError = null;
 		invalidRows = [];
@@ -50,54 +63,99 @@
 		hevyWorkouts = null;
 		try {
 			const text = await file.text();
+			// Export times are read in the zone saved for this account; the first file saves it.
+			const timeZone = await getImportTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
+			parsedZone = timeZone;
 			if (kind === 'sleep') {
-				const parsed = parseSleepCsv(text);
+				const parsed = parseSleepCsv(text, timeZone);
 				sleepRecords = parsed.records;
 				invalidRows = parsed.invalidRows;
 				if (sleepRecords.length === 0) {
 					parseError = m.import_no_valid_sleep_rows();
 				}
 			} else {
-				hevyWorkouts = parseHevyCsv(text);
+				hevyWorkouts = parseHevyCsv(text, timeZone);
 				if (hevyWorkouts.length === 0) throw new Error('No workouts found');
 			}
 		} catch {
 			sleepRecords = null;
 			hevyWorkouts = null;
 			parseError = m.import_error();
+		} finally {
+			parsing = false;
+		}
+	}
+
+	let deleteOpen = $state(false);
+	let deleting = $state(false);
+	let confirmation = $state('');
+	const deletePhrase = $derived(CSV_DELETE_CONFIRMATION[kind]);
+	function closeDeleteDialog() {
+		deleteOpen = false;
+		confirmation = '';
+	}
+	async function removeData() {
+		if (confirmation !== deletePhrase || deleting || importing) return;
+		deleting = true;
+		try {
+			await deleteCsvData({ source: kind, confirmation });
+			deleteOpen = false;
+			confirmation = '';
+			result = null;
+			await refreshAll();
+		} catch {
+			toast.error(m.import_delete_error());
+		} finally {
+			deleting = false;
 		}
 	}
 
 	async function doImport() {
+		const sleep = sleepRecords;
+		const workouts = hevyWorkouts;
+		const timeZone = parsedZone;
+		const manifest = workouts?.map(({ startTime, endTime, title }) => ({
+			startTime,
+			endTime,
+			title
+		}));
 		importing = true;
 		sent = 0;
 		result = null;
 		try {
 			let imported = 0;
 			let skipped = 0;
-			if (kind === 'sleep' && sleepRecords) {
-				for (let i = 0; i < sleepRecords.length; i += SLEEP_BATCH) {
+			let updated = 0;
+			if (kind === 'sleep' && sleep) {
+				for (let i = 0; i < sleep.length; i += SLEEP_BATCH) {
 					const res = await importSleepBatch({
-						records: sleepRecords.slice(i, i + SLEEP_BATCH)
+						timeZone,
+						records: sleep.slice(i, i + SLEEP_BATCH)
 					});
 					imported += res.imported;
 					skipped += res.skipped;
-					sent = Math.min(i + SLEEP_BATCH, sleepRecords.length);
+					updated += res.updated;
+					sent = Math.min(i + SLEEP_BATCH, sleep.length);
 				}
-			} else if (kind === 'hevy' && hevyWorkouts) {
-				for (let i = 0; i < hevyWorkouts.length; i += HEVY_BATCH) {
+			} else if (kind === 'hevy' && workouts) {
+				for (let i = 0; i < workouts.length; i += HEVY_BATCH) {
 					const res = await importWorkoutBatch({
-						workouts: hevyWorkouts.slice(i, i + HEVY_BATCH)
+						timeZone,
+						workouts: workouts.slice(i, i + HEVY_BATCH),
+						manifest: manifest ?? []
 					});
 					imported += res.imported;
 					skipped += res.skipped;
-					sent = Math.min(i + HEVY_BATCH, hevyWorkouts.length);
+					updated += res.updated;
+					sent = Math.min(i + HEVY_BATCH, workouts.length);
 				}
 			}
-			result = m.import_result({ imported, skipped });
+			result = m.import_result({ imported, updated, skipped });
 			toast.success(m.import_success());
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : m.import_error());
+			const message =
+				isHttpError(error) && error.status < 500 ? error.body.message : m.import_failed();
+			toast.error(sent > 0 ? `${message} ${m.import_partial_saved()}` : message);
 		} finally {
 			importing = false;
 			// Written batches change the dashboard and exercise views, even if a later one failed.
@@ -120,6 +178,18 @@
 			<p class={cn('mt-1.5 max-w-[48ch] text-sm', night ? 'text-moon-2' : 'text-ink-3')}>
 				{description}
 			</p>
+			<Button
+				variant="link"
+				class={cn(
+					'mt-4 h-auto p-0 text-sm',
+					night ? 'text-moon-2 hover:text-moon' : 'text-ink-3 hover:text-ink'
+				)}
+				disabled={importing || parsing || deleting}
+				onclick={() => {
+					confirmation = '';
+					deleteOpen = true;
+				}}>{m.import_delete()}</Button
+			>
 		</div>
 
 		<div class="flex min-w-0 flex-col gap-2.5">
@@ -138,14 +208,14 @@
 						type="file"
 						class="sr-only"
 						accept=".csv,text/csv,text/plain"
-						disabled={importing}
+						disabled={importing || parsing || deleting}
 						aria-label={title}
 						onchange={onFileChange}
 					/>
 					{m.import_select_file()}
 				</label>
 				<Button
-					disabled={parsedCount === 0 || importing}
+					disabled={parsedCount === 0 || importing || deleting}
 					onclick={doImport}
 					class={cn(night && 'bg-moon text-night hover:bg-moon/90')}
 				>
@@ -227,3 +297,41 @@
 		</div>
 	</div>
 </div>
+
+<AlertDialog.Root bind:open={deleteOpen}>
+	<AlertDialog.Content>
+		<AlertDialog.Header>
+			<AlertDialog.Title>{m.import_delete_title({ source: title })}</AlertDialog.Title>
+			<AlertDialog.Description>{m.import_delete_description()}</AlertDialog.Description>
+		</AlertDialog.Header>
+		<Field.FieldGroup>
+			<Field.Field>
+				<Field.FieldLabel for="{kind}-delete-confirmation"
+					>{m.google_health_delete_confirmation_label()}</Field.FieldLabel
+				>
+				<Input
+					id="{kind}-delete-confirmation"
+					bind:value={confirmation}
+					autocomplete="off"
+					aria-describedby="{kind}-delete-confirmation-hint"
+				/>
+				<Field.FieldDescription id="{kind}-delete-confirmation-hint"
+					>{m.import_delete_confirmation({ phrase: deletePhrase })}</Field.FieldDescription
+				>
+			</Field.Field>
+		</Field.FieldGroup>
+		<AlertDialog.Footer>
+			<AlertDialog.Cancel disabled={deleting} onclick={closeDeleteDialog}
+				>{m.google_health_cancel()}</AlertDialog.Cancel
+			>
+			<AlertDialog.Action
+				variant="destructive"
+				disabled={deleting || confirmation !== deletePhrase}
+				onclick={removeData}
+			>
+				{#if deleting}<Spinner data-icon="inline-start" stroke="currentColor" />{/if}
+				{m.import_delete()}</AlertDialog.Action
+			>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>

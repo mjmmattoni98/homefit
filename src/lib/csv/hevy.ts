@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 import { workoutSchema, type ParsedWorkout } from './hevy-schema';
-import { parseDelimited, toNumber } from './parse';
+import { parseDelimited, toLocalTimestamp, toNumber } from './parse';
 
 export type { ParsedSet, ParsedWorkout } from './hevy-schema';
 
@@ -36,7 +36,7 @@ const MONTH_FIRST = new RegExp(
 );
 
 /** Parses a Hevy timestamp (Spanish or English month, 12- or 24-hour clock) into epoch ms. */
-function toHevyTimestamp(value: string | undefined): number | undefined {
+function toHevyTimestamp(value: string | undefined, timeZone: string): number | undefined {
 	if (value == null) return undefined;
 	const text = value.trim();
 	const groups = (DAY_FIRST.exec(text) ?? MONTH_FIRST.exec(text))?.groups;
@@ -48,22 +48,11 @@ function toHevyTimestamp(value: string | undefined): number | undefined {
 		if (hour < 1 || hour > 12) return undefined;
 		hour = (hour % 12) + (groups.meridiem.toLowerCase() === 'p' ? 12 : 0);
 	}
-	const date = new Date(
-		Number(groups.year),
-		month,
-		Number(groups.day),
-		hour,
-		Number(groups.minute)
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return toLocalTimestamp(
+		`${groups.year}-${pad(month + 1)}-${pad(Number(groups.day))}T${pad(hour)}:${groups.minute}`,
+		timeZone
 	);
-	const time = date.getTime();
-	return Number.isFinite(time) &&
-		date.getFullYear() === Number(groups.year) &&
-		date.getMonth() === month &&
-		date.getDate() === Number(groups.day) &&
-		date.getHours() === hour &&
-		date.getMinutes() === Number(groups.minute)
-		? time
-		: undefined;
 }
 
 function emptyToUndefined(value: string | undefined): string | undefined {
@@ -75,7 +64,7 @@ function emptyToUndefined(value: string | undefined): string | undefined {
  * Parses a Hevy CSV export (comma separated, quoted, first row headers) and
  * groups the set rows into workouts keyed by (title, start_time, end_time).
  */
-export function parseHevyCsv(text: string): ParsedWorkout[] {
+export function parseHevyCsv(text: string, timeZone = 'UTC'): ParsedWorkout[] {
 	const rows = parseDelimited(text, ',');
 	if (rows.length < 2) return [];
 
@@ -111,8 +100,8 @@ export function parseHevyCsv(text: string): ParsedWorkout[] {
 			if (value === undefined && raw && raw !== '-' && raw !== '—') throw invalid();
 			return value;
 		};
-		const startTime = toHevyTimestamp(row[cStart]);
-		const endTime = toHevyTimestamp(row[cEnd]);
+		const startTime = toHevyTimestamp(row[cStart], timeZone);
+		const endTime = toHevyTimestamp(row[cEnd], timeZone);
 		const title = row[cTitle]?.trim();
 		if (startTime == null || endTime == null || !title) throw invalid();
 

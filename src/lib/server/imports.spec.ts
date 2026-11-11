@@ -25,9 +25,10 @@ import {
 } from './workouts';
 
 let database: TestDatabase;
+const statements: string[] = [];
 
 beforeAll(async () => {
-	database = await createTestDatabase();
+	database = await createTestDatabase({ logQuery: (query) => statements.push(query) });
 });
 
 afterAll(async () => {
@@ -74,13 +75,15 @@ describe('sleep imports', () => {
 				night(second),
 				night(second)
 			])
-		).toEqual({ imported: 2, skipped: 1 });
+		).toEqual({ imported: 2, updated: 0, skipped: 1 });
 		expect(await importSleepRecords(db, owner, [night(first, { sleepQuality: 10 })])).toEqual({
 			imported: 0,
-			skipped: 1
+			updated: 1,
+			skipped: 0
 		});
 		expect(await importSleepRecords(db, other, [night(first)])).toEqual({
 			imported: 1,
+			updated: 0,
 			skipped: 0
 		});
 
@@ -90,14 +93,14 @@ describe('sleep imports', () => {
 			night: '2026-10-10',
 			wentToBed: first - 8 * 3600_000,
 			wokeUp: first,
-			sleepQuality: 80,
+			sleepQuality: 10,
 			timeInBedSeconds: 8 * 3600,
 			timeAsleepSeconds: 7 * 3600,
 			asleepAfterSeconds: 600,
-			regularity: 88,
+			regularity: undefined,
 			snoreTimeSeconds: 0,
-			movementsPerHour: 12,
-			city: 'Madrid',
+			movementsPerHour: undefined,
+			city: undefined,
 			notes: ['Coffee']
 		});
 
@@ -260,11 +263,13 @@ describe('workout imports', () => {
 
 		expect(await importWorkouts(db, owner, [pushDay])).toEqual({
 			imported: 1,
+			updated: 0,
 			skipped: 0,
 			setsImported: 3
 		});
 		expect(await importWorkouts(db, owner, [pushDay])).toEqual({
 			imported: 0,
+			updated: 0,
 			skipped: 1,
 			setsImported: 0
 		});
@@ -469,5 +474,270 @@ describe('workout imports', () => {
 		await removeAllWorkouts(db, owner);
 		expect(await listWorkouts(db, owner, 10)).toEqual([]);
 		expect(await exerciseSessions(db, owner, 'Bench Press')).toEqual([]);
+	});
+});
+
+describe('CSV corrections', () => {
+	it('updates workouts and replaces their sets atomically, then skips identical content', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		await importWorkouts(db, owner, [pushDay]);
+		const [before] = await listWorkouts(db, owner, 10);
+		const edited = {
+			...pushDay,
+			endTime: pushDay.endTime + 60000,
+			description: 'Corrected',
+			sets: [{ ...pushDay.sets[0], weightKg: 75 }]
+		};
+		expect(await importWorkouts(db, owner, [edited])).toMatchObject({
+			imported: 0,
+			updated: 1,
+			skipped: 0,
+			setsImported: 1
+		});
+		const [after] = await listWorkouts(db, owner, 10);
+		expect(after).toMatchObject({
+			id: before.id,
+			description: 'Corrected',
+			setsCount: 1,
+			volume: 600
+		});
+		expect(await importWorkouts(db, owner, [edited])).toMatchObject({
+			imported: 0,
+			updated: 0,
+			skipped: 1
+		});
+		await expect(
+			importWorkouts(db, owner, [{ ...edited, sets: [{ ...edited.sets[0], setIndex: 0.5 }] }])
+		).rejects.toThrow();
+		expect(await listWorkouts(db, owner, 10)).toEqual([after]);
+	});
+	it('renames and edits a workout in one export, keeping its ID and replacing its sets', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		await importWorkouts(db, owner, [pushDay]);
+		const [before] = await listWorkouts(db, owner, 10);
+		const edited = {
+			...pushDay,
+			title: 'Renamed',
+			endTime: pushDay.endTime + 60000,
+			description: 'Edited too',
+			sets: [{ ...pushDay.sets[0], weightKg: 75 }]
+		};
+		expect(await importWorkouts(db, owner, [edited])).toEqual({
+			imported: 0,
+			updated: 1,
+			skipped: 0,
+			setsImported: 1
+		});
+		expect(await listWorkouts(db, owner, 10)).toEqual([
+			expect.objectContaining({
+				id: before.id,
+				title: 'Renamed',
+				endTime: edited.endTime,
+				description: 'Edited too',
+				setsCount: 1,
+				volume: 600
+			})
+		]);
+	});
+
+	it.each([false, true])(
+		'replaces only the disappearing title, across batches: %s',
+		async (split) => {
+			const { db } = database;
+			const owner = await createUser(db);
+			const a = { ...pushDay, title: 'A' };
+			const b = { ...pushDay, title: 'B' };
+			const c = { ...pushDay, title: 'C', sets: [{ ...pushDay.sets[0], weightKg: 75 }] };
+			await importWorkouts(db, owner, [a, b]);
+			const before = await listWorkouts(db, owner, 10);
+			const manifest = [b, c];
+			if (split) {
+				await importWorkouts(db, owner, [c], manifest);
+				await importWorkouts(db, owner, [b], manifest);
+			} else {
+				expect(await importWorkouts(db, owner, manifest)).toMatchObject({ updated: 1, skipped: 1 });
+			}
+			const after = await listWorkouts(db, owner, 10);
+			expect(after).toHaveLength(2);
+			expect(after.find((row) => row.title === 'B')).toEqual(
+				before.find((row) => row.title === 'B')
+			);
+			expect(after.find((row) => row.title === 'C')).toMatchObject({
+				id: before.find((row) => row.title === 'A')?.id,
+				volume: 600
+			});
+		}
+	);
+
+	it.each([false, true])(
+		'rejects two possible new titles without any writes, across batches: %s',
+		async (split) => {
+			const { db } = database;
+			const owner = await createUser(db);
+			await importWorkouts(db, owner, [{ ...pushDay, title: 'A' }]);
+			const before = await listWorkouts(db, owner, 10);
+			const manifest = [
+				{ ...pushDay, title: 'B' },
+				{ ...pushDay, title: 'C' }
+			];
+			const batches = split ? manifest.map((row) => [row]) : [manifest];
+			for (const batch of batches) {
+				await expect(importWorkouts(db, owner, batch, manifest)).rejects.toThrow('Ambiguous');
+				expect(await listWorkouts(db, owner, 10)).toEqual(before);
+			}
+		}
+	);
+
+	it('leaves historical duplicates alone when the stored title matches', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const a = { ...pushDay, title: 'A' };
+		await importWorkouts(db, owner, [a, { ...pushDay, title: 'A2' }]);
+		const before = await listWorkouts(db, owner, 10);
+		expect(await importWorkouts(db, owner, [a])).toMatchObject({ skipped: 1 });
+		expect(await listWorkouts(db, owner, 10)).toEqual(before);
+	});
+
+	it('never matches or renames another user’s workout at the same instant', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const other = await createUser(db);
+		await importWorkouts(db, other, [pushDay]);
+		const before = await listWorkouts(db, other, 10);
+		expect(
+			await importWorkouts(db, owner, [{ ...pushDay, title: 'Different owner' }])
+		).toMatchObject({ imported: 1, updated: 0 });
+		expect(await listWorkouts(db, other, 10)).toEqual(before);
+	});
+
+	it('rejects manifest identities with different end times before writing any batch rows', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		await expect(
+			importWorkouts(
+				db,
+				owner,
+				[pushDay],
+				[pushDay, { ...pushDay, endTime: pushDay.endTime + 60000 }]
+			)
+		).rejects.toThrow('Ambiguous');
+		expect(await listWorkouts(db, owner, 10)).toEqual([]);
+	});
+
+	it('preserves counts and the final correction for repeated identities within one batch', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const original = night(pushDay.endTime);
+		const edited = { ...original, sleepQuality: 50 };
+		expect(await importSleepRecords(db, owner, [original, edited, edited])).toEqual({
+			imported: 1,
+			updated: 1,
+			skipped: 1
+		});
+		expect(await listNights(db, owner, 'UTC')).toEqual([
+			expect.objectContaining({ sleepQuality: 50 })
+		]);
+		const correction = { ...pushDay, sets: [{ ...pushDay.sets[0], weightKg: 75 }] };
+		expect(await importWorkouts(db, owner, [pushDay, correction, correction])).toEqual({
+			imported: 1,
+			updated: 1,
+			skipped: 1,
+			setsImported: 4
+		});
+		expect(await listWorkouts(db, owner, 10)).toEqual([
+			expect.objectContaining({ volume: 600, setsCount: 1 })
+		]);
+	});
+
+	it('chunks large set inserts and still replaces all sets in one transaction', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const sets = Array.from({ length: 2001 }, (_, i) => ({ ...pushDay.sets[0], setIndex: i }));
+		statements.length = 0;
+		expect(await importWorkouts(db, owner, [{ ...pushDay, sets }])).toMatchObject({
+			imported: 1,
+			setsImported: 2001
+		});
+		expect(statements.filter((q) => q.startsWith('insert into "workout_set"'))).toHaveLength(2);
+		const [before] = await listWorkouts(db, owner, 10);
+		expect(before).toMatchObject({ setsCount: 2001, volume: 2001 * 480 });
+		await expect(
+			importWorkouts(db, owner, [
+				{ ...pushDay, title: 'Renamed', sets: [...sets, { ...sets[0], setIndex: 0.5 }] }
+			])
+		).rejects.toThrow();
+		expect(await listWorkouts(db, owner, 10)).toEqual([before]);
+	});
+
+	it('loads unchanged batches with one read per data table and no writes', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const nights = Array.from({ length: 200 }, (_, i) => night(pushDay.endTime + i * 86400000));
+		const workouts = Array.from({ length: 30 }, (_, i) => ({
+			...pushDay,
+			startTime: pushDay.startTime + i * 86400000,
+			endTime: pushDay.endTime + i * 86400000
+		}));
+		statements.length = 0;
+		await importSleepRecords(db, owner, nights);
+		expect(statements.filter((q) => q.startsWith('insert into "sleep_record"'))).toHaveLength(1);
+		statements.length = 0;
+		expect(await importSleepRecords(db, owner, nights)).toEqual({
+			imported: 0,
+			updated: 0,
+			skipped: 200
+		});
+		expect(statements.filter((q) => q.startsWith('select'))).toHaveLength(2); // user lock + nights
+		expect(statements.filter((q) => /^(insert|update|delete)/.test(q))).toEqual([]);
+		statements.length = 0;
+		await importWorkouts(db, owner, workouts);
+		expect(statements.filter((q) => q.startsWith('insert into "workout"'))).toHaveLength(1);
+		expect(statements.filter((q) => q.startsWith('insert into "workout_set"'))).toHaveLength(1);
+		statements.length = 0;
+		expect(await importWorkouts(db, owner, workouts)).toMatchObject({
+			imported: 0,
+			updated: 0,
+			skipped: 30
+		});
+		expect(statements.filter((q) => q.startsWith('select'))).toHaveLength(3); // user lock + workouts + sets
+		expect(statements.filter((q) => /^(insert|update|delete)/.test(q))).toEqual([]);
+	});
+	it('uses the complete manifest across batches to preserve distinct simultaneous sessions', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const other = { ...pushDay, title: 'Another session', sets: [{ ...pushDay.sets[0], reps: 3 }] };
+		const manifest = [pushDay, other];
+		await importWorkouts(db, owner, [pushDay], manifest);
+		await importWorkouts(db, owner, [other], manifest);
+		expect(await listWorkouts(db, owner, 10)).toHaveLength(2);
+		expect(await importWorkouts(db, owner, [other], manifest)).toMatchObject({ skipped: 1 });
+		await expect(
+			importWorkouts(db, owner, [{ ...pushDay, title: 'Unidentified' }])
+		).rejects.toThrow('Ambiguous');
+		expect(await listWorkouts(db, owner, 10)).toHaveLength(2);
+	});
+	it('updates every sleep field, including clearing omitted optional values', async () => {
+		const { db } = database;
+		const owner = await createUser(db);
+		const original = night(Date.UTC(2026, 9, 1, 8), { city: 'Synthetic City' });
+		await importSleepRecords(db, owner, [original]);
+		const edited = { ...original, city: undefined, notes: ['Changed'], sleepQuality: 55 };
+		expect(await importSleepRecords(db, owner, [edited])).toEqual({
+			imported: 0,
+			updated: 1,
+			skipped: 0
+		});
+		expect(await importSleepRecords(db, owner, [edited])).toEqual({
+			imported: 0,
+			updated: 0,
+			skipped: 1
+		});
+		expect((await listNights(db, owner, 'UTC'))[0]).toMatchObject({
+			city: undefined,
+			sleepQuality: 55,
+			notes: ['Changed']
+		});
 	});
 });

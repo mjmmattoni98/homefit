@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # adapter-bun requires Bun 1.4 or newer, both to build and to serve.
-FROM oven/bun:1-alpine AS base
+FROM --platform=$BUILDPLATFORM oven/bun:1-alpine AS base
 WORKDIR /app
 
 FROM base AS deps
@@ -13,7 +13,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN bun run build
 
-FROM base AS production-deps
+# Bun retains optional tooling peers (including native rolldown/lightningcss binaries).
+# Install this tree for the target architecture, independently of the JS build.
+FROM oven/bun:1-alpine AS production-deps
+WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production --ignore-scripts
 

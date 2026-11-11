@@ -38,7 +38,7 @@ function emptyToUndefined(value: string | undefined): string | undefined {
  * Parses a Sleep Cycle CSV export (semicolon separated, first row headers).
  * Keeps valid records and reports invalid rows so one bad night cannot block the export.
  */
-export function parseSleepCsv(text: string): SleepCsvResult {
+export function parseSleepCsv(text: string, timeZone = 'UTC'): SleepCsvResult {
 	const rows = parseDelimited(text, ';');
 	const records: ParsedSleepRecord[] = [];
 	const invalidRows: number[] = [];
@@ -57,8 +57,8 @@ export function parseSleepCsv(text: string): SleepCsvResult {
 	const at = (row: string[], i: number) => (i === -1 ? undefined : row[i]);
 
 	for (const [index, row] of rows.slice(1).entries()) {
-		const wentToBed = toLocalTimestamp(at(row, idx.wentToBed));
-		const wokeUp = toLocalTimestamp(at(row, idx.wokeUp));
+		const wentToBed = toLocalTimestamp(at(row, idx.wentToBed), timeZone);
+		const wokeUp = toLocalTimestamp(at(row, idx.wokeUp), timeZone);
 		const sleepQuality = toPercent(at(row, idx.sleepQuality));
 		if (wentToBed == null || wokeUp == null || sleepQuality == null) {
 			invalidRows.push(index + 2);

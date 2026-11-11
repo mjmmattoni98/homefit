@@ -1,6 +1,6 @@
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Database } from './db/types';
-import { workout, workoutSet } from './db/schema';
+import { user, workout, workoutSet } from './db/schema';
 
 export interface WorkoutSetInput {
 	exerciseTitle: string;
@@ -22,6 +22,8 @@ export interface WorkoutInput {
 	description?: string;
 	sets: WorkoutSetInput[];
 }
+
+export class AmbiguousWorkoutError extends Error {}
 
 export type ExerciseMode = 'weighted' | 'bodyweight' | 'cardio' | 'duration';
 
@@ -103,65 +105,180 @@ export interface WorkoutDetail {
 const WORKING_SET = sql`lower(coalesce(${workoutSet.setType}, 'normal')) <> 'warmup'`;
 const HARD_SET = sql`(${WORKING_SET} and (lower(coalesce(${workoutSet.setType}, '')) = 'failure' or coalesce(${workoutSet.rpe}, 0) >= 8))`;
 
-/**
- * Imports Hevy workouts with their sets. Workouts are deduplicated by start time and title per
- * user, so the same export can be imported repeatedly.
- */
+/** Rows per insert statement, keeping each one well under PostgreSQL's bind-parameter limit. */
 const SET_INSERT_CHUNK = 2_000;
 
-function workoutKey(startTime: number, title: string): string {
-	return `${startTime}\0${title}`;
+// Compare data rather than database IDs or CSV order; null and omitted optional fields agree.
+function canonicalSets(
+	sets: readonly { [K in keyof WorkoutSetInput]: WorkoutSetInput[K] | null }[]
+): string {
+	return JSON.stringify(
+		sets
+			.map((set) =>
+				Object.fromEntries(
+					Object.entries(set)
+						.filter(([, value]) => value != null)
+						.sort(([a], [b]) => a.localeCompare(b))
+				)
+			)
+			.map((set) => JSON.stringify(set))
+			.sort()
+	);
 }
 
+/**
+ * Imports Hevy workouts with their sets. A workout is identified by its start time and title per
+ * user, so the same export can be imported repeatedly: unchanged workouts are skipped, edited
+ * ones are updated in place, and a renamed one is matched through the complete export.
+ */
 export async function importWorkouts(
 	db: Database,
 	userId: string,
-	workouts: readonly WorkoutInput[]
-): Promise<{ imported: number; skipped: number; setsImported: number }> {
-	if (workouts.length === 0) return { imported: 0, skipped: 0, setsImported: 0 };
-	return await db.transaction(async (tx) => {
-		const pending: WorkoutInput[] = [];
-		const seen = new Set<string>();
+	workouts: readonly WorkoutInput[],
+	// Complete file identities, not just this batch, prevent a rename consuming another session.
+	manifest: readonly Pick<WorkoutInput, 'startTime' | 'endTime' | 'title'>[] = workouts
+): Promise<{ imported: number; updated: number; skipped: number; setsImported: number }> {
+	return db.transaction(async (tx) => {
+		await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
+		const result = { imported: 0, updated: 0, skipped: 0, setsImported: 0 };
+		const identities = new Map<string, number>();
+		for (const row of manifest) {
+			const key = JSON.stringify([row.startTime, row.title]);
+			const previousEnd = identities.get(key);
+			if (previousEnd !== undefined && previousEnd !== row.endTime)
+				throw new AmbiguousWorkoutError(
+					'Ambiguous Hevy sessions with the same title and start time.'
+				);
+			identities.set(key, row.endTime);
+		}
+		if (workouts.length === 0) return result;
+		const starts = [...new Set(workouts.map((input) => input.startTime))].map((t) => new Date(t));
+		const stored = await tx
+			.select()
+			.from(workout)
+			.where(and(eq(workout.userId, userId), inArray(workout.startTime, starts)));
+		const storedSets =
+			stored.length === 0
+				? []
+				: await tx
+						.select()
+						.from(workoutSet)
+						.where(
+							inArray(
+								workoutSet.workoutId,
+								stored.map((row) => row.id)
+							)
+						);
+		type Session = Pick<
+			typeof workout.$inferSelect,
+			'id' | 'title' | 'startTime' | 'endTime' | 'description'
+		>;
+		const byStart = new Map<number, Session[]>();
+		const setsByWorkout = new Map<
+			string,
+			(
+				| WorkoutSetInput
+				| Omit<typeof workoutSet.$inferSelect, 'id' | 'workoutId' | 'userId' | 'startTime'>
+			)[]
+		>();
+		for (const row of stored) {
+			const time = row.startTime.getTime();
+			const group = byStart.get(time) ?? [];
+			group.push(row);
+			byStart.set(time, group);
+		}
+		for (const {
+			id: _id,
+			workoutId,
+			userId: _userId,
+			startTime: _startTime,
+			...set
+		} of storedSets) {
+			const group = setsByWorkout.get(workoutId) ?? [];
+			group.push(set);
+			setsByWorkout.set(workoutId, group);
+		}
+		const titlesByStart = new Map<number, Set<string>>();
+		for (const row of manifest) {
+			const titles = titlesByStart.get(row.startTime) ?? new Set<string>();
+			titles.add(row.title);
+			titlesByStart.set(row.startTime, titles);
+		}
+		const newIds = new Set<string>();
+		const changed = new Map<string, Session>();
 		for (const input of workouts) {
-			const key = workoutKey(input.startTime, input.title);
-			if (seen.has(key)) continue;
-			seen.add(key);
-			pending.push(input);
+			const candidates = byStart.get(input.startTime) ?? [];
+			let existing = candidates.find((row) => row.title === input.title);
+			if (!existing) {
+				const exportTitles = titlesByStart.get(input.startTime) ?? new Set<string>();
+				const unclaimed = candidates.filter((row) => !exportTitles.has(row.title));
+				const newTitles = [...exportTitles].filter(
+					(title) => !candidates.some((row) => row.title === title)
+				);
+				// A complete export that omits a stored title at this instant means it was renamed
+				// or deleted in Hevy: replacement is correct in either case. Sessions that both
+				// still exist in the export are never merged.
+				if (unclaimed.length === 1 && newTitles.length === 1) existing = unclaimed[0];
+				else if (unclaimed.length > 0)
+					throw new AmbiguousWorkoutError(
+						'Ambiguous Hevy sessions at the same start time. Delete imported Hevy data and import the complete export.'
+					);
+			}
+			const values = {
+				title: input.title,
+				startTime: new Date(input.startTime),
+				endTime: new Date(input.endTime),
+				description: input.description ?? null
+			};
+			if (existing) {
+				if (
+					existing.title === input.title &&
+					existing.endTime.getTime() === input.endTime &&
+					existing.description === values.description &&
+					canonicalSets(setsByWorkout.get(existing.id) ?? []) === canonicalSets(input.sets)
+				) {
+					result.skipped++;
+					continue;
+				}
+				Object.assign(existing, values);
+				result.updated++;
+			} else {
+				existing = { id: crypto.randomUUID(), ...values };
+				newIds.add(existing.id);
+				candidates.push(existing);
+				byStart.set(input.startTime, candidates);
+				result.imported++;
+			}
+			changed.set(existing.id, existing);
+			setsByWorkout.set(existing.id, input.sets);
+			result.setsImported += input.sets.length;
 		}
-		const inserted = await tx
-			.insert(workout)
-			.values(
-				pending.map((input) => ({
+		const inserts = [...changed.values()].filter((row) => newIds.has(row.id));
+		for (let i = 0; i < inserts.length; i += SET_INSERT_CHUNK)
+			await tx
+				.insert(workout)
+				.values(inserts.slice(i, i + SET_INSERT_CHUNK).map((row) => ({ ...row, userId })));
+		const sets: (typeof workoutSet.$inferInsert)[] = [];
+		for (const row of changed.values()) {
+			if (!newIds.has(row.id)) {
+				await tx
+					.update(workout)
+					.set({ title: row.title, endTime: row.endTime, description: row.description })
+					.where(eq(workout.id, row.id));
+				await tx.delete(workoutSet).where(eq(workoutSet.workoutId, row.id));
+			}
+			sets.push(
+				...(setsByWorkout.get(row.id) ?? []).map((set) => ({
+					...set,
+					workoutId: row.id,
 					userId,
-					title: input.title,
-					startTime: new Date(input.startTime),
-					endTime: new Date(input.endTime),
-					description: input.description ?? null
+					startTime: row.startTime
 				}))
-			)
-			.onConflictDoNothing({ target: [workout.userId, workout.startTime, workout.title] })
-			.returning({ id: workout.id, startTime: workout.startTime, title: workout.title });
-		const createdByKey = new Map(
-			inserted.map((row) => [workoutKey(row.startTime.getTime(), row.title), row])
-		);
-		const setRows = pending.flatMap((input) => {
-			const created = createdByKey.get(workoutKey(input.startTime, input.title));
-			if (created === undefined) return [];
-			return input.sets.map((set) => ({
-				...set,
-				workoutId: created.id,
-				userId,
-				startTime: created.startTime
-			}));
-		});
-		for (let index = 0; index < setRows.length; index += SET_INSERT_CHUNK) {
-			await tx.insert(workoutSet).values(setRows.slice(index, index + SET_INSERT_CHUNK));
+			);
 		}
-		return {
-			imported: inserted.length,
-			skipped: workouts.length - inserted.length,
-			setsImported: setRows.length
-		};
+		for (let i = 0; i < sets.length; i += SET_INSERT_CHUNK)
+			await tx.insert(workoutSet).values(sets.slice(i, i + SET_INSERT_CHUNK));
+		return result;
 	});
 }
 

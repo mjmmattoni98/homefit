@@ -32,3 +32,6 @@ compose.dev.yaml
 compose.test.yaml
 *.md
 !README.md
+
+compose.tailscale.yaml
+backups

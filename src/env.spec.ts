@@ -48,3 +48,11 @@ describe('HOMEFIT_INSTANCE', () => {
 		await expect(read(instance, 'production')).rejects.toThrow(/HOMEFIT_INSTANCE/);
 	});
 });
+
+it('defaults registration to first-user and validates modes', async () => {
+	const mode = variables.SIGNUP_MODE.schema as EnvSchema;
+	expect(await read(mode, undefined)).toBe('first-user');
+	expect(await read(mode, 'open')).toBe('open');
+	expect(await read(mode, 'closed')).toBe('closed');
+	await expect(read(mode, 'unknown')).rejects.toThrow();
+});

@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import type { Database } from './db/types';
-import { healthDataPoint, sleepRecord } from './db/schema';
+import { healthDataPoint, sleepRecord, user } from './db/schema';
 
 export interface SleepRecordInput {
 	wentToBed: number;
@@ -88,29 +88,80 @@ function indexedNightBounds(timeZone: string, range: NightRange) {
 	};
 }
 
+/** Rows per insert statement, keeping each one well under PostgreSQL's bind-parameter limit. */
+const INSERT_CHUNK = 2_000;
+
 /**
- * Imports Sleep Cycle records. Nights are deduplicated by wake-up time per user, so the same
- * export can be imported repeatedly.
+ * Imports Sleep Cycle records. A night is identified by its wake-up time per user, so the same
+ * export can be imported repeatedly: unchanged nights are skipped and edited ones are updated.
  */
 export async function importSleepRecords(
 	db: Database,
 	userId: string,
 	records: readonly SleepRecordInput[]
-): Promise<{ imported: number; skipped: number }> {
-	if (records.length === 0) return { imported: 0, skipped: 0 };
-	const inserted = await db
-		.insert(sleepRecord)
-		.values(
-			records.map((record) => ({
+): Promise<{ imported: number; updated: number; skipped: number }> {
+	return db.transaction(async (tx) => {
+		await tx.select({ id: user.id }).from(user).where(eq(user.id, userId)).for('update');
+		const result = { imported: 0, updated: 0, skipped: 0 };
+		if (records.length === 0) return result;
+		const stored = await tx
+			.select()
+			.from(sleepRecord)
+			.where(
+				and(
+					eq(sleepRecord.userId, userId),
+					inArray(
+						sleepRecord.wokeUp,
+						records.map((r) => new Date(r.wokeUp))
+					)
+				)
+			);
+		type Values = Omit<typeof sleepRecord.$inferInsert, 'id' | 'createdAt'>;
+		const byWake = new Map<number, Values & { id?: string }>(
+			stored.map(({ createdAt: _createdAt, ...row }) => [row.wokeUp.getTime(), row])
+		);
+		const inserts = new Map<number, Values>();
+		const updates = new Map<string, Values>();
+		for (const record of records) {
+			const values: Values = {
 				...record,
 				userId,
 				wentToBed: new Date(record.wentToBed),
-				wokeUp: new Date(record.wokeUp)
-			}))
-		)
-		.onConflictDoNothing({ target: [sleepRecord.userId, sleepRecord.wokeUp] })
-		.returning({ id: sleepRecord.id });
-	return { imported: inserted.length, skipped: records.length - inserted.length };
+				wokeUp: new Date(record.wokeUp),
+				regularity: record.regularity ?? null,
+				steps: record.steps ?? null,
+				weatherTempC: record.weatherTempC ?? null,
+				weatherType: record.weatherType ?? null,
+				city: record.city ?? null,
+				movementsPerHour: record.movementsPerHour ?? null,
+				mood: record.mood ?? null
+			};
+			const existing = byWake.get(record.wokeUp);
+			if (existing === undefined) {
+				inserts.set(record.wokeUp, values);
+				result.imported++;
+			} else if (
+				Object.entries(values).every(
+					([key, value]) => JSON.stringify(value) === JSON.stringify(existing[key as keyof Values])
+				)
+			) {
+				result.skipped++;
+				continue;
+			} else {
+				// A night repeated in the batch corrects the row this batch is about to insert.
+				if (existing.id === undefined) inserts.set(record.wokeUp, values);
+				else updates.set(existing.id, values);
+				result.updated++;
+			}
+			byWake.set(record.wokeUp, { ...values, id: existing?.id });
+		}
+		const rows = [...inserts.values()];
+		for (let i = 0; i < rows.length; i += INSERT_CHUNK)
+			await tx.insert(sleepRecord).values(rows.slice(i, i + INSERT_CHUNK));
+		for (const [id, values] of updates)
+			await tx.update(sleepRecord).set(values).where(eq(sleepRecord.id, id));
+		return result;
+	});
 }
 
 /**

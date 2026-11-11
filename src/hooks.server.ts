@@ -1,7 +1,8 @@
+import { secureResponse } from '#lib/server/security-headers.js';
 import { sequence, type Handle, type ServerInit } from '@sveltejs/kit/hooks';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
 import { building } from '$app/env';
-import { BACKGROUND_JOBS, RUN_MIGRATIONS } from '$app/env/private';
+import { BACKGROUND_JOBS, RUN_MIGRATIONS, ORIGIN } from '$app/env/private';
 import { getTextDirection } from '#lib/paraglide/runtime.js';
 import { paraglideMiddleware } from '#lib/paraglide/server.js';
 import { auth } from '#lib/server/auth.js';
@@ -68,14 +69,7 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event, {
 		preload: (asset) => asset.type !== 'font' || asset.filename === LATIN_WIDTH_FONT
 	});
-	try {
-		response.headers.set('x-content-type-options', 'nosniff');
-		response.headers.set('referrer-policy', 'strict-origin-when-cross-origin');
-		response.headers.set('x-frame-options', 'DENY');
-	} catch {
-		// Responses created with `Response.redirect()` have immutable headers.
-	}
-	return response;
+	return secureResponse(response, ORIGIN);
 };
 
 export const handle: Handle = sequence(

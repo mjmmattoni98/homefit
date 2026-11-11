@@ -94,7 +94,7 @@ describe('compareHealthMetrics', () => {
 
 		const result = compareHealthMetrics(metric, left, metric, right, 0);
 		expect(result.pairedDays).toBe(6);
-		expect(result.correlation).toBeCloseTo(1);
-		expect(result.highVsLowDiff).toBeGreaterThan(0);
+		expect(result.correlation).toBeNull();
+		expect(result.highVsLowDiff).toBeNull();
 	});
 });

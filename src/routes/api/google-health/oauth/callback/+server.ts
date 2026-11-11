@@ -1,5 +1,6 @@
 import { googleHealthConfig } from '#lib/server/config.js';
 import { db } from '#lib/server/db/index.js';
+import { failureLabel } from '#lib/server/google-health/api-client.js';
 import { IMPORT_RETURN_PATH, completeConnection } from '#lib/server/google-health/connection.js';
 import { requestSync } from '#lib/server/jobs.js';
 import type { RequestHandler } from './$types';
@@ -50,7 +51,8 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 			console.error('[google-health] could not enqueue the initial import', error);
 		});
 		return backToImport('connected');
-	} catch {
+	} catch (error) {
+		console.error(`[google-health] OAuth callback failed: ${failureLabel(error)}`);
 		return backToImport('error');
 	}
 };

@@ -18,8 +18,8 @@ describe('parseHevyCsv', () => {
 			csv('"Pierna","17 jul 2026, 18:35","17 jul 2026, 19:37","","Squat",,"",0,"normal",100,5,,,')
 		);
 
-		expect(workout.startTime).toBe(new Date(2026, 6, 17, 18, 35).getTime());
-		expect(workout.endTime).toBe(new Date(2026, 6, 17, 19, 37).getTime());
+		expect(workout.startTime).toBe(Date.UTC(2026, 6, 17, 18, 35));
+		expect(workout.endTime).toBe(Date.UTC(2026, 6, 17, 19, 37));
 	});
 
 	it('reads month-first timestamps with a 12-hour clock', () => {
@@ -31,8 +31,8 @@ describe('parseHevyCsv', () => {
 		);
 
 		expect(workouts).toHaveLength(1);
-		expect(workouts[0].startTime).toBe(new Date(2026, 6, 17, 18, 35).getTime());
-		expect(workouts[0].endTime).toBe(new Date(2026, 6, 17, 19, 37).getTime());
+		expect(workouts[0].startTime).toBe(Date.UTC(2026, 6, 17, 18, 35));
+		expect(workouts[0].endTime).toBe(Date.UTC(2026, 6, 17, 19, 37));
 		expect(workouts[0].sets).toMatchObject([
 			{ exerciseTitle: 'Lat Pulldown (Cable)', setIndex: 0, weightKg: 55, reps: 11 },
 			{ exerciseTitle: 'Lat Pulldown (Cable)', setIndex: 1, weightKg: 55, reps: 10 }
@@ -47,7 +47,7 @@ describe('parseHevyCsv', () => {
 					'"Noon","Nov 17, 2023, 12:30 PM","Nov 17, 2023, 1:15 PM","","Curl",,"",0,"normal",10,8,,,'
 				)
 			)
-		).toEqual([new Date(2023, 10, 17, 0, 5).getTime(), new Date(2023, 10, 17, 12, 30).getTime()]);
+		).toEqual([Date.UTC(2023, 10, 17, 0, 5), Date.UTC(2023, 10, 17, 12, 30)]);
 	});
 
 	it('reads Spanish 12-hour suffixes', () => {
@@ -57,7 +57,7 @@ describe('parseHevyCsv', () => {
 					'"Noche","17 jul 2026, 6:35 p. m.","17 jul 2026, 7:37 p. m.","","Curl",,"",0,"normal",10,8,,,'
 				)
 			)
-		).toEqual([new Date(2026, 6, 17, 18, 35).getTime()]);
+		).toEqual([Date.UTC(2026, 6, 17, 18, 35)]);
 	});
 
 	it('rejects rows whose timestamps cannot be read', () => {

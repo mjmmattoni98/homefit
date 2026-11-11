@@ -1,3 +1,5 @@
+> Historical pre-migration document. Clerk/Convex instructions below are obsolete; the current app uses Better Auth and PostgreSQL. See README.md.
+
 # Google Health Automatic Import Design
 
 **Date:** 2026-08-14

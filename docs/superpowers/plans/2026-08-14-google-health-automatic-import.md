@@ -1,3 +1,5 @@
+> Historical pre-migration document. Clerk/Convex instructions below are obsolete; the current app uses Better Auth and PostgreSQL. See README.md.
+
 # Google Health Automatic Import Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

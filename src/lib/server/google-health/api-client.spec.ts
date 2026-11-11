@@ -3,6 +3,7 @@ import {
 	GoogleHealthError,
 	buildAuthorizationUrl,
 	exchangeAuthorizationCode,
+	failureLabel,
 	fetchGoogleHealthDataPage,
 	fetchHealthPage,
 	getHealthIdentity,
@@ -656,5 +657,26 @@ describe('Google Health API client', () => {
 			code: 'invalid_response',
 			message: 'Google Health request failed'
 		});
+	});
+});
+
+describe('failureLabel', () => {
+	it('names provider failures by their sanitized code and status', () => {
+		expect(failureLabel(new GoogleHealthError('invalid_grant', 400, false))).toBe(
+			'invalid_grant (HTTP 400)'
+		);
+		expect(failureLabel(new GoogleHealthError('request_timeout', null, true))).toBe(
+			'request_timeout'
+		);
+	});
+
+	it('reduces every other failure to its type, never its message', () => {
+		class QueryError extends Error {
+			override name = 'QueryError';
+		}
+		const secret = 'authorization-code-and-state';
+		expect(failureLabel(new QueryError(`Failed query, params: ${secret}`))).toBe('QueryError');
+		expect(failureLabel(new Error(secret))).toBe('Error');
+		expect(failureLabel(secret)).toBe('string');
 	});
 });

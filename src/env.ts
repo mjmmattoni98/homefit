@@ -70,9 +70,14 @@ export const variables = defineEnvVars({
 			'Secret used to sign sessions. Use at least 32 random characters, e.g. `openssl rand -base64 32`.',
 		schema: lenient ? optionalString : v.pipe(v.string(), v.minLength(32))
 	},
+	SIGNUP_MODE: {
+		description:
+			'Who may register: `first-user` (default) only while no account exists, `open` anyone, `closed` nobody.',
+		schema: v.pipe(withDefault('first-user'), v.picklist(['first-user', 'open', 'closed']))
+	},
 	DISABLE_SIGNUP: {
 		description:
-			'Set to `true` to stop new accounts from being created (existing users can still sign in).',
+			'Deprecated, use `SIGNUP_MODE=closed`. `true` closes registration whatever the mode says.',
 		schema: booleanFlag(false)
 	},
 	RUN_MIGRATIONS: {

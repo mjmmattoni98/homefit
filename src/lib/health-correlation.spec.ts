@@ -44,8 +44,8 @@ describe('compareHealthMetrics', () => {
 		);
 
 		expect(res.pairedDays).toBe(6);
-		expect(res.correlation).toBeCloseTo(1, 5);
-		expect(res.highVsLowDiff).toBeCloseTo(12, 2);
+		expect(res.correlation).toBeNull();
+		expect(res.highVsLowDiff).toBeNull();
 		expect(res.points[0].leftNorm).toBe(0);
 		expect(res.points[5].rightNorm).toBe(1);
 	});
@@ -75,6 +75,20 @@ describe('compareHealthMetrics', () => {
 		);
 
 		expect(res.pairedDays).toBe(5);
-		expect(res.correlation).toBeCloseTo(-1, 5);
+		expect(res.correlation).toBeNull();
 	});
+});
+
+it('compares twenty paired days, requiring ten values per side', () => {
+	const values = Array.from({ length: 20 }, (_, i) =>
+		summary(`2026-04-${String(i + 1).padStart(2, '0')}`, i + 1)
+	);
+	const metric = { aggregation: 'average', primaryUnit: 'ms' } as const;
+	const result = compareHealthMetrics(metric, values, metric, values);
+	expect(result.correlation).toBeCloseTo(1, 12);
+	expect(result.highVsLowDiff).toBe(10);
+	expect(result.highVsLowClear).toBe(true);
+	expect(compareHealthMetrics(metric, values.slice(1), metric, values).correlation).toBeNull();
+	const tied = values.map((s) => ({ ...s, average: s.average === 20 ? 20 : 1 }));
+	expect(compareHealthMetrics(metric, tied, metric, values).highVsLowDiff).toBeNull();
 });

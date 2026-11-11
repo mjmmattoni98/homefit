@@ -47,6 +47,7 @@ services:
       ORIGIN: http://127.0.0.1:3300
       BETTER_AUTH_SECRET: local-homefit-test-auth-secret-01
       DISABLE_SIGNUP: 'false'
+      SIGNUP_MODE: open
       RUN_MIGRATIONS: 'true'
       BACKGROUND_JOBS: 'true'
       GOOGLE_HEALTH_CLIENT_ID: ''

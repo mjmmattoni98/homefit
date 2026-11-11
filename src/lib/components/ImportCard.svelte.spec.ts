@@ -1,12 +1,17 @@
 import { page, userEvent } from 'vitest/browser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
+import { error } from '@sveltejs/kit';
+import { toast } from 'svelte-sonner';
+import { CSV_DELETE_CONFIRMATION } from '#lib/csv/confirmation.js';
 import ImportCard from './ImportCard.svelte';
 
-const mocks = vi.hoisted(() => ({ importSleepBatch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ importSleepBatch: vi.fn(), deleteCsvData: vi.fn() }));
 vi.mock('#lib/remote/imports.remote.js', () => ({
 	importSleepBatch: mocks.importSleepBatch,
-	importWorkoutBatch: vi.fn()
+	importWorkoutBatch: vi.fn(),
+	deleteCsvData: mocks.deleteCsvData,
+	getImportTimeZone: vi.fn().mockResolvedValue('UTC')
 }));
 vi.mock('$app/navigation', () => ({ refreshAll: vi.fn() }));
 vi.mock('svelte-sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -14,7 +19,7 @@ vi.mock('svelte-sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } })
 describe('Sleep Cycle import feedback', () => {
 	beforeEach(() => {
 		mocks.importSleepBatch.mockReset();
-		mocks.importSleepBatch.mockResolvedValue({ imported: 1, skipped: 1 });
+		mocks.importSleepBatch.mockResolvedValue({ imported: 1, updated: 0, skipped: 1 });
 	});
 
 	it.each(['150%;28800;25200', '80%;-3600;-7200'])(
@@ -64,6 +69,7 @@ describe('Sleep Cycle import feedback', () => {
 		await expect.element(button).toBeEnabled();
 		await button.click();
 		expect(mocks.importSleepBatch).toHaveBeenCalledExactlyOnceWith({
+			timeZone: 'UTC',
 			records: [
 				expect.objectContaining({ sleepQuality: 80, timeAsleepSeconds: 25200 }),
 				expect.objectContaining({ sleepQuality: 85, timeAsleepSeconds: 25200 })
@@ -71,7 +77,7 @@ describe('Sleep Cycle import feedback', () => {
 		});
 		await expect
 			.element(page.getByRole('status'))
-			.toHaveTextContent('Imported 1, skipped 1 duplicates');
+			.toHaveTextContent('Imported 1, updated 0, skipped 1');
 		await expect.element(page.getByText('CSV rows: 3, 5.')).toBeInTheDocument();
 	});
 
@@ -115,5 +121,81 @@ describe('Hevy import feedback', () => {
 		);
 		await expect.element(page.getByRole('alert')).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Import', exact: true })).toBeDisabled();
+	});
+});
+
+describe('Import and deletion failures', () => {
+	const csv = 'Went to bed;Woke up;Sleep quality\n2026-10-27 23:00:00;2026-10-28 07:00:00;80%';
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.importSleepBatch.mockReset();
+		mocks.deleteCsvData.mockReset();
+	});
+
+	async function importSleep(content = csv) {
+		render(ImportCard, { title: 'Sleep Cycle', description: 'CSV', kind: 'sleep' });
+		await userEvent.upload(
+			page.getByLabelText('Sleep Cycle'),
+			new File([content], 'sleep.csv', { type: 'text/csv' })
+		);
+		await page.getByRole('button', { name: 'Import', exact: true }).click();
+	}
+
+	it('shows the message chosen by the server for an HttpError', async () => {
+		mocks.importSleepBatch.mockImplementation(() => error(409, 'Select the file again.'));
+		await importSleep();
+		expect(toast.error).toHaveBeenCalledWith('Select the file again.');
+	});
+
+	it.each([new TypeError('Failed to fetch'), 'unexpected response', 500])(
+		'shows an honest generic import failure for %s',
+		async (failure) => {
+			mocks.importSleepBatch.mockImplementation(() => {
+				if (failure === 500) error(500, 'Internal details');
+				throw failure;
+			});
+			await importSleep();
+			expect(toast.error).toHaveBeenCalledWith('The import could not finish. Please try again.');
+		}
+	);
+
+	it('explains that completed batches were saved if a later batch fails', async () => {
+		mocks.importSleepBatch
+			.mockResolvedValueOnce({ imported: 200, updated: 0, skipped: 0 })
+			.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+		await importSleep(
+			csv.split('\n')[0] + '\n' + Array.from({ length: 201 }, () => csv.split('\n')[1]).join('\n')
+		);
+		expect(mocks.importSleepBatch).toHaveBeenCalledTimes(2);
+		expect(toast.error).toHaveBeenCalledWith(
+			'The import could not finish. Please try again. Records from completed batches were saved.'
+		);
+	});
+
+	it('requires the source phrase, clears it on Cancel, and reports deletion failures separately', async () => {
+		mocks.deleteCsvData.mockRejectedValue(new Error('Unavailable'));
+		render(ImportCard, { title: 'Sleep Cycle', description: 'CSV', kind: 'sleep' });
+		const trigger = page.getByRole('button', { name: 'Delete imported data', exact: true });
+		await trigger.click();
+		const dialog = page.getByRole('alertdialog');
+		const input = dialog.getByLabelText('Confirmation');
+		const action = dialog.getByRole('button', { name: 'Delete imported data', exact: true });
+		await input.fill('delete');
+		await expect.element(action).toBeDisabled();
+		await input.fill(CSV_DELETE_CONFIRMATION.sleep);
+		await expect.element(action).toBeEnabled();
+		await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+		await trigger.click();
+		await expect.element(dialog.getByLabelText('Confirmation')).toHaveValue('');
+		await dialog.getByLabelText('Confirmation').fill(CSV_DELETE_CONFIRMATION.sleep);
+		await action.click();
+		expect(mocks.deleteCsvData).toHaveBeenCalledExactlyOnceWith({
+			source: 'sleep',
+			confirmation: CSV_DELETE_CONFIRMATION.sleep
+		});
+		expect(toast.error).toHaveBeenCalledWith(
+			'The imported data could not be deleted. Please try again.'
+		);
 	});
 });
